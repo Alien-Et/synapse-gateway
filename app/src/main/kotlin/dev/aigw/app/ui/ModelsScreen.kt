@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -60,6 +62,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     val clipboard = LocalClipboardManager.current
     // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
     val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
+    val exposure = state.modelExposure
 
     // 刷新按钮旋转动效：仅在加载中才创建无限过渡，停止后不空转每帧插值
     val spinAngle = if (state.modelsLoading) {
@@ -101,6 +104,12 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             title = "模型",
             subtitle = subtitleText,
             actions = {
+                ExposureToggle(
+                    enabled = exposure.filterEnabled,
+                    onClick = {
+                        viewModel.updateModelExposure(exposure.copy(filterEnabled = !exposure.filterEnabled))
+                    },
+                )
                 Icon(
                     Icons.Filled.Refresh,
                     contentDescription = "刷新",
@@ -167,6 +176,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 // 已加载的模型按组展示
                 for ((routePrefix, models) in grouped) {
                     val title = models.firstOrNull()?.providerName ?: routePrefix
+                    val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
                     item(key = "header-$routePrefix") {
                         Row(
                             modifier = Modifier
@@ -174,10 +184,24 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 .clip(MaterialTheme.shapes.large)
                                 .background(MaterialTheme.colorScheme.surface)
                                 .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             SectionLabel(title)
+                            Box(Modifier.weight(1f))
+                            if (exposure.filterEnabled) {
+                                Text(
+                                    text = if (allExposed) "取消全选" else "全选",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clip(CircleShape)
+                                        .clickable {
+                                            viewModel.toggleGroupExposed(routePrefix, !allExposed)
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                )
+                            }
                             Box(
                                 modifier = Modifier
                                     .clip(CircleShape)
@@ -197,6 +221,9 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         ModelRow(
                             model = model,
                             testStatus = testStatus,
+                            exposureEnabled = exposure.filterEnabled,
+                            exposed = exposure.allows(model.fullId),
+                            onToggleExposed = { viewModel.toggleModelExposed(model.fullId, it) },
                             onCopy = {
                                 clipboard.setText(AnnotatedString(model.fullId))
                                 Toast.makeText(context, "已复制模型名称：${model.fullId}", Toast.LENGTH_SHORT).show()
@@ -218,11 +245,57 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 }
 
+/**
+ * 「开放名单」开关：点击切换是否只对外暴露勾选的模型。
+ *
+ * 开启时用主色胶囊 + 填充圆点区分，关闭时用描边中性样式。
+ */
+@Composable
+private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(
+                if (enabled) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surface,
+            )
+            .border(
+                width = 1.dp,
+                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                shape = CircleShape,
+            )
+            .bouncyClick(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(
+                    if (enabled) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                ),
+        )
+        Text(
+            text = if (enabled) "开放名单 开" else "开放名单",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 /** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
 @Composable
 private fun ModelRow(
     model: RoutedModel,
     testStatus: ModelTestStatus?,
+    exposureEnabled: Boolean,
+    exposed: Boolean,
+    onToggleExposed: (Boolean) -> Unit,
     onCopy: () -> Unit,
     onTest: () -> Unit,
 ) {
@@ -231,6 +304,14 @@ private fun ModelRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        // 开放名单开启时，左侧显示勾选框决定该模型是否对外暴露
+        if (exposureEnabled) {
+            Checkbox(
+                checked = exposed,
+                onCheckedChange = onToggleExposed,
+                modifier = Modifier.size(22.dp),
+            )
+        }
         // 左侧模型名与信息：点击复制模型名称
         Column(
             modifier = Modifier

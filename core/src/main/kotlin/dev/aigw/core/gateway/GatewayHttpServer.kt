@@ -80,7 +80,8 @@ class GatewayHttpServer(
 
     private fun models(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         if (!authorized(session)) return unauthorized(session)
-        return json(200, OpenAiApi.modelList(engine.models()))
+        // 只对外暴露开放名单内的模型（未启用过滤时等价于全量）
+        return json(200, OpenAiApi.modelList(engine.exposedModels()))
     }
 
     /** 聚合额度与配额查询端点：包含各供应商剩余额度及 Antigravity 的四个进度条指标。 */

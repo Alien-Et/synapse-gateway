@@ -26,6 +26,7 @@ import dev.aigw.core.gateway.CustomProviderConfig
 import dev.aigw.core.gateway.GatewayEngine
 import dev.aigw.core.gateway.GatewaySettings
 import dev.aigw.core.gateway.LoginOutcome
+import dev.aigw.core.gateway.ModelExposureSettings
 import dev.aigw.core.gateway.ModelsCatalog
 import dev.aigw.core.gateway.ProviderInfo
 import dev.aigw.core.gateway.ProviderModelsChunk
@@ -245,6 +246,8 @@ data class AppUiState(
     val storage: StorageReport? = null,
     /** 安全防护与风控设置。 */
     val security: dev.aigw.core.security.SecuritySettings = dev.aigw.core.security.SecuritySettings(),
+    /** 模型开放名单：只对外暴露勾选的模型。 */
+    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
     /** 出网取证记录列表。 */
     val evidences: List<dev.aigw.core.security.OutboundEvidence> = emptyList(),
     /** 当前生效的脱敏规则词汇数。 */
@@ -284,6 +287,7 @@ private class Snapshot(
     val security: dev.aigw.core.security.SecuritySettings,
     val evidences: List<dev.aigw.core.security.OutboundEvidence>,
     val sanitizerRulesCount: Int,
+    val modelExposure: dev.aigw.core.gateway.ModelExposureSettings,
 )
 
 class AppViewModel(
@@ -389,6 +393,7 @@ class AppViewModel(
                     security = engine.securitySettings(),
                     evidences = engine.sanitizer.evidenceList(),
                     sanitizerRulesCount = engine.sanitizer.currentRulesCount(),
+                    modelExposure = engine.modelExposureSettings(),
                 )
             }
             _state.value = _state.value.copy(
@@ -411,6 +416,7 @@ class AppViewModel(
                 security = snapshot.security,
                 evidences = snapshot.evidences,
                 sanitizerRulesCount = snapshot.sanitizerRulesCount,
+                modelExposure = snapshot.modelExposure,
             )
         }
     }
@@ -538,6 +544,34 @@ class AppViewModel(
             }
             _state.value = _state.value.copy(modelTestLatencies = updated)
         }
+    }
+
+    // ------------------------------------------------------------------ 模型开放名单
+
+    fun modelExposure(): ModelExposureSettings = engine.modelExposureSettings()
+
+    fun updateModelExposure(updated: ModelExposureSettings) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { engine.updateModelExposure(updated) }
+            _state.value = _state.value.copy(modelExposure = updated)
+        }
+    }
+
+    /** 单个模型勾选/取消勾选。 */
+    fun toggleModelExposed(fullId: String, checked: Boolean) {
+        val current = engine.modelExposureSettings()
+        val exposed = current.exposed.toMutableSet()
+        if (checked) exposed.add(fullId) else exposed.remove(fullId)
+        updateModelExposure(current.copy(exposed = exposed))
+    }
+
+    /** 按分组（routePrefix）批量勾选/取消勾选当前已加载的模型。 */
+    fun toggleGroupExposed(routePrefix: String, checked: Boolean) {
+        val current = engine.modelExposureSettings()
+        val exposed = current.exposed.toMutableSet()
+        val groupIds = _state.value.models.filter { it.routePrefix == routePrefix }.map { it.fullId }
+        if (checked) exposed.addAll(groupIds) else exposed.removeAll(groupIds.toSet())
+        updateModelExposure(current.copy(exposed = exposed))
     }
 
     fun consumeNotice() {
