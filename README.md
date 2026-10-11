@@ -15,6 +15,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 - [特性](#特性)
 - [架构总览](#架构总览)
 - [模块结构](#模块结构)
+- [构建与运行](#构建与运行)
 - [接口与鉴权](#接口与鉴权)
 - [供应商](#供应商)
 - [贡献](#贡献)
@@ -24,7 +25,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 ## 特性
 
 - **OpenAI 兼容网关**：`/v1/chat/completions` + `/v1/models`，流式 SSE / 非流式 / 多模态识图。
-- **六家供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤），以及任意自定义 OpenAI 兼容中转站。
+- **五家内置供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤），以及任意自定义 OpenAI 兼容中转站。
 - **同款模型 Failover**：首选供应商失败或无可用账号时，自动切换到拥有同款模型的其他供应商。
 - **智能路由**：`供应商/模型` 前缀路由，兼支持无前缀的模型名自动推导。
 - **国内外智能分流**：国内上游强制直连，Google 按需走代理。
@@ -61,9 +62,35 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 | 模块 | 类型 | 职责 |
 |---|---|---|
 | `:core` | 纯 JVM，无 Android 依赖 | 网关引擎、HTTP 服务、账号池、路由与 Failover、各供应商协议实现、存储抽象。可独立单测 |
+| `:cli` | 纯 JVM 命令行 | 在本机直接起网关做端到端联调，或不打开 App 也能导入账号 / 签到 / 查用量与日志 |
 | `:app` | Android 应用 | Compose UI、前台服务与保活、加密存储实现、控制中心磁贴 |
 
-供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`custom/`），互不干扰。
+供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`raccoon/`、`custom/`），互不干扰。
+
+---
+
+## 构建与运行
+
+**本地构建**（产出 debug 包，可与线上 release 包同机共存）：
+
+```sh
+sh scripts/build.sh            # 默认 :app:assembleDebug
+sh scripts/build.sh :core:test # 跑单元测试
+```
+
+- 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app.debug`，debug 签名）。
+- 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）。
+- 本地**不产 release 包**：release 仅由云端 GitHub Actions 构建并发版（`.github/workflows/android-release.yml`，手动触发）。
+
+**命令行联调**（`:cli`，无需 Android 设备）：
+
+```sh
+./gradlew :cli:run --args="serve"      # 起网关（默认端口 8790，数据目录 ~/.aigw）
+./gradlew :cli:run --args="providers"  # 列出供应商
+./gradlew :cli:run --args="accounts"   # 列出账号与状态
+```
+
+`aigw` 支持的子命令：`serve` / `providers` / `accounts` / `credits` / `checkin` / `login` / `browser-login` / `sms` / `models` / `usage` / `logs`，账号与设置存于 `--data` 指定目录。
 
 ---
 
