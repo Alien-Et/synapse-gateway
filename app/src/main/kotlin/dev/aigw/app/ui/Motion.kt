@@ -28,6 +28,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -126,6 +127,9 @@ fun Modifier.bouncyClick(
     onClick: () -> Unit,
 ): Modifier {
     var pressed by remember { mutableStateOf(false) }
+    // 手势块只在 key 变化时重启，若不缓存最新 lambda，就会一直调用首次组合时的 onClick
+    // （调用方传入的 lambda 常捕获会变的 UI 状态，会表现为「点一次后再也点不动」）。
+    val currentOnClick by rememberUpdatedState(onClick)
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.85f else 1f,
         animationSpec = spring(
@@ -145,7 +149,7 @@ fun Modifier.bouncyClick(
             val up = waitForUpOrCancellation()
             pressed = false
             if (up != null) {
-                onClick()
+                currentOnClick()
             }
         }
     }
