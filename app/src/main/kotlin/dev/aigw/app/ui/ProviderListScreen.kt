@@ -103,7 +103,8 @@ fun ProviderListScreen(
                                     color = MaterialTheme.colorScheme.tertiaryContainer,
                                     textColor = MaterialTheme.colorScheme.onTertiaryContainer,
                                 )
-                            } else {
+                            } else if (provider.accountCount > 0) {
+                                // 有账号但一个都用不了才叫「不可用」；一个账号都没添加是正常状态，不该报红
                                 AccountBadge(
                                     text = "不可用",
                                     color = MaterialTheme.colorScheme.errorContainer,

@@ -7,6 +7,7 @@ import dev.aigw.core.provider.ProviderAccount
 import java.net.InetSocketAddress
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -37,15 +38,12 @@ class RaccoonProviderTest {
     }
 
     @Test
-    fun `内置快照含上游五个真实 model id`() {
-        val ids = RaccoonProvider.FALLBACK_MODELS.map { it.id }.toSet()
-        assertEquals(
-            setOf(
-                "raccoon-8c4485", "raccoon-19b265", "raccoon-405a1c",
-                "raccoon-chat-ml-5-5", "sn-sensenova-6-8-flash-lite",
-            ),
-            ids,
-        )
+    fun `没有账号时不报错也不算失败`() {
+        // 登录前本就不该有模型，这是正常状态：空列表 + 无 error，模型页不该顶红字
+        val view = RaccoonProvider().listModels(null)
+        assertTrue(view.models.isEmpty(), "无账号不该列出模型")
+        assertFalse(view.fromFallback, "无账号是正常状态，不是回退")
+        assertEquals("", view.error, "无账号不该报错")
     }
 
     @Test

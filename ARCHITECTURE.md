@@ -119,7 +119,7 @@
 | `modelsLoading` | 是否有一轮流式加载在进行 |
 | `modelLoadStates: Map<String, ModelLoadState>` | 每个供应商的进度：`Loading` / `Done(count)` / `Failed(reason)`；发起时先置全部参与供应商为 Loading |
 | `models` | 各供应商就绪即增量合并（同供应商旧条目被替换）；一轮结束时整体覆盖为最终聚合 |
-| `modelsError` | 整体异常 + 各失败供应商汇总（`供应商：原因`）；带内置快照的回退不算失败 |
+| `modelsError` | 整体异常 + 各失败供应商汇总（`供应商：原因`）；无账号时不报错，拉取失败即算失败 |
 
 可做的动画：按 `modelLoadStates` 画每供应商骨架屏、`Done` 后逐组点亮、`Failed` 组内错误态；
 `ModelsScreen` 现在的空态「还没有模型」在 `modelsLoading` 时应替换为骨架屏。

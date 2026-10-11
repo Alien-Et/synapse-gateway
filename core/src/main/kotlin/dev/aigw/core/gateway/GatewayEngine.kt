@@ -906,8 +906,8 @@ class GatewayEngine(
                     models.add(RoutedModel(provider.id, provider.displayName, model))
                 }
             }
-            // 供应商自报错误只在拿不到任何模型时才算失败；带内置快照的回退
-            // （如 CodeBuddy 无账号时显示 FALLBACK_MODELS）不是故障，报红反而吓人
+            // 供应商自报错误只在拿不到任何模型时才算失败；没有内置快照兜底后，
+            // 无账号/拉取失败是否报红由各家 listModels 的 error 决定
             ProviderModelsChunk(provider.id, models, if (models.isEmpty()) view.error.ifEmpty { null } else null)
         } catch (e: Exception) {
             logWarn("拉取模型目录失败（${provider.id}）：${e.message}")

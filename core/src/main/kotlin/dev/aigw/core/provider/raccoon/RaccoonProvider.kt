@@ -70,19 +70,19 @@ class RaccoonProvider(
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {
         val credential = account?.let { parse(it) }
         if (credential == null) {
-            return ProviderModelCatalogView(FALLBACK_MODELS, fromFallback = true, error = "没有可用账号，显示内置快照")
+            // 没有账号不算「失败」——登录前本就不该有模型，不能报红吓人。
+            return ProviderModelCatalogView(emptyList(), fromFallback = false, error = "")
         }
         return try {
             val models = fetchModels(credential)
             if (models.isEmpty()) {
-                hooks.onLog("小浣熊模型目录为空，使用内置快照")
-                ProviderModelCatalogView(FALLBACK_MODELS, fromFallback = true, error = "上游返回空模型列表")
+                ProviderModelCatalogView(emptyList(), fromFallback = false, error = "上游返回空模型列表")
             } else {
                 ProviderModelCatalogView(models, fromFallback = false, error = "")
             }
         } catch (e: Exception) {
             hooks.onLog("小浣熊拉取模型目录失败：${e.message ?: "未知错误"}")
-            ProviderModelCatalogView(FALLBACK_MODELS, fromFallback = true, error = e.message ?: "拉取模型失败")
+            ProviderModelCatalogView(emptyList(), fromFallback = false, error = e.message ?: "拉取模型失败")
         }
     }
 
@@ -633,20 +633,6 @@ class RaccoonProvider(
 
         /** 默认模型（官网标注为「默认」的 Raccoon Chat）。 */
         const val DEFAULT_MODEL = "raccoon-chat-ml-5-5"
-
-        /**
-         * 内置模型快照：上游拉不到时兜底。
-         *
-         * id 是上游真实 model id（截图/报错里的蓝色等宽串，如 `raccoon-8c4485`）；
-         * name 用上游展示名。上下文/输出取截图所示。
-         */
-        val FALLBACK_MODELS: List<ProviderModel> = listOf(
-            ProviderModel("raccoon-8c4485", "Raccoon-Work", 1_000_000),
-            ProviderModel("raccoon-19b265", "Raccoon-Work-260817-A", 1_000_000),
-            ProviderModel("raccoon-405a1c", "Raccoon-Work-260817-B", 1_000_000),
-            ProviderModel("raccoon-chat-ml-5-5", "Raccoon Chat", 180_000),
-            ProviderModel("sn-sensenova-6-8-flash-lite", "SenseNova 6.8 Flash Lite", 256_000),
-        )
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
