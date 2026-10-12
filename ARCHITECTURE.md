@@ -156,15 +156,18 @@ call/...                           # 调用日志
 
 这是本项目踩坑最深的地方，**0.1.40→0.1.57 的「登录频繁失效」全是违反以下原则造成的**：
 
-### 正确策略（0.1.58 现状）
+### 正确策略（2.2.1 现状）
 1. **Provider 内部绝不主动刷新 Token**。`openChat`/`listModels`/`creditInfo` 只调 `parse(account)` 取当前凭证。
-2. **刷新唯一入口**：网关在每次请求前调 `provider.refreshAccount(account, settings.refreshSkewSeconds)`，而 `refreshAccount` 内部判断：只在 token 临期 5 分钟内（`REQUEST_SAFETY_WINDOW_SECONDS`）才真正调 OAuth。刷新频率天然 ≈ 1小时1次。
+2. **刷新唯一入口**：网关在每次请求前调 `provider.refreshAccount(account, settings.refreshSkewSeconds)`，而 `refreshAccount` 内部判断：只在 token 临期 5 分钟内（`REQUEST_SAFETY_WINDOW_SECONDS`）才真正调 OAuth。刷新频率天然 ≈ 1小时1次。生效窗口 = `min(skewSeconds, 5min)`，故即使全局 `refreshSkewSeconds` 被配大也不会退化成每次请求都刷。
 3. **刷新成功必须落盘**：`refreshAccount` 内通过 `hooks.onAccountUpdated(toProviderAccount(refreshed, account))` 回存——Google 会轮换 refresh_token，不回存旧值作废后就是永久 invalid_grant。
 4. **UID 稳定性**：`toProviderAccount(refreshed, existing)` 必须沿用既有账号的 uid，否则账号池键漂移 = 账号"消失"。
 5. **classify 语义**：401/403 → `SESSION_DEAD`（硬禁用，提示重新登录）。**不要**降级成软重试——那会让账号很快回来再次触发刷新，形成刷新风暴加速风控。
+6. **并发去重**：临期判断在锁外，故锁内必须复查「刚被别的线程刷出的凭证」（`lastRefreshed`，按 uid 缓存）并直接复用，否则同一窗口内 N 个在途请求会打出 N 次 OAuth。命中缓存必须返回新凭证而非 null，否则调用方拿旧 token 直接 401。重新登录（`exchangeCode`）要清该 uid 的缓存与冷却，防止旧凭证被回写。
+7. **失败冷却**：刷新失败后 60s（`REFRESH_COOLDOWN_SECONDS`，按 uid）内不再重打 OAuth，避免 token 被吊销后按请求频率轰炸端点。
 
 ### 为什么（根因链条）
 Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.57 曾在每次对话前主动刷新 + 401 后"自愈重试"再刷 + 401 降级短冷却回来再刷——三次叠加让一个 token 几分钟内被换新十几次，Google 直接吊销。表现就是「反复需要重新登录」和后续的 503。
+2.2.1 又发现两处残留放大器：`refreshAccount` 的临期判断在锁外、锁内不复查最新凭证（并发 N 请求 = N 次 OAuth），以及刷新失败无退避（token 被吊销后 OAuth 频率 = 请求频率）。两者均已按上面第 6/7 条堵住。
 
 ### 铁律
 > 任何「让 Antigravity 更不容易掉线」的改动，如果最终效果是**增加了对 `oauth2.googleapis.com/token` 的调用频率**，那它一定是错的，无论它看起来多有道理。

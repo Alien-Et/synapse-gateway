@@ -59,6 +59,26 @@ class StorageMaintenanceTest {
         assertEquals(30, GatewaySettings.fromJson(legacy).logRetentionDays)
     }
 
+    // ------------------------------------------------------------------ 预刷新窗口
+
+    @Test
+    fun `预刷新窗口默认五分钟并夹在合法区间`() {
+        assertEquals(300L, GatewaySettings().refreshSkewSeconds)
+        assertEquals(0L, GatewaySettings.clampRefreshSkew(-1))
+        assertEquals(3600L, GatewaySettings.clampRefreshSkew(24L * 3600))
+        assertEquals(300L, GatewaySettings.clampRefreshSkew(300))
+    }
+
+    @Test
+    fun `老用户存过的超大预刷新窗口读取时被收敛`() {
+        // 存量配置里的 24h 会把「临期才刷」退化成每次请求都刷，必须收敛到上限
+        val legacy = GatewaySettings().toJson().apply { addProperty("refreshSkewSeconds", 24L * 3600) }.toString()
+        assertEquals(3600L, GatewaySettings.fromJson(legacy).refreshSkewSeconds)
+
+        val normal = GatewaySettings(refreshSkewSeconds = 600).toJson().toString()
+        assertEquals(600L, GatewaySettings.fromJson(normal).refreshSkewSeconds)
+    }
+
     // ------------------------------------------------------------------ 局域网暴露默认值
 
     @Test
