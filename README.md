@@ -4,7 +4,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 
 任何支持 OpenAI 协议的客户端（Cline、Cherry Studio、Continue、curl 脚本……）都能直接接上手机里的所有账号额度。
 
-`Kotlin` · `Jetpack Compose` · `NanoHTTPD` · `Gradle` · `minSdk 26 / targetSdk 36` · `MIT`
+`Kotlin` · `Jetpack Compose` · `NanoHTTPD` · `Gradle` · `minSdk 26 / targetSdk 36` · `MIT + 附加使用声明`
 
 > 改动代码前请先读 **[ARCHITECTURE.md](ARCHITECTURE.md)**——完整的架构地图、模块职责、协议陷阱清单与改动守则。
 
@@ -13,8 +13,10 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 ## 目录
 
 - [特性](#特性)
+- [快速开始](#快速开始)
 - [架构总览](#架构总览)
 - [模块结构](#模块结构)
+- [构建与发版](#构建与发版)
 - [接口与鉴权](#接口与鉴权)
 - [供应商](#供应商)
 - [贡献](#贡献)
@@ -28,10 +30,25 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 - **OpenAI 兼容网关**：`/v1/chat/completions` + `/v1/models`，流式 SSE / 非流式 / 多模态识图。
 - **五家内置供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤），以及任意自定义 OpenAI 兼容中转站。
 - **同款模型 Failover**：首选供应商失败或无可用账号时，自动切换到拥有同款模型的其他供应商。
-- **智能路由**：`供应商/模型` 前缀路由，兼支持无前缀的模型名自动推导。
-- **国内外智能分流**：国内上游强制直连，Google 按需走代理。
-- **后台保活**：前台服务 + WakeLock / WifiLock + 通知自愈，锁屏仍可服务。
-- **账号管理**：多账号轮询、额度查询、跨供应商容灾、批量签到、任务中心。
+- **智能路由**：`供应商/模型` 前缀路由（含 `trae-cn/`、`codebuddy-global/` 这类区域前缀与 `google/`、`agy/` 等别名），兼支持无前缀的模型名自动推导。
+- **账号管理**：同一供应商多账号按余额选号、失败自动换号、额度查询与额度包明细、跨供应商容灾、批量签到与任务中心。
+- **模型开放名单**：只把勾选的模型暴露给 `/v1/models`，其余模型对客户端隐藏。
+- **用量与日志**：调用记录（请求/转发/返回全链路）、今日与累计用量趋势、运行日志、按前缀统计存储占用与保留期自动清理。
+- **网络代理**：HTTP / SOCKS5，支持按供应商与按地址排除；国内上游始终直连。
+- **安全防护**：system 提示词零宽字符脱敏 + 账号级最小间隔限速（带抖动）。
+- **后台保活**：前台服务 + WakeLock / WifiLock + 控制中心磁贴，锁屏仍可服务。
+
+---
+
+## 快速开始
+
+1. 到 [Releases](https://github.com/xibai6668/Android-AI-gateway/releases) 下载最新的 `ai-gateway-<版本>-release.apk` 安装。
+2. 打开 App，首页点「启动网关服务」；首页显示「运行中」即表示端口已在监听。
+3. 到「供应商」页登录要用的账号（Trae / WorkBuddy / Antigravity / Loomy / 小浣熊），或添加自定义 OpenAI 兼容中转站。
+4. 客户端里填接入信息：
+   - Base URL：手机本机填 `http://127.0.0.1:8790/v1`；局域网内其它设备填首页复制的局域网地址（需先在「接入设置」里打开「同时监听局域网」）。
+   - 模型：可填 `供应商/模型`（如 `antigravity/gemini-3.8-flash-high`），也可直接填模型名由网关推导。
+   - API Key：默认开启「无 Key 调用」，随意填；关掉后需与「接入设置」里的 Key 一致。
 
 ---
 
@@ -63,10 +80,35 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 | 模块 | 类型 | 职责 |
 |---|---|---|
 | `:core` | 纯 JVM，无 Android 依赖 | 网关引擎、HTTP 服务、账号池、路由与 Failover、各供应商协议实现、存储抽象。可独立单测 |
-| `:cli` | 纯 JVM 命令行 | 在本机直接起网关做端到端联调，或不打开 App 也能导入账号 / 签到 / 查用量与日志 |
+| `:cli` | 纯 JVM 命令行 | 在本机直接起网关做端到端联调，或不打开 App 也能导入账号 / 签到 / 查用量与日志；可执行名 `aigw` |
 | `:app` | Android 应用 | Compose UI、前台服务与保活、加密存储实现、控制中心磁贴 |
 
 供应商协议实现位于 `core/src/main/kotlin/dev/aigw/core/provider/`，每家的私有协议细节都封装在各自子包内（`trae/`、`codebuddy/`、`antigravity/`、`loomy/`、`raccoon/`、`custom/`），互不干扰。
+
+---
+
+## 构建与发版
+
+本地构建（产出 debug 包，可与线上 release 包同机共存）：
+
+```sh
+./gradlew :app:assembleDebug --console=plain   # 出 debug 包
+./gradlew :core:test --console=plain           # 单元测试（:core 是唯一有测试的模块）
+./gradlew :cli:installDist --console=plain     # 命令行工具，产出 cli/build/install/aigw/bin/aigw
+```
+
+- 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app.debug`）。
+- 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
+- 本地**不产 release 包**：release 仅由云端 GitHub Actions 手动触发构建并发版，日常 push 不产生任何云端构建。
+
+命令行联调（`:cli`，无需 Android 设备）：
+
+```sh
+./gradlew :cli:run --args="serve" --console=plain       # 起网关（默认端口 8790，数据目录 ~/.aigw）
+./gradlew :cli:run --args="providers" --console=plain   # 列出供应商
+```
+
+`aigw` 子命令：`serve` / `providers` / `accounts` / `credits` / `checkin` / `login` / `browser-login` / `sms` / `models` / `usage` / `logs`；账号与设置存于 `--data` 目录（默认 `~/.aigw`，也可用 `AIGW_DATA` 环境变量改写）。
 
 ---
 
@@ -75,12 +117,14 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（双向转换封死�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | 对话补全，支持流式 SSE / 非流式 / 多模态 |
-| `GET` | `/v1/models` | 模型列表（各供应商就绪即流式返回） |
-| `GET` | `/v1/credits` | 额度查询，**仅本机访问** |
-| `GET` | `/healthz` | 健康检查，**仅本机访问** |
-| `GET` | `/authorize` | OAuth 登录回调入口 |
+| `GET` | `/v1/models` | 模型列表（并发拉取各供应商后聚合返回；按模型开放名单过滤） |
+| `GET` | `/v1/credits` | 额度查询（别名 `/credits`；本机免 Key） |
+| `GET` | `/healthz` | 健康检查，返回纯文本 `ok`（不带鉴权） |
+| `GET` | `/authorize` | Trae 网页登录回调入口（Antigravity / 小浣熊各有独立的本地回调端口） |
 
 鉴权支持三种方式，任一即可：`Authorization: Bearer <key>`、`x-goog-api-key: <key>`、查询参数 `?key=<key>`。可在设置中开启「无 Key 调用」。服务同时处理 `OPTIONS` 预检并返回 CORS 头，供浏览器端客户端使用。
+
+默认只绑定 `127.0.0.1`；打开「接入设置」里的「同时监听局域网」后才会监听全部网卡。注意此时若仍开着「无 Key 调用」，同网段的任何设备都能直接调用网关，`/v1/credits`、`/healthz` 也一样可达。
 
 ```sh
 curl http://127.0.0.1:8790/v1/chat/completions \
