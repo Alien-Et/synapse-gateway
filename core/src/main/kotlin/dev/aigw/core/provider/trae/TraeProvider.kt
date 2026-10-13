@@ -132,6 +132,10 @@ class TraeProvider(
         )
     }
 
+    override fun invalidateModelCache() {
+        for (catalog in catalogs.values) catalog.invalidate()
+    }
+
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
         if (model.isEmpty() || model == "auto") return defaultModel()

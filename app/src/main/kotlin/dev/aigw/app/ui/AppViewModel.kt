@@ -455,7 +455,7 @@ class AppViewModel(
         }
     }
 
-    fun refreshModels(silent: Boolean = false) {
+    fun refreshModels(silent: Boolean = false, forceRefresh: Boolean = false) {
         val gen = ++modelsGeneration
         modelsFetchedAt = System.currentTimeMillis()
         viewModelScope.launch {
@@ -473,7 +473,7 @@ class AppViewModel(
             )
             val (catalog, error) = withContext(Dispatchers.IO) {
                 runCatching {
-                    engine.modelsStreaming { chunk ->
+                    engine.modelsStreaming(forceRefresh = forceRefresh) { chunk ->
                         viewModelScope.launch {
                             if (gen == modelsGeneration) applyModelsChunk(chunk)
                         }
@@ -492,7 +492,26 @@ class AppViewModel(
                 modelsError = listOf(error, providerError).filter { it.isNotEmpty() }.joinToString("；"),
                 busy = if (quiet) _state.value.busy else "",
             )
+            pruneStaleExposure(catalog.models)
         }
+    }
+
+    /**
+     * 清掉开放名单里远端已不存在的模型。
+     *
+     * 只处理「本轮真的拉到了模型」的前缀：拉不到（无账号、上游临时故障）时目录可能只是暂时取不到，
+     * 不能凭此抹掉用户的勾选。
+     */
+    private fun pruneStaleExposure(live: List<RoutedModel>) {
+        if (live.isEmpty()) return
+        val current = engine.modelExposureSettings()
+        if (current.exposed.isEmpty()) return
+        val liveIds = live.map { it.fullId }.toSet()
+        val prefixes = live.map { it.routePrefix }.toSet()
+        val stale = current.exposed.filter { it.substringBefore('/') in prefixes && it !in liveIds }
+        if (stale.isEmpty()) return
+        engine.updateModelExposure(current.copy(exposed = current.exposed - stale.toSet()))
+        _state.value = _state.value.copy(modelExposure = engine.modelExposureSettings())
     }
 
     /**

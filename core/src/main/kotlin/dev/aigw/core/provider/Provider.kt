@@ -82,6 +82,14 @@ interface Provider {
     /** 模型目录；无账号或拉取失败时返回空列表。 */
     fun listModels(account: ProviderAccount?): ProviderModelCatalogView
 
+    /**
+     * 丢弃模型目录缓存，下次 [listModels] 必须重新打上游（界面刷新按钮用）。
+     *
+     * 实现方应保留最后一次成功结果作为失败兜底：本方法只保证不再命中缓存，
+     * 不保证上游此刻可用。
+     */
+    fun invalidateModelCache() = Unit
+
     /** 把客户端传来的模型名归一化为上游真实名；查不到原样放行，交给上游判定。 */
     fun resolveModel(requested: String): String
 

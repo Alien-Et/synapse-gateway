@@ -828,10 +828,16 @@ class GatewayEngine(
      * 调用方自行保证线程安全。返回值在全部完成后给出聚合目录与每个失败供应商的原因。
      *
      * [models] 等价于本函数丢弃回调、只取最终聚合的阻塞版本。
+     *
+     * [forceRefresh] 为 true 时先丢弃各供应商的模型目录缓存（部分供应商带 TTL 缓存，
+     * 否则刷新按钮会命中缓存、远端已下架的模型仍滞留），保证本次真正重打上游。
      */
-    fun modelsStreaming(onChunk: (ProviderModelsChunk) -> Unit): ModelsCatalog {
+    fun modelsStreaming(forceRefresh: Boolean = false, onChunk: (ProviderModelsChunk) -> Unit): ModelsCatalog {
         val enabledProviders = registry.all().filter { providerSettings(it.id).enabled }
         if (enabledProviders.isEmpty()) return ModelsCatalog(emptyList())
+
+        // 刷新按钮要求忽略 TTL 缓存：在提交拉取任务前失效，保证任务里拿到的是新鲜上游结果
+        if (forceRefresh) enabledProviders.forEach { it.invalidateModelCache() }
 
         val futures = enabledProviders.map { provider ->
             provider.id to ioPool.submit<ProviderModelsChunk> {

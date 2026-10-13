@@ -92,6 +92,11 @@ class AntigravityProvider(
         return ProviderModelCatalogView(models = emptyList(), fromFallback = false, error = "")
     }
 
+    override fun invalidateModelCache() {
+        // 只让缓存过期（保留 fetchedModels 作失败兜底），下次 listModels 必然重拉上游
+        fetchedAtMillis = 0L
+    }
+
     /**
      * 从云端拉取可用模型（优先 daily 端点，失败降级 prod，与 CLIProxyAPI 一致）：
      * `POST /v1internal:fetchAvailableModels`，响应 `models` 是

@@ -137,9 +137,18 @@ class CustomUi(override val id: String) : ProviderUi {
                 currentModels = models,
                 onDismiss = { fetchedModels = null },
                 onConfirm = { selected ->
+                    // 远端已下架的本地旧模型不再保留；有移除时提示数量，否则沿用原文案
+                    val previous = models.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                    val removed = previous.count { it !in fetched }
                     models = selected.sorted().joinToString("\n")
                     fetchedModels = null
-                    actions.onNotice("已选择 ${selected.size} 个模型")
+                    actions.onNotice(
+                        if (removed == 0) {
+                            "已选择 ${selected.size} 个模型"
+                        } else {
+                            "已选择 ${selected.size} 个模型，移除 $removed 个远端已下架的模型"
+                        },
+                    )
                 },
             )
         }
@@ -220,9 +229,10 @@ class CustomUi(override val id: String) : ProviderUi {
         onDismiss: () -> Unit,
         onConfirm: (List<String>) -> Unit,
     ) {
+        // 以云端结果为准建键：本地已保存且仍在云端的才预勾选，远端已下架的不会被保留
         val selected = remember(fetched) {
-            val initial = currentModels.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-            mutableStateMapOf<String, Boolean>().apply { initial.forEach { put(it, true) } }
+            val previous = currentModels.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            mutableStateMapOf<String, Boolean>().apply { fetched.forEach { put(it, previous.contains(it)) } }
         }
         var search by remember { mutableStateOf("") }
         val selectedCount = selected.values.count { it }

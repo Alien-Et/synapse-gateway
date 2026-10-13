@@ -23,10 +23,14 @@ class LoomyModelCatalog(
     var lastError: String = ""
         private set
 
+    /**
+     * 强制下次重新拉取（界面的刷新按钮用）。
+     *
+     * 只让缓存过期（[cachedAt] 归零），保留 [cached] 作失败兜底：
+     * 本方法只保证不再命中缓存，不保证上游此刻可用。
+     */
     fun invalidate() {
-        cached = null
         cachedAt = 0L
-        cachedSession = ""
     }
 
     /**

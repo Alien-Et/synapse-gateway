@@ -108,8 +108,10 @@
 
 #### 模型目录流式加载（UI 交接要点）
 
-模型页不再等最慢的供应商拉完才显示：`GatewayEngine.modelsStreaming(onChunk)` 每个供应商
+模型页不再等最慢的供应商拉完才显示：`GatewayEngine.modelsStreaming(forceRefresh, onChunk)` 每个供应商
 一就绪就回调一条 `ProviderModelsChunk(providerId, models, error?)`（后台线程），
+`forceRefresh = true`（模型页刷新按钮）先调各 provider 的 `invalidateModelCache()` 丢弃模型目录
+TTL 缓存，保证真正重打上游；目录缓存仍保留最后一次成功结果作失败兜底，不会因一次拉取失败清空列表。
 `AppViewModel.refreshModels` 把它合并进 `AppUiState`（主线程串行，代次防并发错乱）。
 
 供 UI 动画使用的状态字段（`AppUiState`）：

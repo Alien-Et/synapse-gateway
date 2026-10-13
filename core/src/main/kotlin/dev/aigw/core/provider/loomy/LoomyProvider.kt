@@ -70,6 +70,10 @@ class LoomyProvider(
         )
     }
 
+    override fun invalidateModelCache() {
+        catalog.invalidate()
+    }
+
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
         if (model.isEmpty() || model == "auto") return defaultModel()

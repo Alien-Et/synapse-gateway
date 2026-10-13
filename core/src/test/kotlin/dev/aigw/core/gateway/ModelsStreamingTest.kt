@@ -51,6 +51,19 @@ class ModelsStreamingTest {
         override fun listModels(account: ProviderAccount?): ProviderModelCatalogView = throw RuntimeException(message)
     }
 
+    /** 统计 invalidateModelCache 被调次数，用于验证 forceRefresh 语义。 */
+    private class CountingProvider(id: String) : StubProvider(id) {
+        @Volatile
+        var invalidations: Int = 0
+
+        override fun listModels(account: ProviderAccount?) =
+            ProviderModelCatalogView(listOf(ProviderModel("m1", "m1")), false, "")
+
+        override fun invalidateModelCache() {
+            invalidations++
+        }
+    }
+
     private fun engineWith(vararg providers: Provider): GatewayEngine {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         for (provider in providers) engine.registry.register(provider)
@@ -122,6 +135,29 @@ class ModelsStreamingTest {
 
         val models = engine.models()
         assertEquals(listOf("ok/m1", "ok/m2"), models.filter { it.providerId == "ok" }.map { it.fullId })
+    }
+
+    @Test
+    fun `forceRefresh 才失效模型缓存`() {
+        val provider = CountingProvider("cnt")
+        val engine = engineWith(provider)
+
+        // 默认不强制：不碰缓存（既有的 modelsStreaming { } 尾随 lambda 调用语义不变）
+        engine.modelsStreaming { }
+        assertEquals(0, provider.invalidations)
+
+        // 显式强制：失效一次，下次 listModels 重打上游
+        engine.modelsStreaming(forceRefresh = true) { }
+        assertEquals(1, provider.invalidations)
+    }
+
+    @Test
+    fun `models 阻塞版不失效缓存`() {
+        val provider = CountingProvider("cnt")
+        val engine = engineWith(provider)
+
+        engine.models()
+        assertEquals(0, provider.invalidations)
     }
 
     @Test
