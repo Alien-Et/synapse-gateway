@@ -4,6 +4,14 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.core.store.KeyValueStore
 import dev.aigw.core.util.startOfDay
+import java.io.File
+
+/** 调用记录详情里的文本字段。 */
+enum class CallTextField(val fileName: String) {
+    REQUEST("request"),
+    RESPONSE("response"),
+    RAW("raw"),
+}
 
 /** 一次调用的结果。 */
 enum class CallStatus { SUCCESS, FAILED, ABORTED }
@@ -56,6 +64,12 @@ class CallLogStore(
     private val capacity: Int = 100,
     /** 构造时是否同步载入历史；引擎传 false 时改为后台线程调 [load]，避免冷启动阻塞主线程。 */
     preloadOnConstruction: Boolean = true,
+    /**
+     * 完整原文溢出目录（可空）：加密存储只保留每字段前 [MAX_SUMMARY_CHARS] 字符的摘要，
+     * 超出部分写到该目录下 `记录id.字段.txt`，详情页按 id 回读完整原文。
+     * 目录由调用方提供（App 传 cacheDir，可被系统回收；CLI 传数据目录）。
+     */
+    private val spillDir: File? = null,
 ) {
     private val records = ArrayDeque<CallRecord>()
 
@@ -71,11 +85,20 @@ class CallLogStore(
 
     @Synchronized
     fun add(record: CallRecord) {
-        records.addFirst(record)
-        store.write(keyOf(record.id), record.toJson().toString())
+        // 入库前把每字段截到摘要长度：内存列表与加密存储都只持有短文本，
+        // 超出的完整原文走 [spillOverflows] 落到缓存目录。
+        val excerpt = record.copy(
+            requestBody = record.requestBody.take(MAX_SUMMARY_CHARS),
+            responseBody = record.responseBody.take(MAX_SUMMARY_CHARS),
+            rawResponse = record.rawResponse.take(MAX_SUMMARY_CHARS),
+        )
+        spillOverflows(record)
+        records.addFirst(excerpt)
+        store.write(keyOf(record.id), excerpt.toJson().toString())
         while (records.size > capacity) {
             val evicted = records.removeLast()
             store.delete(keyOf(evicted.id))
+            deleteSpill(evicted.id)
         }
         totalAgg = totalAgg + record
         store.write(TOTAL_KEY, totalAgg.toJson().toString())
@@ -84,6 +107,17 @@ class CallLogStore(
         daily[day] = updated
         store.write(dayKeyOf(day), updated.toJson().toString())
         pruneDaily()
+    }
+
+    /**
+     * 回读某条记录某字段的完整原文；没有溢出文件（未超摘要长度或已清理）时返回 null，
+     * 调用方回落展示加密存储里的摘要。
+     */
+    fun fullText(id: String, field: CallTextField): String? {
+        val dir = spillDir ?: return null
+        val file = File(dir, spillFileName(id, field))
+        if (!file.isFile) return null
+        return runCatching { file.readText() }.getOrNull()
     }
 
     /** 最新在前。 */
@@ -95,6 +129,7 @@ class CallLogStore(
         val removed = records.firstOrNull { it.id == id }
         records.removeAll { it.id == id }
         store.delete(keyOf(id))
+        deleteSpill(id)
         if (removed != null) {
             totalAgg = totalAgg - removed
             store.write(TOTAL_KEY, totalAgg.toJson().toString())
@@ -116,6 +151,9 @@ class CallLogStore(
         // 否则「清空调用记录」后存储占用降不下去。
         for (key in store.keys(PREFIX)) store.delete(key)
         records.clear()
+        if (spillDir != null && spillDir.isDirectory) {
+            spillDir.listFiles()?.forEach { it.delete() }
+        }
         for (key in store.keys(USAGE_PREFIX)) store.delete(key)
         totalAgg = UsageStats()
         daily.clear()
@@ -167,6 +205,7 @@ class CallLogStore(
             if (startedAt >= cutoffMillis) continue
             store.delete(key)
             records.removeAll { keyOf(it.id) == key }
+            deleteSpill(key.removePrefix(PREFIX))
             removed++
         }
         return removed
@@ -201,6 +240,13 @@ class CallLogStore(
             obj.addProperty("rawResponse", trimmedRaw)
             store.write(key, obj.toString())
             val id = obj.get("id")?.asString.orEmpty()
+            // 溢出的完整原文同样按截断后的长度回收：用户执行「截断超长记录内容」就是为了省存储，
+            // 缓存目录里再留一份全文会让该动作失效。仅删除发生过截断的字段对应文件。
+            if (id.isNotEmpty()) {
+                if (trimmedRequest != request) deleteSpill(id, CallTextField.REQUEST)
+                if (trimmedResponse != response) deleteSpill(id, CallTextField.RESPONSE)
+                if (trimmedRaw != rawResponse) deleteSpill(id, CallTextField.RAW)
+            }
             val index = records.indexOfFirst { it.id == id }
             if (index >= 0) {
                 records[index] = records[index].copy(
@@ -291,6 +337,39 @@ class CallLogStore(
 
     private fun dayKeyOf(day: Long) = "$DAY_PREFIX$day"
 
+    /**
+     * 把超出摘要长度的完整原文溢写到缓存目录（每字段一个文件，单文件上限 [MAX_SPILL_CHARS]）。
+     * 只在确实有超出时才落盘；写入失败静默降级为「详情页只看摘要」。
+     */
+    private fun spillOverflows(record: CallRecord) {
+        val dir = spillDir ?: return
+        spillField(dir, record.id, CallTextField.REQUEST, record.requestBody)
+        spillField(dir, record.id, CallTextField.RESPONSE, record.responseBody)
+        spillField(dir, record.id, CallTextField.RAW, record.rawResponse)
+    }
+
+    private fun spillField(dir: File, id: String, field: CallTextField, content: String) {
+        if (content.length <= MAX_SUMMARY_CHARS) {
+            // 没有溢出：清掉可能残留的旧文件（同 id 不会重发，防御性清理）
+            File(dir, spillFileName(id, field)).delete()
+            return
+        }
+        runCatching {
+            dir.mkdirs()
+            val file = File(dir, spillFileName(id, field))
+            file.writeText(if (content.length > MAX_SPILL_CHARS) content.substring(0, MAX_SPILL_CHARS) else content)
+        }
+    }
+
+    private fun deleteSpill(id: String, field: CallTextField? = null) {
+        val dir = spillDir ?: return
+        if (field == null) {
+            for (f in CallTextField.entries) File(dir, spillFileName(id, f)).delete()
+        } else {
+            File(dir, spillFileName(id, field)).delete()
+        }
+    }
+
     companion object {
         const val PREFIX = "logs/calls/"
         private const val USAGE_PREFIX = "usage/"
@@ -305,6 +384,14 @@ class CallLogStore(
 
         /** 低于该值就不再截了，免得把记录截成完全无用。 */
         const val MIN_FIELD_CHARS = 200
+
+        /** 加密存储里每字段保留的摘要长度（字符），与 MAX_LOGGED_BODY 同值。 */
+        const val MAX_SUMMARY_CHARS = 8 * 1024
+
+        /** 溢出文件单字段上限（字符）：512K，超出部分不保留（摘要仍提示总长）。 */
+        const val MAX_SPILL_CHARS = 512 * 1024
+
+        fun spillFileName(id: String, field: CallTextField): String = "$id.${field.fileName}.txt"
     }
 }
 

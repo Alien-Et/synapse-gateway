@@ -175,10 +175,12 @@ class GatewayEngine(
      * App 传 false，预载与过期清理改在后台线程执行，冷启动不再阻塞主线程。
      */
     preloadCallLogs: Boolean = true,
+    /** 完整原文溢出目录：加密存储只留每字段 8K 摘要，超出部分写这里供详情页回读；null 时仅摘要。 */
+    spillDir: java.io.File? = null,
 ) {
     val settingsRepository = SettingsRepository(store)
     val pool = AccountPool(store, nowMillis)
-    val callLogStore = CallLogStore(store, preloadOnConstruction = preloadCallLogs)
+    val callLogStore = CallLogStore(store, preloadOnConstruction = preloadCallLogs, spillDir = spillDir)
     val requestLog = RequestLog(store, nowMillis = nowMillis)
     val registry = ProviderRegistry()
 

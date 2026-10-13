@@ -6,6 +6,7 @@ import dev.aigw.core.provider.ChatCall
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.OpenAiSseAggregator
 import dev.aigw.core.provider.SSE_DONE
+import dev.aigw.core.usage.CallLogStore
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.CallStatus
 import dev.aigw.core.util.CappedStringBuilder
@@ -548,10 +549,11 @@ class GatewayHttpServer(
     ): NanoHTTPD.Response {
         val id = newCompletionId()
         return SseResponse(engine.schedulerExecutor()) { writer ->
-            // 边收边截：记录只留前 MAX_LOGGED_BODY 字符，避免长回复把整段内容留在堆里
-            val collected = CappedStringBuilder(MAX_LOGGED_BODY)
-            // 返回原文：上游逐行原始报文（未做任何解析），排障时能还原上游到底回了什么
-            val rawLines = CappedStringBuilder(MAX_LOGGED_BODY)
+            // 边收边截：摘要只留前 CallLogStore.MAX_SUMMARY_CHARS 字符（进加密存储）；完整原文由
+            // CappedStringBuilder 全量统计后另行溢出存盘（见 recordCall），不留在堆里。
+            // 上限设为溢出单字段上限：正文远超它时多出的尾部不再保留。
+            val collected = CappedStringBuilder(CallLogStore.MAX_SPILL_CHARS)
+            val rawLines = CappedStringBuilder(CallLogStore.MAX_SPILL_CHARS)
             var usage: JsonObject? = null
             var pointsConsumed = 0L
             var status = CallStatus.SUCCESS
@@ -966,9 +968,9 @@ class GatewayHttpServer(
                 pointsConsumed = pointsConsumed,
                 durationMillis = System.currentTimeMillis() - startedAt,
                 error = error,
-                requestBody = requestBody.take(MAX_LOGGED_BODY),
-                responseBody = responseText.take(MAX_LOGGED_BODY),
-                rawResponse = rawResponse.take(MAX_LOGGED_BODY),
+                requestBody = requestBody,
+                responseBody = responseText,
+                rawResponse = rawResponse,
             ),
         )
         // 每写入一条就顺带检查跳天清理：网关可能持续只收少量请求，
@@ -980,7 +982,6 @@ class GatewayHttpServer(
 
     companion object {
         const val MAX_BODY_BYTES = 8 * 1024 * 1024
-        const val MAX_LOGGED_BODY = 8 * 1024
 
         /** 上游迟迟不给空行事件边界时的兜底 flush 阈值（字符）。 */
         const val FLUSH_THRESHOLD_CHARS = 8 * 1024

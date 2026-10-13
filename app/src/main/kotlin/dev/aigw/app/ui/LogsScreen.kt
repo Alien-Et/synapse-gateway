@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,6 +41,8 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.CallStatus
 import kotlinx.coroutines.delay
@@ -208,7 +212,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
 
     detail?.let { record ->
         ModalBottomSheet(onDismissRequest = { detail = null }) {
-            CallDetailSheet(record)
+            CallDetailSheet(record, viewModel)
         }
     }
 }
@@ -260,10 +264,29 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
 }
 
 @Composable
-private fun CallDetailSheet(record: CallRecord) {
+private fun CallDetailSheet(record: CallRecord, viewModel: AppViewModel) {
     val clipboard = LocalClipboardManager.current
+
+    // 打开抽屉时后台加载各字段完整原文：没溢出文件（未超摘要长度或已被清理）时回落用记录内摘要。
+    var fullRequest by remember(record.id) { mutableStateOf<String?>(null) }
+    var fullResponse by remember(record.id) { mutableStateOf<String?>(null) }
+    var fullRaw by remember(record.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(record.id) {
+        val loaded = withContext(Dispatchers.IO) {
+            Triple(
+                viewModel.engineFullText(record.id, dev.aigw.core.usage.CallTextField.REQUEST),
+                viewModel.engineFullText(record.id, dev.aigw.core.usage.CallTextField.RESPONSE),
+                viewModel.engineFullText(record.id, dev.aigw.core.usage.CallTextField.RAW),
+            )
+        }
+        fullRequest = loaded.first
+        fullResponse = loaded.second
+        fullRaw = loaded.third
+    }
+
+    // 抽屉内容可达几十万字符，必须自身可滚动（ModalBottomSheet 默认不可滚）。
     Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp),
+        modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(record.id, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -272,17 +295,39 @@ private fun CallDetailSheet(record: CallRecord) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        DetailBlock("请求原文", record.requestBody) { clipboard.setText(AnnotatedString(record.requestBody)) }
-        DetailBlock("响应原文", record.responseBody) { clipboard.setText(AnnotatedString(record.responseBody)) }
-        if (record.rawResponse.isNotEmpty()) {
-            DetailBlock("返回原文（上游报文）", record.rawResponse) { clipboard.setText(AnnotatedString(record.rawResponse)) }
+        DetailBlock(
+            "请求原文",
+            fullRequest ?: record.requestBody,
+            truncatedNote(fullRequest == null, record.requestBody),
+        ) { clipboard.setText(AnnotatedString(fullRequest ?: record.requestBody)) }
+        DetailBlock(
+            "响应原文",
+            fullResponse ?: record.responseBody,
+            truncatedNote(fullResponse == null, record.responseBody),
+        ) { clipboard.setText(AnnotatedString(fullResponse ?: record.responseBody)) }
+        if (record.rawResponse.isNotEmpty() || fullRaw != null) {
+            DetailBlock(
+                "返回原文（上游报文）",
+                fullRaw ?: record.rawResponse,
+                truncatedNote(fullRaw == null, record.rawResponse),
+            ) { clipboard.setText(AnnotatedString(fullRaw ?: record.rawResponse)) }
         }
-        if (record.error.isNotEmpty()) DetailBlock("错误", record.error) { clipboard.setText(AnnotatedString(record.error)) }
+        if (record.error.isNotEmpty()) DetailBlock("错误", record.error, null) { clipboard.setText(AnnotatedString(record.error)) }
     }
 }
 
+/**
+ * 字段是否被截断的说明行：溢出文件缺失时，长度超过摘要阈值即视为「存储中为摘要」。
+ */
+private fun truncatedNote(fullMissing: Boolean, summary: String): String? = when {
+    !fullMissing -> null
+    summary.length >= dev.aigw.core.usage.CallLogStore.MAX_SUMMARY_CHARS ->
+        "内容较长，仅保留前 ${dev.aigw.core.usage.CallLogStore.MAX_SUMMARY_CHARS} 字符摘要（完整原文已被清理或本次未启用完整保存）"
+    else -> null
+}
+
 @Composable
-private fun DetailBlock(title: String, body: String, onCopy: () -> Unit) {
+private fun DetailBlock(title: String, body: String, note: String?, onCopy: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
@@ -295,6 +340,13 @@ private fun DetailBlock(title: String, body: String, onCopy: () -> Unit) {
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .clickable(onClick = onCopy)
                     .padding(horizontal = 10.dp, vertical = 4.dp),
+            )
+        }
+        if (note != null) {
+            Text(
+                text = note,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
             )
         }
         Text(

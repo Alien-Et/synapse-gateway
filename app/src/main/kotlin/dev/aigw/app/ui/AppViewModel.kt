@@ -1355,6 +1355,10 @@ class AppViewModel(
         "请求日志已清空"
     }
 
+    /** 回读调用记录某字段的完整原文（溢出文件缺失时返回 null，调用方回落用摘要）。 */
+    fun engineFullText(id: String, field: dev.aigw.core.usage.CallTextField): String? =
+        engine.callLogStore.fullText(id, field)
+
     // ------------------------------------------------------------------ 关于与更新
 
     /** 手动检查更新：无论有无新版本都给出提示。 */
