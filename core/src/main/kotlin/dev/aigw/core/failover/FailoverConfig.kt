@@ -108,6 +108,8 @@ data class ModelFailoverSettings(
     val enabled: Boolean = true,
     val retry: RetryConfig = RetryConfig(),
     val circuitBreaker: CircuitBreakerConfig = CircuitBreakerConfig(),
+    /** 上游请求并发闸门：全局与单账号在途上限。 */
+    val concurrency: ConcurrencyConfig = ConcurrencyConfig(),
     // 逻辑模型名 -> 候选供应商列表
     val routes: Map<String, List<FailoverCandidate>> = emptyMap(),
 ) {
@@ -115,6 +117,7 @@ data class ModelFailoverSettings(
         addProperty("enabled", enabled)
         add("retry", retry.toJson())
         add("circuitBreaker", circuitBreaker.toJson())
+        add("concurrency", concurrency.toJson())
         val routesObj = JsonObject()
         for ((model, candidates) in routes) {
             val arr = JsonArray()
@@ -144,6 +147,7 @@ data class ModelFailoverSettings(
                 enabled = obj.get("enabled")?.asBoolean ?: true,
                 retry = RetryConfig.fromJson(obj.getAsJsonObject("retry")),
                 circuitBreaker = CircuitBreakerConfig.fromJson(obj.getAsJsonObject("circuitBreaker")),
+                concurrency = ConcurrencyConfig.fromJson(obj.getAsJsonObject("concurrency")),
                 routes = routes,
             )
         }

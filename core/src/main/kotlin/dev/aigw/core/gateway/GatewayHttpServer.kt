@@ -264,6 +264,16 @@ class GatewayHttpServer(
                 if (picked == null) break
                 tried += picked.uid
 
+                // 上游并发闸门：在发起上游调用前取许可，会话结束后释放；取不到时本次换号重试不再尝试该账号
+                val gateHandle = engine.concurrencyGate.tryAcquire("${currentRoute.providerId}/${picked.uid}")
+                if (gateHandle == null) {
+                    val waitedSecs = failoverCfg.concurrency.queueTimeoutMs / 1000.0
+                    providerLastError = "并发已达上限（单账号=${failoverCfg.concurrency.maxPerAccount}，全局=${failoverCfg.concurrency.maxGlobal}，等待 ${waitedSecs}s 超时）"
+                    lastError = providerLastError
+                    log("并发闸门拒入场（${currentRoute.providerId}/${picked.nickname.ifEmpty { picked.uid }}）：$providerLastError")
+                    continue
+                }
+
                 // 单供应商内重试退避：非首次尝试时计算指数退避 + Jitter 抖动休眠，避免冲击上游
                 if (attempt > 1 && failoverCfg.enabled) {
                     val backoff = failoverCfg.retry.computeBackoffMillis(attempt)
@@ -317,6 +327,7 @@ class GatewayHttpServer(
                     cb.recordFailure()
                     pMetrics.record(false, elapsed, "connect_exception")
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", "openChat 异常：$providerLastError")
+                    gateHandle.release()
                     continue
                 }
 
@@ -335,6 +346,7 @@ class GatewayHttpServer(
                             newCompletionId(), currentRoute.providerId, requestedModel, account.uid, account.nickname,
                             streaming, CallStatus.FAILED, call.status, null, 0L, failure.message, call.errorBody, body, startedAt,
                         )
+                        gateHandle.release()
                         return errorResponse(400, "upstream_rejected", failure.message)
                     }
                     if (failure.kind == ErrorKind.SESSION_DEAD) {
@@ -343,6 +355,7 @@ class GatewayHttpServer(
                         // 凭证失效是账号级问题，不代表供应商故障，不计入熔断
                         providerLastError = failure.message
                         lastError = providerLastError
+                        gateHandle.release()
                         break
                     }
                     // 到这里才是上游侧错误：计入熔断与健康指标
@@ -351,6 +364,7 @@ class GatewayHttpServer(
                     providerLastError = failure.message
                     lastError = providerLastError
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", call.errorBody)
+                    gateHandle.release()
                     continue
                 }
 
@@ -364,6 +378,7 @@ class GatewayHttpServer(
                     providerLastError = err
                     lastError = providerLastError
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", err)
+                    gateHandle.release()
                     continue
                 }
 
@@ -393,6 +408,7 @@ class GatewayHttpServer(
                             newCompletionId(), currentRoute.providerId, requestedModel, account.uid, account.nickname,
                             streaming, CallStatus.FAILED, call.status, null, 0L, error.message, call.errorBody, body, startedAt,
                         )
+                        gateHandle.release()
                         return errorResponse(400, "upstream_rejected", error.message)
                     }
 
@@ -404,6 +420,7 @@ class GatewayHttpServer(
                         providerLastError = error.message
                         lastError = error.message
                         // 不可恢复错误：直接退出当前供应商重试，迅速切换下一家候选
+                        gateHandle.release()
                         break
                     }
 
@@ -413,6 +430,7 @@ class GatewayHttpServer(
                     providerLastError = error.message
                     lastError = error.message
                     lastHttpStatus = call.status
+                    gateHandle.release()
                     continue
                 }
 
@@ -427,6 +445,7 @@ class GatewayHttpServer(
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", aggregated)
                     providerLastError = "上游返回了空回复"
                     lastError = providerLastError
+                    gateHandle.release()
                     continue
                 }
 
@@ -437,6 +456,8 @@ class GatewayHttpServer(
 
                 if (streaming && aggregated != null) {
                     val sse = OpenAiSseAggregator.completionAsSse(aggregated).byteInputStream(Charsets.UTF_8)
+                    // 非流式包 SSE：上游响应已读入内存，许可在这里释放即可
+                    gateHandle.release()
                     return streamResponse(sse, call, currentRoute.providerId, transparentModel, account.uid, account.nickname, startedAt, body, call.status)
                 }
 
@@ -449,9 +470,11 @@ class GatewayHttpServer(
                         pMetrics.record(false, elapsed, "stream_null")
                         providerLastError = "上游未返回流"
                         lastError = providerLastError
+                        gateHandle.release()
                         continue
                     }
-                    return streamResponse(stream, call, currentRoute.providerId, transparentModel, account.uid, account.nickname, startedAt, body, call.status)
+                    // 流式透传：在途许可要覆盖整个读流转发阶段，随流结束在 streamResponse 里释放
+                    return streamResponse(stream, call, currentRoute.providerId, transparentModel, account.uid, account.nickname, startedAt, body, call.status, onFinished = { gateHandle.release() })
                 }
 
                 if (aggregated != null) {
@@ -459,12 +482,14 @@ class GatewayHttpServer(
                         log("上游返回 2xx（$providerId/${account.nickname}，非流式）")
                         engine.logVerbose("返回原文", aggregated)
                     }
+                    gateHandle.release()
                     return aggregatedResponse(aggregated, currentRoute.providerId, transparentModel, account.uid, account.nickname, startedAt, body, call.status)
                 }
 
                 call.close()
                 providerLastError = "上游返回的内容为空"
                 lastError = providerLastError
+                gateHandle.release()
                 continue
             }
 
@@ -508,7 +533,7 @@ class GatewayHttpServer(
 
     // ------------------------------------------------------------------ 响应
 
-    /** 流式：逐行透传上游已转好的 OpenAI SSE，同时抽取 usage 用于记录。 */
+    /** 流式：逐行透传上游已转好的 OpenAI SSE，同时抽取 usage 用于记录；[onFinished] 在流结束（含异常）后回调。 */
     private fun streamResponse(
         stream: InputStream,
         call: ChatCall,
@@ -519,6 +544,7 @@ class GatewayHttpServer(
         startedAt: Long,
         requestBody: String,
         httpStatus: Int,
+        onFinished: () -> Unit = {},
     ): NanoHTTPD.Response {
         val id = newCompletionId()
         return SseResponse(engine.schedulerExecutor()) { writer ->
@@ -615,6 +641,7 @@ class GatewayHttpServer(
                     runCatching { writer.write(SSE_DONE) }
                 }
                 call.close()
+                runCatching { onFinished() }
                 if (status == CallStatus.SUCCESS) {
                     engine.refreshCreditsSoon(providerId, uid)
                 }
@@ -919,6 +946,9 @@ class GatewayHttpServer(
         startedAt: Long,
         rawResponse: String = "",
     ) {
+        // 调用记录开关：关闭时不写任何记录（原文动辄几 KB，是存储的主要来源）；
+        // 记录一 failover 链路的语义不变，只是不留痕。由「数据管理」页的「清理过期记录」按保留天数清存量。
+        if (!engine.settings().callLoggingEnabled) return
         engine.callLogStore.add(
             CallRecord(
                 id = id,

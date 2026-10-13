@@ -192,6 +192,9 @@ class GatewayEngine(
     private val circuitBreakers = ConcurrentHashMap<String, dev.aigw.core.failover.ProviderCircuitBreaker>()
     private val providerMetrics = ConcurrentHashMap<String, dev.aigw.core.failover.ProviderMetricsTracker>()
 
+    /** 上游请求并发闸门：配置随 failoverSettings 动态生效。 */
+    val concurrencyGate = dev.aigw.core.failover.ConcurrencyGate { failoverSettings.concurrency }
+
     @Volatile
     private var securitySettings: dev.aigw.core.security.SecuritySettings =
         dev.aigw.core.security.SecuritySettings.fromJson(store.read(dev.aigw.core.security.SecuritySettings.STORE_KEY))
@@ -349,7 +352,11 @@ class GatewayEngine(
     fun updateFailoverSettings(updated: dev.aigw.core.failover.ModelFailoverSettings) {
         failoverSettings = updated
         store.write(dev.aigw.core.failover.ModelFailoverSettings.STORE_KEY, updated.toJson().toString())
-        log("故障转移配置已更新（启用=${updated.enabled}，单供应商最大重试=${updated.retry.maxAttempts}，熔断阈值=${updated.circuitBreaker.failureThreshold}）")
+        log(
+            "故障转移配置已更新（启用=${updated.enabled}，单供应商最大重试=${updated.retry.maxAttempts}，" +
+                "熔断阈值=${updated.circuitBreaker.failureThreshold}，并发：单账号=${updated.concurrency.maxPerAccount}，" +
+                "全局=${updated.concurrency.maxGlobal}，0 表示不限）",
+        )
     }
 
     fun circuitBreakerOf(providerId: String): dev.aigw.core.failover.ProviderCircuitBreaker =
@@ -426,8 +433,10 @@ class GatewayEngine(
     fun updateSettings(updated: GatewaySettings) {
         // 值未变时短路：避免每次保存都重建所有 provider 内部客户端
         if (updated == settings) return
+        val oldCapacity = settings.requestLogCapacity
         settings = updated
         settingsRepository.save(updated)
+        if (updated.requestLogCapacity != oldCapacity) requestLog.resize(updated.requestLogCapacity)
         reconfigureProviders()
     }
 
