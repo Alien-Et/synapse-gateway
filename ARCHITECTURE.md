@@ -149,7 +149,7 @@ call/...                           # 调用日志
 | WorkBuddy | `codebuddy` | 设备授权（state 轮询） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式（必须 stream:true）；tool_choice 只认字符串；签到/成长中心仅国内版 |
 | Antigravity | `antigravity` | OAuth loopback 51121 | `cloudcode-pa.googleapis.com` | Gemini 风格：role 用 user/model；schema 不支持 const/$ref；contents 必须严格交替；tool 参数名是 parametersJsonSchema；response.result 必须是字符串 |
 | Loomy | `loomy` | 手机短信 | `xfinfr.com` | 鉴权失败是 **HTTP 200 + 业务码**，不是 4xx |
-| 小浣熊 | `raccoon` | 网页回调（`/code/authorize` → `authorization_code`） | `xiaohuanxiong.com`（web 通道） | 登录 URL **不能带 `login_source=desktop`**（否则走 `office-raccoon://` 分支跳不回来）；对话走 v2（LiteLLM 层）：字段用标准名（`max_new_tokens` 会被 500 拒）、`delta` 是**字符串**不是对象；有签到/积分接口 |
+| 小浣熊 | `raccoon` | 网页回调（`/code/authorize` → `authorization_code`） | `xiaohuanxiong.com`（web 通道） | 登录 URL **不能带 `login_source=desktop`**（否则走 `office-raccoon://` 分支跳不回来）；对话走 v2（LiteLLM 层）：字段用标准名（`max_new_tokens` 会被 500 拒）、`delta` 是**字符串**不是对象；有积分余额/流水接口；「签到」实为桌面端登录奖励，须带 `X-Client-Platform`/`X-Client-Version` 才会发放 |
 | 自定义 | `custom:<key>` | API Key | 用户填的 baseUrl | 无 |
 
 ---
@@ -203,7 +203,9 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 ### 商汤小浣熊（raccoon）
 - 登录是网页回调：`/code/authorize?appname=Raccoon&redirect=<回调>`，回调带 `authorization_code`，再 `POST /api/web/auth/v1/login_with_authorization_code` 换 `access_token`(JWT)/`refresh_token`。
 - ⚠️ **不要带 `login_source=desktop`**：授权页在 `login_source=desktop` 时走 `office-raccoon://auth/callback?code=…` 自定义 scheme 分支（手机上没有 App 能接，表现为「点授权跳首页、登录不回来」）；不传时才会把 `?authorization_code=…` 回推到 `redirect`（`window.open(redirect+code)`）。`redirect` 不传时兜底跳官网首页，这正是 bug 现象。
-- 每日签到领积分：`POST /api/web/desktop/v1/login/points/grant`（空 body）；余额 `GET /api/web/points/v1/balance`（字段 `available_points`）。
+- 积分：余额 `GET /api/web/points/v1/balance`（`available_points`，另有 `daily_points` / `monthly_points` / `reward_points` / `topup_points`）；流水 `GET /api/web/points/v1/bills?paging.limit=&paging.offset=&type=all`（`data.items[]` 带 `bill_id` / `event_name` / `biz_type` / `points` / `created_at`，**支出是负数**）。
+- ⚠️ **桌面端登录奖励不是「每日签到」**：`POST /api/web/desktop/v1/login/points/grant`（官方客户端函数名 `grantDesktopLoginPoints`）**必须带 `X-Client-Platform`（`desktop-windows` / `desktop-macos` / `desktop-linux`）与 `X-Client-Version`（如 `v1.0.38`）**，缺了上游不发放；响应 `data.granted` 表示本次是否发放，**积分在 `data.popup.points`，不在 `data.points`**。只看 HTTP 2xx 就报「签到成功」会骗人。每日赠送积分（免费 300/日、Pro 500/日）由服务端每天 00:00 自动发放、当天登录后有效期延长至 7 天，**不存在「点一下加积分」的签到**。
+- ⚠️ **小浣熊没有积分任务体系**：桌面端的「任务中心」是 Agent 任务（新建/定时任务），积分侧只有 balance / bills / grant 三个端点。别再去找「任务领积分」接口（探测过 30+ 候选路径全 404）。
 - 对话端点 `POST /api/web/llm/v2/chat/completions`（v2 是 LiteLLM 的 OpenAI 兼容层，字段名用标准 `max_tokens`；**改成 `max_new_tokens` 会被上游 500 拒**）。响应**真正的 OpenAI 结构被包在 `data` 里**（外层 `{"status":{"code":..},"data":{...}}`），且 **`delta` 是字符串**（正文片段）不是对象，需逐行翻译回标准 OpenAI SSE；请求体补 `n=1`、`stop="<|endofmessage|>"`。
 - 鉴权 `Authorization: Bearer <access_token>`；需带桌面 Web 客户端 UA + `Accept-Language: zh-Hans`；有组织时带 `X-Org-Code`。
 - 旧主机 `raccoon.sensetime.com` / `code.sensetime.com` 已解析不了，现主机是 `xiaohuanxiong.com`。
