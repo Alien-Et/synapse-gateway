@@ -273,6 +273,8 @@ data class AppUiState(
     val security: dev.aigw.core.security.SecuritySettings = dev.aigw.core.security.SecuritySettings(),
     /** 模型开放名单：只对外暴露勾选的模型。 */
     val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
+    /** 故障转移与并发配置。 */
+    val failover: dev.aigw.core.failover.ModelFailoverSettings = dev.aigw.core.failover.ModelFailoverSettings(),
     /** 出网取证记录列表。 */
     val evidences: List<dev.aigw.core.security.OutboundEvidence> = emptyList(),
     /** 当前生效的脱敏规则词汇数。 */
@@ -317,6 +319,7 @@ private class Snapshot(
     val evidences: List<dev.aigw.core.security.OutboundEvidence>,
     val sanitizerRulesCount: Int,
     val modelExposure: dev.aigw.core.gateway.ModelExposureSettings,
+    val failover: dev.aigw.core.failover.ModelFailoverSettings,
 )
 
 class AppViewModel(
@@ -421,6 +424,7 @@ class AppViewModel(
                     evidences = engine.sanitizer.evidenceList(),
                     sanitizerRulesCount = engine.sanitizer.currentRulesCount(),
                     modelExposure = engine.modelExposureSettings(),
+                    failover = engine.failoverSettings(),
                 )
             }
             _state.value = _state.value.copy(
@@ -444,6 +448,7 @@ class AppViewModel(
                 evidences = snapshot.evidences,
                 sanitizerRulesCount = snapshot.sanitizerRulesCount,
                 modelExposure = snapshot.modelExposure,
+                failover = snapshot.failover,
             )
         }
     }
@@ -680,6 +685,13 @@ class AppViewModel(
     fun updateSecuritySettings(updated: dev.aigw.core.security.SecuritySettings) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { engine.updateSecuritySettings(updated) }
+            refresh()
+        }
+    }
+
+    fun updateFailoverSettings(updated: dev.aigw.core.failover.ModelFailoverSettings) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { engine.updateFailoverSettings(updated) }
             refresh()
         }
     }

@@ -107,6 +107,12 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 if (state.security.sanitizeEnabled) "脱敏开启" else "脱敏关闭",
             ) { open(SubPage.SecurityProtection) }
             EditorialRow(
+                "02.2b",
+                "并发与容错 · RESILIENCE",
+                "并发闸门、重试退避与熔断器",
+                concurrencySummary(state.failover),
+            ) { open(SubPage.Resilience) }
+            EditorialRow(
                 "02.3",
                 "额度中心 · CREDITS",
                 "按供应商查看额度包明细",
@@ -156,6 +162,26 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 checked = state.settings.verboseLogging,
                 onCheckedChange = {
                     viewModel.updateSettings(state.settings.copy(verboseLogging = it))
+                },
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("调用记录归档", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "把每次调用的请求/响应原文存入调用记录；关闭后不再新增（存储大幅减少），历史记录不受影响",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = state.settings.callLoggingEnabled,
+                onCheckedChange = {
+                    viewModel.updateSettings(state.settings.copy(callLoggingEnabled = it))
                 },
             )
         }
@@ -447,5 +473,14 @@ private fun TokenUsageRow(
                 )
             }
         }
+    }
+}
+
+/** 「并发与容错」入口的摘要文案。 */
+private fun concurrencySummary(failover: dev.aigw.core.failover.ModelFailoverSettings): String {
+    val concurrency = failover.concurrency
+    return when {
+        concurrency.maxPerAccount == 0 && concurrency.maxGlobal == 0 -> "并发不限"
+        else -> "并发 单账号 ${concurrency.maxPerAccount} / 全局 ${concurrency.maxGlobal}"
     }
 }

@@ -22,6 +22,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,12 +52,18 @@ private enum class StatusFilter(val label: String) {
     ALL("全部"), SUCCESS("成功"), FAILED("失败"), ABORTED("中断"),
 }
 
+private enum class LevelFilter(val label: String) {
+    ALL("全部"), INFO("信息"), WARN("警告"), ERROR("错误"),
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     var tab by remember { mutableStateOf(LogTab.Calls) }
     var filter by remember { mutableStateOf(StatusFilter.ALL) }
+    var levelFilter by remember { mutableStateOf(LevelFilter.ALL) }
     var detail by remember { mutableStateOf<CallRecord?>(null) }
+    var showLogSettings by remember { mutableStateOf(false) }
 
     // 停留在本页时自动刷新（只刷记录，不动低频数据）
     LaunchedEffect(tab) {
@@ -74,6 +81,13 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                 StatusFilter.FAILED -> it.status == CallStatus.FAILED
                 StatusFilter.ABORTED -> it.status == CallStatus.ABORTED
             }
+        }
+    }
+
+    val logs = remember(state.logs, levelFilter) {
+        when (levelFilter) {
+            LevelFilter.ALL -> state.logs
+            else -> state.logs.filter { it.level.equals(levelFilter.name, ignoreCase = true) }
         }
     }
 
@@ -117,13 +131,18 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LevelFilter.entries.forEach { option ->
+                        ChoiceChip(option.label, levelFilter == option) { levelFilter = option }
+                    }
+                }
                 Text(
-                    text = "共 ${state.logs.size} 条日志",
+                    text = "共 ${logs.size} 条日志 · 容量 ${state.settings.requestLogCapacity} 条",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "网关与上游交互的流水，仅保留最近若干条。",
+                    text = "网关与上游交互的流水，环形覆盖只保留最近若干条。点右上设置改容量。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -153,7 +172,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             } else {
-                if (state.logs.isEmpty()) {
+                if (logs.isEmpty()) {
                     item(key = "empty-logs") {
                         SectionCard {
                             EmptyHint("暂无请求日志", "启动服务并发起调用后，这里会记录每次转发与换号。")
@@ -162,14 +181,24 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                 } else {
                     // key 用单调自增的 seq：时间戳+内容可能重复（同一秒内多条相同日志），
                     // 重复 key 会让 LazyColumn 直接崩溃。
-                    itemsIndexed(state.logs, key = { _, line -> line.seq }) { _, line ->
+                    itemsIndexed(logs, key = { _, line -> line.seq }) { _, line ->
                         SectionCard {
                             Text(
                                 text = line.render(),
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
+                                color = levelColor(line.level),
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             )
+                        }
+                    }
+                }
+                item(key = "clear-logs") {
+                    OutlineActionButton("清空请求日志") { viewModel.clearLogs() }
+                    OutlineActionButton("日志容量设置") { showLogSettings = !showLogSettings }
+                    if (showLogSettings) {
+                        LogCapacityField(state.settings.requestLogCapacity) {
+                            viewModel.updateSettings(state.settings.copy(requestLogCapacity = it))
                         }
                     }
                 }
@@ -285,6 +314,37 @@ private fun statusLabel(status: CallStatus): String = when (status) {
     CallStatus.SUCCESS -> "成功"
     CallStatus.FAILED -> "失败"
     CallStatus.ABORTED -> "中断"
+}
+
+@Composable
+private fun levelColor(level: String): Color = when (level.uppercase()) {
+    "WARN" -> Color(0xFFC97F0A)
+    "ERROR" -> MaterialTheme.colorScheme.error
+    else -> MaterialTheme.colorScheme.onSurface
+}
+
+/** 日志容量输入：失焦/回车不适用（按钮提交），越界由 core 夹回。 */
+@Composable
+private fun LogCapacityField(current: Int, onCommit: (Int) -> Unit) {
+    var text by remember(current) { mutableStateOf(current.toString()) }
+    val parsed = text.toIntOrNull()
+    val valid = parsed != null &&
+        parsed in dev.aigw.core.gateway.GatewaySettings.MIN_REQUEST_LOG_CAPACITY..
+        dev.aigw.core.gateway.GatewaySettings.MAX_REQUEST_LOG_CAPACITY
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { input -> text = input.filter(Char::isDigit).take(4) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("请求日志容量（${dev.aigw.core.gateway.GatewaySettings.MIN_REQUEST_LOG_CAPACITY}-${dev.aigw.core.gateway.GatewaySettings.MAX_REQUEST_LOG_CAPACITY} 条）") },
+            isError = text.isNotEmpty() && !valid,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+        )
+        if (parsed != null && valid && parsed != current) {
+            OutlineActionButton("保存容量") { onCommit(parsed) }
+        }
+    }
 }
 
 @Composable
