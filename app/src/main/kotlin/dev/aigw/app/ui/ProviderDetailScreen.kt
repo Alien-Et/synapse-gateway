@@ -43,6 +43,7 @@ fun ProviderDetailScreen(
     // creditPacks/taskLists 随 state 变化，用 rememberUpdatedState 读取最新值。
     val creditPacks = rememberUpdatedState(state.creditPacks)
     val taskLists = rememberUpdatedState(state.taskLists)
+    val pointsBills = rememberUpdatedState(state.pointsBills)
     val actions = remember(viewModel, providerId) {
         ProviderUiActions(
             // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
@@ -84,6 +85,8 @@ fun ProviderDetailScreen(
             onLoadCreditPacks = { id, uid -> viewModel.loadCreditPacks(id, uid) },
             taskListOf = { id, uid -> taskLists.value["$id/$uid"] },
             onLoadTaskList = { id, uid -> viewModel.loadTaskList(id, uid) },
+            pointsBillsOf = { id, uid -> pointsBills.value["$id/$uid"] },
+            onLoadPointsBills = { id, uid -> viewModel.loadPointsBills(id, uid) },
             onRegenerateDeviceId = { id, uid -> viewModel.regenerateDeviceId(id, uid) },
             onSetDeviceId = { id, uid, value -> viewModel.setDeviceId(id, uid, value) },
             onNotice = { viewModel.notice(it) },

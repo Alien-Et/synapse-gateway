@@ -20,6 +20,8 @@ import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
+import dev.aigw.core.provider.PointsBill
+import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
@@ -44,6 +46,7 @@ import dev.aigw.core.util.stringOrNull
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.time.OffsetDateTime
 
 /**
  * 商汤「小浣熊」（`xiaohuanxiong.com`）的插件账号通道。
@@ -371,28 +374,58 @@ class RaccoonProvider(
         else -> ProviderActionResult.unsupported(action)
     }
 
+    /**
+     * 领桌面端登录奖励（`/api/web/desktop/v1/login/points/grant`）。
+     *
+     * 上游不是「点一下就加积分」的签到：这笔奖励由服务端判定 `data.granted`，
+     * 而且只认官方桌面客户端——调用必须带 `X-Client-Platform` / `X-Client-Version`，
+     * 否则不发。发成功时积分在 `data.popup.points`（不是 `data.points`）。
+     */
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
         return try {
-            val (status, text) = postJson("$host$PATH_GRANT", "{}", jsonHeaders(credential))
+            val (status, text) = postJson("$host$PATH_GRANT", "{}", jsonHeaders(credential) + desktopHeaders())
             if (status !in 200..299) {
                 return ProviderActionResult.failure(extractMessage(text).ifEmpty { "签到失败（HTTP $status）" })
             }
+            val data = runCatching { JsonParser.parseString(text).asJsonObject.objOrNull("data") }.getOrNull()
+            val granted = data?.boolOrNull("granted") == true
+            val points = data?.objOrNull("popup")?.firstLong("points") ?: 0L
             val message = extractMessage(text)
-            val points = runCatching {
-                JsonParser.parseString(text).asJsonObject.objOrNull("data")
-                    ?.firstLong("points", "available_points", "amount", "reward", "credits") ?: 0L
-            }.getOrDefault(0L)
             ProviderActionResult.success(
                 when {
-                    points > 0 -> "签到成功，+$points 积分"
+                    granted && points > 0 -> "签到成功，+$points 积分"
+                    granted -> message.ifEmpty { "签到成功" }
                     message.isNotEmpty() -> message
-                    else -> "签到成功"
+                    else -> "本次未发放积分（可能今日已领取）"
                 },
             )
         } catch (e: Exception) {
             ProviderActionResult.failure(e.message ?: "签到失败")
         }
+    }
+
+    /** 积分流水（`/api/web/points/v1/bills`），最近 [POINTS_BILLS_LIMIT] 条。 */
+    override fun pointsBills(account: ProviderAccount): PointsBillListView? {
+        val credential = parse(account) ?: return null
+        val url = "$host$PATH_BILLS?paging.limit=$POINTS_BILLS_LIMIT&paging.offset=0&type=all"
+        val (status, text) = getJson(url, jsonHeaders(credential))
+        if (status !in 200..299) throw IllegalStateException("积分明细 HTTP $status")
+        val data = envelopeData(text) ?: throw IllegalStateException("积分明细响应缺少 data")
+        val items = data.arrayOrNull("items") ?: return PointsBillListView(emptyList())
+        return PointsBillListView(
+            items.mapNotNull { element ->
+                val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+                PointsBill(
+                    id = item.firstString("bill_id", "id"),
+                    title = item.firstString("event_name", "title", "biz_type").ifEmpty { "积分变动" },
+                    // 不能用 firstLong：它把 ≤ 0 当作「未提供」，会把支出（负数）吞成 0。
+                    points = item.longOrNull("points") ?: item.longOrNull("amount") ?: 0L,
+                    bizType = item.firstString("biz_type"),
+                    createdAtMillis = isoMillisOf(item.firstString("created_at", "createdAt")),
+                )
+            },
+        )
     }
 
     // ------------------------------------------------------------------ 上游
@@ -508,6 +541,19 @@ class RaccoonProvider(
         if (credential.orgCode.isNotEmpty()) put("X-Org-Code", credential.orgCode)
     }
 
+    /**
+     * 桌面客户端标识头。上游靠它判定「调用方是官方桌面端」，缺了就不发登录奖励。
+     */
+    private fun desktopHeaders(): Map<String, String> = mapOf(
+        "X-Client-Platform" to CLIENT_PLATFORM,
+        "X-Client-Version" to CLIENT_VERSION,
+    )
+
+    /** 上游 `created_at` 是 ISO-8601 字符串，转毫秒；解析不了就当未知（0）。 */
+    private fun isoMillisOf(value: String): Long = runCatching {
+        OffsetDateTime.parse(value.trim()).toInstant().toEpochMilli()
+    }.getOrDefault(0L)
+
     private fun bearerHeaders(accessToken: String): Map<String, String> = mapOf(
         "Accept" to "application/json",
         "Authorization" to "Bearer $accessToken",
@@ -599,6 +645,17 @@ class RaccoonProvider(
 
         /** 每日签到领积分。 */
         const val PATH_GRANT = "/api/web/desktop/v1/login/points/grant"
+
+        /** 积分流水明细。 */
+        const val PATH_BILLS = "/api/web/points/v1/bills"
+
+        /** 桌面客户端标识：上游只给「官方桌面端」发登录奖励，伪装成 Windows 桌面端（与 [CLIENT_UA] 一致）。 */
+        const val CLIENT_PLATFORM = "desktop-windows"
+
+        const val CLIENT_VERSION = "v1.0.38"
+
+        /** 积分明细一次拉取的条数（官方客户端用 20）。 */
+        const val POINTS_BILLS_LIMIT = 20
 
         /** 伪装成官方桌面 Web 客户端的 UA（web 通道的调用方就是它）。 */
         const val CLIENT_UA =

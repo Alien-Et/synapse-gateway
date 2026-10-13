@@ -15,6 +15,8 @@ import dev.aigw.core.provider.Provider
 import dev.aigw.core.provider.ProviderAccount
 import dev.aigw.core.provider.ProviderActionResult
 import dev.aigw.core.provider.ProviderTaskListView
+import dev.aigw.core.provider.PointsBill
+import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.provider.ProviderRegistry
@@ -667,6 +669,22 @@ class GatewayEngine(
         } catch (e: Exception) {
             logWarn("拉取任务列表失败（$providerId/$uid）：${e.message}")
             ProviderTaskListView(emptyList(), error = e.message ?: "拉取任务列表失败")
+        }
+    }
+
+    /**
+     * 取某账号的积分流水明细（会打上游，调用方自行控制频率）。
+     *
+     * 只读快照；不支持账本的供应商返回 null。
+     */
+    fun pointsBills(providerId: String, uid: String): PointsBillListView? {
+        val provider = registry.get(providerId) ?: return null
+        val account = pool.account(providerId, uid) ?: return null
+        return try {
+            provider.pointsBills(account)
+        } catch (e: Exception) {
+            logWarn("拉取积分明细失败（$providerId/$uid）：${e.message}")
+            PointsBillListView(emptyList(), error = e.message ?: "拉取积分明细失败")
         }
     }
 

@@ -251,6 +251,8 @@ data class AppUiState(
     val creditPacks: Map<String, List<QuotaPack>> = emptyMap(),
     /** 已拉取的成长任务明细，键为 `providerId/uid`。 */
     val taskLists: Map<String, dev.aigw.core.provider.ProviderTaskListView> = emptyMap(),
+    /** 已拉取的积分流水明细，键为 `providerId/uid`。 */
+    val pointsBills: Map<String, dev.aigw.core.provider.PointsBillListView> = emptyMap(),
     val logs: List<LogLine> = emptyList(),
     val settings: GatewaySettings = GatewaySettings(),
     /** 代理设置。 */
@@ -1289,6 +1291,17 @@ class AppViewModel(
             if (view == null) return@launch
             _state.value = _state.value.copy(
                 taskLists = _state.value.taskLists + ("$providerId/$uid" to view),
+            )
+        }
+    }
+
+    /** 拉取某账号的积分流水明细（会打上游）；支持账本的供应商才返回结果。 */
+    fun loadPointsBills(providerId: String, uid: String) {
+        viewModelScope.launch {
+            val view = withContext(Dispatchers.IO) { engine.pointsBills(providerId, uid) }
+            if (view == null) return@launch
+            _state.value = _state.value.copy(
+                pointsBills = _state.value.pointsBills + ("$providerId/$uid" to view),
             )
         }
     }

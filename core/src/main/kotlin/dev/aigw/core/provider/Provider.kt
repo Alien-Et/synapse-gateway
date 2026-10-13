@@ -120,6 +120,13 @@ interface Provider {
     fun taskList(account: ProviderAccount): ProviderTaskListView? = null
 
     /**
+     * 积分/额度流水明细（可选）；不支持账本的 provider 返回 null。
+     *
+     * 与 [creditPacks] 的分工：后者是「还剩多少」的额度包视角，这里是「每一笔怎么来的」流水视角。
+     */
+    fun pointsBills(account: ProviderAccount): PointsBillListView? = null
+
+    /**
      * 该供应商用到的上游域名后缀（不带子域前缀）。
      *
      * 代理设置按「供应商」开关，实际判定就是拿目标域名与这里的后缀匹配，
