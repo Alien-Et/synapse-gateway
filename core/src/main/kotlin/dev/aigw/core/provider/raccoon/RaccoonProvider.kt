@@ -364,7 +364,7 @@ class RaccoonProvider(
         return completeWebLogin(trimmed)
     }
 
-    /** 每日签到领积分（web 通道）。 */
+    /** 供应商专属动作（web 通道）。 */
     override fun performAction(
         account: ProviderAccount,
         action: String,
@@ -643,7 +643,7 @@ class RaccoonProvider(
         const val PATH_MODELS = "/api/web/llm/v2/model_catalog"
         const val PATH_BALANCE = "/api/web/points/v1/balance"
 
-        /** 每日签到领积分。 */
+        /** 桌面端登录奖励（不是每日签到）。 */
         const val PATH_GRANT = "/api/web/desktop/v1/login/points/grant"
 
         /** 积分流水明细。 */
