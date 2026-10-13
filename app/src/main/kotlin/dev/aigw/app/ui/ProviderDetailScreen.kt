@@ -124,8 +124,8 @@ fun ProviderDetailScreen(
         if (accounts.isNotEmpty() && !ui.managesOwnAccounts) {
             SectionCard(enterIndex = 0) {
                 SectionLabel("账号")
-                accounts.forEachIndexed { index, account ->
-                    AccountRow(account, ui, actions, index = index)
+                PagedAccountList(accounts, keyOf = { it.uid }) { pageIndex, account ->
+                    AccountRow(account, ui, actions, index = pageIndex)
                 }
                 OutlineActionButton("刷新额度") { actions.onRefreshCredits(providerId, null) }
             }

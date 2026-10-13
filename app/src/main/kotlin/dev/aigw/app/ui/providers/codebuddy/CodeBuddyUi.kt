@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -37,6 +38,7 @@ import androidx.compose.foundation.layout.padding
 import com.google.gson.JsonObject
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.OutlineActionButton
+import dev.aigw.app.ui.PagedAccountList
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.bouncyClick
@@ -75,6 +77,8 @@ object CodeBuddyUi : ProviderUi {
         var global by rememberSaveable {
             mutableStateOf(actions.providerOptionOf(id, "region", CodeBuddyProvider.REGION_CN) == CodeBuddyProvider.REGION_GLOBAL)
         }
+        var expanded by remember { mutableStateOf(false) }
+        var raw by remember { mutableStateOf("") }
         val region = if (global) CodeBuddyProvider.REGION_GLOBAL else CodeBuddyProvider.REGION_CN
         SectionCard(enterIndex = 0) {
             Row(
@@ -113,7 +117,29 @@ object CodeBuddyUi : ProviderUi {
             ) {
                 Text(if (global) "打开国际版登录页" else "打开国内版登录页")
             }
-            OutlineActionButton("重新检查授权状态") { actions.onCheckDeviceAuth(id, region) }
+            OutlineActionButton(
+                text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",
+            ) { expanded = !expanded }
+            if (expanded) {
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    maxLines = 8,
+                    label = { Text("凭证 JSON") },
+                )
+                Button(
+                    onClick = {
+                        actions.onImport(id, raw.trim())
+                        raw = ""
+                    },
+                    enabled = raw.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("导入")
+                }
+            }
         }
         if (accounts.isNotEmpty()) {
             AccountRegionSection(global, accounts, actions)
@@ -138,7 +164,7 @@ object CodeBuddyUi : ProviderUi {
             }
             SectionCard(enterIndex = 1) {
                 SectionLabel("账号 · ${scoped.size} 个")
-                for (account in scoped) {
+                PagedAccountList(scoped, keyOf = { it.uid }) { _, account ->
                     AccountBlock(account, actions)
                 }
                 OutlineActionButton("刷新额度") { actions.onRefreshCredits(id, null) }

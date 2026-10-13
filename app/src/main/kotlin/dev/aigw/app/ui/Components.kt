@@ -31,8 +31,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -159,6 +164,96 @@ fun SectionCard(
             content = content,
         )
     }
+}
+
+/**
+ * 账号分页：把超长账号列表切成每页固定条数，避免一次性组合全部卡片。
+ *
+ * 页码用不可变 Int 保存（不要用 SnapshotStateList 等快照类型做 rememberSaveable，
+ * 本工程已因此类快照在保存时机被读取而闪退过）。
+ *
+ * [itemContent] 的第一个参数是**页内序号**（当前页从 0 起，而非全局序号）：
+ * 直接喂给 `staggeredAppear` 这类按序号线性递增延迟的动效，翻到任意一页都从零开始错峰，
+ * 不会因全局序号过大导致末页卡片等上好几秒才出现。
+ */
+@Composable
+fun <T> PagedAccountList(
+    items: List<T>,
+    modifier: Modifier = Modifier,
+    pageSize: Int = 30,
+    keyOf: (T) -> String,
+    itemContent: @Composable (pageIndex: Int, item: T) -> Unit,
+) {
+    var page by rememberSaveable { mutableStateOf(0) }
+    val pageCount = if (items.isEmpty()) 1 else (items.size + pageSize - 1) / pageSize
+    // 列表变短（删账号、切区域）后旧页码可能越界：本帧先夹取显示，再由 effect 写回，
+    // 否则列表重新变长时会突然跳回那个已失效的大页码。
+    val currentPage = page.coerceIn(0, pageCount - 1)
+    LaunchedEffect(pageCount) {
+        if (page != currentPage) page = currentPage
+    }
+    val visible = items.drop(currentPage * pageSize).take(pageSize)
+
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        visible.forEachIndexed { pageIndex, item ->
+            // 以 uid 建键：卡片内部的展开/编辑状态跟着账号走，而不是跟着列表位置走
+            key(keyOf(item)) {
+                itemContent(pageIndex, item)
+            }
+        }
+        // 只有一个页时不渲染分页条，保持既有单页外观，避免视觉噪音
+        if (items.size > pageSize) {
+            PagerBar(currentPage, pageCount, items.size) { page = it }
+        }
+    }
+}
+
+/** 账号列表底部分页条：上一页 / 页码信息 / 下一页，边界处按钮禁用。 */
+@Composable
+private fun PagerBar(
+    page: Int,
+    pageCount: Int,
+    total: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        PagerChip("上一页", enabled = page > 0) { onSelect(page - 1) }
+        Text(
+            text = "第 ${page + 1} / $pageCount 页 · 共 $total 个",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f),
+        )
+        PagerChip("下一页", enabled = page < pageCount - 1) { onSelect(page + 1) }
+    }
+}
+
+/** 分页条上的胶囊按钮：沿用 ChoiceChip 的描边胶囊样式，禁用时整体降透明度。 */
+@Composable
+private fun PagerChip(text: String, enabled: Boolean, onClick: () -> Unit) {
+    val content = if (enabled) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = content,
+        modifier = Modifier
+            .clip(CircleShape)
+            .border(1.dp, content, CircleShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
 }
 
 /** 「运行中 / 已停止」状态胶囊：白底描边 + 圆点（运行中金色带浅光环）。 */

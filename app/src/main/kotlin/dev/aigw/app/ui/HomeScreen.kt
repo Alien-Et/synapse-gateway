@@ -109,6 +109,10 @@ fun HomeScreen(
 
         TelemetryGrid(state, Modifier.staggeredAppear(1))
 
+        // 批量动作进行中/结束：首页也要看得到进度与失败原因（签到按钮就在本页）
+        BatchProgressHost(state.batchProgress)
+        BatchOutcomeHost(state.batchOutcome) { viewModel.dismissBatchOutcome() }
+
         TrendCard(state)
 
         SectionCard(modifier = Modifier.staggeredAppear(3)) {

@@ -48,13 +48,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -76,14 +73,15 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
     val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
     val exposure = state.modelExposure
-    // 折叠状态：记「被折叠」的分组（默认全展开）。rememberSaveable 让重进页面后保持。
-    val collapsedGroups = rememberSaveable(
-        saver = listSaver(save = { it.toList() }, restore = { it.toMutableStateList() }),
-    ) { mutableStateListOf<String>() }
-    // LazyListScope 不是组合作用域、不会订阅快照状态；折叠集合的读取必须发生在这个组合作用域内
-    // （下面 for 循环读的 collapsedNow），这样点击分组头切换该集合时会重建列表、该组模型行即时收起；
-    // 分组头点击只切换被折叠集合。
-    val collapsedNow = collapsedGroups.toSet()
+    // 折叠状态：记「被折叠」的分组（默认全展开）。
+    //
+    // 用不可变 Set + rememberSaveable，而不是 SnapshotStateList：
+    // 后者在保存时机（onPause / 进程回收）被 SaveableStateRegistry 读取时，
+    // 若正好与 LazyColumn 的组合读快照交叠，会抛「Reading a state that was created
+    // after the snapshot was taken」——折叠的分组越多越容易撞上，表现为点折叠直接闪退。
+    // 换成纯值 Set 后 save/restore 不碰快照，问题消失；读取仍在组合作用域，
+    // 折叠变化会正常触发列表重建。
+    var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
     // 测试失败原文可能很长，行内只展示截断提示，全文点开弹窗查看
     var failureDetail by remember { mutableStateOf<String?>(null) }
 
@@ -200,7 +198,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 for ((routePrefix, models) in grouped) {
                     val title = models.firstOrNull()?.providerName ?: routePrefix
                     val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
-                    val collapsed = routePrefix in collapsedNow
                     item(key = "header-$routePrefix") {
                         Row(
                             modifier = Modifier
@@ -208,16 +205,19 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 .clip(MaterialTheme.shapes.large)
                                 .background(MaterialTheme.colorScheme.surface)
                                 .clickable {
-                                    if (routePrefix in collapsedGroups) collapsedGroups.remove(routePrefix)
-                                    else collapsedGroups.add(routePrefix)
+                                    collapsed = if (routePrefix in collapsed) {
+                                        collapsed - routePrefix
+                                    } else {
+                                        collapsed + routePrefix
+                                    }
                                 }
                                 .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Icon(
-                                imageVector = if (collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                                contentDescription = if (collapsed) "展开" else "折叠",
+                                imageVector = if (routePrefix in collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                contentDescription = if (routePrefix in collapsed) "展开" else "折叠",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp),
                             )
@@ -251,7 +251,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         }
                     }
                     // 折叠的分组跳过其模型行：只渲染分组头，模型行即时收起
-                    if (routePrefix in collapsedNow) continue
+                    if (routePrefix in collapsed) continue
                     items(models, key = { it.fullId }) { model ->
                         val testStatus = state.modelTestLatencies[model.fullId]
                         ModelRow(

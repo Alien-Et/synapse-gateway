@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.EmptyHint
 import dev.aigw.app.ui.OutlineActionButton
+import dev.aigw.app.ui.PagedAccountList
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.accountStatusText
@@ -69,7 +70,7 @@ class CustomUi(override val id: String) : ProviderUi {
     @Composable
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
         AddAccountSection(accounts, actions)
-        for (account in accounts) {
+        PagedAccountList(accounts, keyOf = { it.uid }) { _, account ->
             AccountDetailCard(account, actions)
         }
     }

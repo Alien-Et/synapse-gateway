@@ -79,7 +79,7 @@
 | `gateway/LoopbackCallbackServer.kt` | OAuth 登录回调监听（Trae 51120 / Antigravity 51121） | 临时端口，用完即释放 |
 | `gateway/OpenAiApi.kt` | OpenAI 报文拼装（error/modelList） | |
 | `failover/` | 容灾调度：`FailoverConfig`（候选/重试/熔断参数；`FailoverCandidate.weight`/`timeoutMs` **未生效**，仅配置兼容）、`FailoverDecision`（错误→重试/换家/终止）、`ProviderCircuitBreaker`（连续失败熔断）、`ProviderMetricsTracker`（健康指标，仅观测） | 熔断只计上游侧错误，客户端 400 不计 |
-| `pool/AccountPool.kt` | 账号池：选号（余额最高者）、硬禁用（disabled）、持久化；不做本地冷却，上游错误由换号/Failover 应对 | 状态持久化在 `pool/state/<providerId>.json` |
+| `pool/AccountPool.kt` | 账号池：选号（余额最高者）、硬禁用（disabled）、持久化；不做本地冷却，上游错误由换号/Failover 应对 | 状态持久化在 `pool/state/<providerId>/<uid>.json`（一账号一文件；旧版 `pool/state/<providerId>.json` 首次读取时惰性迁移） |
 | `protocol/OpenAiGemini.kt` | OpenAI⇄Gemini 双向转换（Antigravity 专用）：严格 user/model 角色交替、tool 聚合、thinking、safetySettings | **上游强制要求 contents 角色交替**，连续同 role 会 400 |
 | `provider/Provider.kt` | Provider 接口 + AuthKind 枚举 | 抽象边界，勿随意扩接口 |
 | `provider/ChatCall.kt` | 上游响应封装（stream/aggregated/failure 三态） | |
@@ -130,8 +130,8 @@ TTL 缓存，保证真正重打上游；目录缓存仍保留最后一次成功�
 ### 存储键布局（EncryptedSharedPreferences）
 
 ```
-account/<providerId>/<uid>.json    # 账号凭证（ProviderAccount.toJson）
-pool/state/<providerId>.json       # 账号状态（禁用/额度）
+account/<providerId>/<uid>           # 账号凭证（ProviderAccount.toJson）
+pool/state/<providerId>/<uid>.json   # 账号状态（禁用/额度）；旧版为 pool/state/<providerId>.json（自动迁移）
 settings/gateway.json              # 网关设置
 settings/provider/<id>.json        # 供应商设置（含 region 等 option）
 settings/proxy.json                # 代理设置

@@ -654,6 +654,28 @@ class CodeBuddyProvider(
         }
     }
 
+    /**
+     * 粘贴凭证 JSON 导入。
+     *
+     * 上游没有回调链接端点，浏览器授权错过后只能手工把凭证 JSON 贴进来。
+     * 解析走与设备授权相同的 [credentialOf] → [toProviderAccount] 链路，
+     * 因此导入的账号与轮询登录得到的账号结构完全一致，账号池无需区分来源。
+     *
+     * [credentialOf] 已经兼容 camelCase / snake_case 两套字段名并在 uid 缺失时从 JWT 兜底，
+     * 这里只负责报错——非法输入必须给出可读原因（`importAccountJson` 会把 message 当错误回传）。
+     */
+    override fun importCredentials(raw: String): ProviderAccount? {
+        val text = raw.trim()
+        if (text.isEmpty()) throw IllegalStateException("凭证 JSON 不能为空")
+        val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
+            ?: throw IllegalStateException("不是合法的 JSON，请粘贴完整凭证")
+        val credential = credentialOf(obj)
+        if (credential.accessToken.isEmpty()) {
+            throw IllegalStateException("凭证缺少 accessToken（access_token）字段")
+        }
+        return toProviderAccount(credential)
+    }
+
     // ------------------------------------------------------------------ 设备授权登录
 
     override fun startDeviceAuth(region: String): DeviceAuthTicket {

@@ -70,9 +70,6 @@ class AccountPool(
     /** 按 provider 分组的条目索引：选号只需扫该供应商的账号，不必遍历整个池。 */
     private val byProvider = HashMap<String, MutableList<Entry>>()
 
-    /** 各 provider 的状态快照缓存，避免每个账号都重复读同一个文件。 */
-    private val stateCache = HashMap<String, JsonObject>()
-
     init {
         load()
     }
@@ -94,7 +91,7 @@ class AccountPool(
             byProvider.getOrPut(account.providerId) { ArrayList() }.add(entry)
         }
         persistAccount(account)
-        persistState(account.providerId)
+        persistState(account.providerId, account.uid)
     }
 
     fun remove(providerId: String, uid: String): Boolean = lock.write {
@@ -103,7 +100,9 @@ class AccountPool(
         group?.remove(entry)
         if (group != null && group.isEmpty()) byProvider.remove(providerId)
         store.delete(accountKey(providerId, uid))
-        persistState(providerId)
+        store.delete(stateKey(providerId, uid))
+        // 同 uid 重新登录时若旧格式文件还留着该账号状态，会与新建的默认状态冲突，故一并摘除。
+        purgeLegacyState(providerId, uid)
         true
     }
 
@@ -147,7 +146,7 @@ class AccountPool(
         } else if (entry.reason.isNotEmpty() && !entry.disabled) {
             entry.reason = ""
         }
-        persistState(providerId)
+        persistState(providerId, uid)
     }
 
     /** 凭证失效：硬禁用，只能重新登录恢复。 */
@@ -155,7 +154,7 @@ class AccountPool(
         val entry = entries[keyOf(providerId, uid)] ?: return@write
         entry.disabled = true
         entry.reason = reason
-        persistState(providerId)
+        persistState(providerId, uid)
     }
 
     /** 更新额度。 */
@@ -170,7 +169,7 @@ class AccountPool(
         entry.credits = credits
         entry.creditsKnown = known
         entry.detail = detail
-        persistState(providerId)
+        persistState(providerId, uid)
     }
 
     /** 刷新凭证后落盘（refreshToken 会轮换，必须立刻写回）。 */
@@ -246,21 +245,23 @@ class AccountPool(
         store.write(accountKey(account.providerId, account.uid), account.toJson().toString())
     }
 
-    /** 按 provider 分片落盘：每个 provider 一个状态文件，互不干扰。 */
-    private fun persistState(providerId: String) {
-        val accounts = JsonObject()
-        for (entry in entries.values) {
-            if (entry.account.providerId != providerId) continue
-            accounts.add(entry.account.uid, JsonObject().apply {
-                addProperty("credits", entry.credits)
-                addProperty("creditsKnown", entry.creditsKnown)
-                addProperty("detail", entry.detail)
-                addProperty("disabled", entry.disabled)
-                addProperty("enabled", entry.enabled)
-                addProperty("reason", entry.reason)
-            })
-        }
-        store.write(stateKey(providerId), JsonObject().apply { add("accounts", accounts) }.toString())
+    /**
+     * 按账号落盘：一个账号一个状态键。
+     * 只重写单个账号意味着「改一个账号」的写放大从整包变成一条记录——
+     * Android 侧每次 write 都是一整次文件提交，这里必须精确到 uid。
+     */
+    private fun persistState(providerId: String, uid: String) {
+        val entry = entries[keyOf(providerId, uid)] ?: return
+        store.write(stateKey(providerId, uid), stateJson(entry).toString())
+    }
+
+    private fun stateJson(entry: Entry): JsonObject = JsonObject().apply {
+        addProperty("credits", entry.credits)
+        addProperty("creditsKnown", entry.creditsKnown)
+        addProperty("detail", entry.detail)
+        addProperty("disabled", entry.disabled)
+        addProperty("enabled", entry.enabled)
+        addProperty("reason", entry.reason)
     }
 
     private fun load() {
@@ -268,16 +269,13 @@ class AccountPool(
             val raw = store.read(key) ?: continue
             val account = runCatching { ProviderAccount.parse(raw) }.getOrNull() ?: continue
             val entry = Entry(account)
-            loadState(account.providerId)?.get(account.uid)?.let { saved ->
-                if (saved.isJsonObject) {
-                    val state = saved.asJsonObject
-                    entry.credits = state.get("credits")?.asLong ?: 0L
-                    entry.creditsKnown = state.get("creditsKnown")?.asBoolean ?: false
-                    entry.detail = state.get("detail")?.asString.orEmpty()
-                    entry.disabled = state.get("disabled")?.asBoolean ?: false
-                    entry.enabled = state.get("enabled")?.asBoolean ?: true
-                    entry.reason = state.get("reason")?.asString.orEmpty()
-                }
+            readState(account.providerId, account.uid)?.let { state ->
+                entry.credits = state.get("credits")?.asLong ?: 0L
+                entry.creditsKnown = state.get("creditsKnown")?.asBoolean ?: false
+                entry.detail = state.get("detail")?.asString.orEmpty()
+                entry.disabled = state.get("disabled")?.asBoolean ?: false
+                entry.enabled = state.get("enabled")?.asBoolean ?: true
+                entry.reason = state.get("reason")?.asString.orEmpty()
             }
             entries[keyOf(account.providerId, account.uid)] = entry
         }
@@ -291,17 +289,66 @@ class AccountPool(
         }
     }
 
-    private fun loadState(providerId: String): JsonObject? = stateCache.getOrPut(providerId) {
-        val raw = store.read(stateKey(providerId)) ?: return@getOrPut JsonObject()
-        runCatching { JsonParser.parseString(raw).asJsonObject.objOrNull("accounts") }.getOrNull()
-            ?: JsonObject()
+    /**
+     * 读单个账号的状态；新键缺失时惰性迁移旧格式（provider 级整包文件）。
+     *
+     * 迁移策略：命中旧文件里的该 uid 后，先把状态写进新键、再把该 uid 从旧文件摘除，
+     * 旧文件清空即删除。选「摘 uid」而不是「迁移完全部 uid 再删旧文件」，是因为：
+     * 1) 迁移进度就存在旧文件自身（哪些 uid 还在就是还没迁），无需额外记账，天然可重复执行；
+     * 2) 全程不存在「旧键仍持有数据而新键已写」的重叠窗口，新键一旦写入旧副本即被移除，
+     *    读路径永远以新键为准，不会出现旧副本把状态改回去；
+     * 3) 某 provider 只有部分账号有凭证时（其余 uid 无凭证、load 不会遍历到），旧文件里剩下的 uid
+     *    会保留到其账号下次出现，避免一次性丢状态。
+     */
+    private fun readState(providerId: String, uid: String): JsonObject? {
+        val raw = store.read(stateKey(providerId, uid))
+        if (raw != null) {
+            return runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
+        }
+        return migrateLegacyState(providerId, uid)
+    }
+
+    private fun migrateLegacyState(providerId: String, uid: String): JsonObject? {
+        val legacy = readLegacyAccounts(providerId) ?: return null
+        val saved = legacy.get(uid)?.takeIf { it.isJsonObject }?.asJsonObject ?: return null
+        // 先落新键再从旧文件摘除：两步之间即使崩溃，也只是旧文件里留了一份冗余副本，
+        // 下次读取因新键已存在而直接命中新键，不依赖这次迁移是否完成。
+        store.write(stateKey(providerId, uid), saved.toString())
+        dropLegacyUid(providerId, legacy, uid)
+        return saved
+    }
+
+    /** 删除账号时摘除其遗留的旧格式状态，避免同 uid 重新登录时旧状态被迁移回来。 */
+    private fun purgeLegacyState(providerId: String, uid: String) {
+        val legacy = readLegacyAccounts(providerId) ?: return
+        if (legacy.get(uid) == null) return
+        dropLegacyUid(providerId, legacy, uid)
+    }
+
+    private fun readLegacyAccounts(providerId: String): JsonObject? {
+        val raw = store.read(legacyStateKey(providerId)) ?: return null
+        return runCatching {
+            JsonParser.parseString(raw).asJsonObject.objOrNull("accounts")
+        }.getOrNull()
+    }
+
+    private fun dropLegacyUid(providerId: String, legacy: JsonObject, uid: String) {
+        legacy.remove(uid)
+        if (legacy.size() == 0) {
+            store.delete(legacyStateKey(providerId))
+        } else {
+            store.write(legacyStateKey(providerId), JsonObject().apply { add("accounts", legacy) }.toString())
+        }
     }
 
     companion object {
         const val ACCOUNT_PREFIX = "account/"
         const val STATE_PREFIX = "pool/state/"
 
-        /** 某个 provider 的状态文件键（测试与迁移脚本用）。 */
-        fun stateKey(providerId: String) = "$STATE_PREFIX$providerId.json"
+        /** 某个账号的状态文件键（测试与迁移脚本用）。 */
+        fun stateKey(providerId: String, uid: String) = "$STATE_PREFIX$providerId/$uid.json"
+
+        /** 旧版 provider 级状态文件键：整包格式 `{"accounts":{uid:{...}}}`，仅用于惰性迁移。 */
+        fun legacyStateKey(providerId: String) = "$STATE_PREFIX$providerId.json"
     }
 }

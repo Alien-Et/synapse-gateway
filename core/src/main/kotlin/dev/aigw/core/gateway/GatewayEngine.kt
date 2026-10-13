@@ -35,11 +35,14 @@ import dev.aigw.core.usage.StorageReport
 import dev.aigw.core.usage.UsageStats
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 /** 登录状态。 */
 enum class LoginState { SUCCESS, FAILED }
@@ -62,6 +65,35 @@ data class CreditRefreshResult(
     val balance: Long,
     val known: Boolean,
     val error: String,
+)
+
+/** 批量动作的目标账号（providerId + uid）。 */
+data class BatchTarget(val providerId: String, val uid: String)
+
+/**
+ * 批量动作中单个账号的结果。
+ *
+ * 用结构化对象逐个带回，调用方才能「成功 N 个 / 失败 M 个 + 失败逐条原因」地展示，
+ * 而不是把整批失败拼成一条读不完的异常字符串。
+ */
+data class BatchActionResult(
+    val providerId: String,
+    val uid: String,
+    val nickname: String,
+    val ok: Boolean,
+    val message: String,
+)
+
+/**
+ * 批量任务进行中的进度事件（在后台线程发出，调用方自行切回 UI 线程）。
+ * [done] 为已完成个数、[total] 为总个数，[nickname]/[uid] 是刚完成的那一个账号。
+ */
+data class BatchProgress(
+    val done: Int,
+    val total: Int,
+    val providerId: String,
+    val uid: String,
+    val nickname: String,
 )
 
 /** 流式拉取模型目录时，单个供应商的就绪事件（成功带 models，失败带 error）。 */
@@ -574,8 +606,21 @@ class GatewayEngine(
         )
     }
 
-    fun refreshAllCredits(providerId: String? = null): List<CreditRefreshResult> =
-        pool.accounts(providerId).map { refreshCredits(it.providerId, it.uid) }
+    /**
+     * 刷新额度。
+     *
+     * [parallelism] 为并发度（默认 3）：逐个串行刷在多账号下慢得离谱，全部齐发又会同时打上游
+     * 触发风控，3 是有界并发下的保守折中（见 [performActionAll]）。
+     * [onProgress] 在每个账号刷完后于后台线程回调，供 UI 显示进度。
+     */
+    fun refreshAllCredits(
+        providerId: String? = null,
+        parallelism: Int = DEFAULT_BATCH_PARALLELISM,
+        onProgress: ((BatchProgress) -> Unit)? = null,
+    ): List<CreditRefreshResult> {
+        val targets = pool.accounts(providerId).map { BatchTarget(it.providerId, it.uid) }
+        return refreshCreditsBounded(targets, parallelism, onProgress)
+    }
 
     /** 取某账号的额度包明细（会打上游，调用方自行控制频率）。 */
     fun creditPacks(providerId: String, uid: String): List<QuotaPack> {
@@ -612,9 +657,9 @@ class GatewayEngine(
         action: String,
         payload: JsonObject = JsonObject(),
     ): ProviderActionResult {
-        val provider = registry.get(providerId) ?: return ProviderActionResult.failure("未知供应商")
-        val account = pool.account(providerId, uid) ?: return ProviderActionResult.failure("账号不存在")
-        val result = provider.performAction(account, action, payload)
+        val result = performActionRaw(providerId, uid, action, payload)
+        // 单账号动作：成功后立刻刷一次该账号额度，用户点一下就能看到最新数字。
+        // 批量路径不走这里（见 performActionAll），否则 N 个账号会多打 N 次额度接口。
         if (result.ok) refreshCredits(providerId, uid)
         return result
     }
@@ -622,6 +667,123 @@ class GatewayEngine(
     /** 无参数动作的便捷重载（调用方不必依赖 JsonObject）。 */
     fun performAction(providerId: String, uid: String, action: String): ProviderActionResult =
         performAction(providerId, uid, action, JsonObject())
+
+    /**
+     * 批量执行同一动作（签到 / 任务等），**不**在动作成功后逐个补刷额度。
+     *
+     * 与逐个调用 [performAction] 的区别：
+     * - 有界并发（默认并发 [DEFAULT_BATCH_PARALLELISM]=3）：多账号串行太慢，齐发又会被风控；
+     * - 单账号失败不影响其它账号，结果逐条结构化返回（调用方才能「成功 N / 失败 M + 逐条原因」地展示）；
+     * - **动作阶段不刷额度**：原先每个账号动作成功后立刻补刷，等于每个账号都要先排队等它刷完
+     *   （串行的两倍耗时）；改成动作全部完成后统一刷一轮（见下方 [refreshCreditsBounded]），
+     *   并把这一轮也并发起来。上游 creditInfo 天然是每账号一次，所以能省下的是重复时延与
+     *   「已签到的账号不重复请求」——签到成功才补刷，失败账号不再白打一次上游。
+     *
+     * [targets] 会按 (providerId, uid) 去重，保证每个账号最多执行一次动作。
+     * [onProgress] 在每个账号完成后于后台线程回调（已完成数 / 刚完成的账号），供 UI 显示进度；
+     * 回调里不要直接碰 UI，调用方自行切线程。
+     */
+    fun performActionAll(
+        targets: List<BatchTarget>,
+        action: String,
+        payload: JsonObject = JsonObject(),
+        parallelism: Int = DEFAULT_BATCH_PARALLELISM,
+        onProgress: ((BatchProgress) -> Unit)? = null,
+    ): List<BatchActionResult> {
+        // 去重：同一账号最多执行一次动作，避免调用方传入重复目标时重复签到。
+        val ordered = targets.distinctBy { it.providerId to it.uid }
+        if (ordered.isEmpty()) return emptyList()
+
+        val results = runBounded(ordered, parallelism, onDone = { done, index ->
+            if (onProgress != null) {
+                val target = ordered[index]
+                val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                onProgress(BatchProgress(done, ordered.size, target.providerId, target.uid, nickname))
+            }
+        }) { target ->
+            // 单个账号抛异常也不能拖垮整批：就地转成失败结果。
+            val outcome = runCatching { performActionRaw(target.providerId, target.uid, action, payload) }
+            val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+            outcome.fold(
+                { BatchActionResult(target.providerId, target.uid, nickname, it.ok, it.message) },
+                { BatchActionResult(target.providerId, target.uid, nickname, false, it.message ?: "操作失败") },
+            )
+        }
+
+        // 批量结束后统一刷一次额度，替掉原先「每个账号动作成功后立刻补刷」的逐账号额外请求。
+        // 只刷动作成功、余额可能已变的账号：失败的账号余额没动，再打一次上游只会徒增噪音与风控。
+        val succeeded = results.filter { it.ok }.map { BatchTarget(it.providerId, it.uid) }
+        if (succeeded.isNotEmpty()) refreshCreditsBounded(succeeded, parallelism)
+        return results
+    }
+
+    /** 批量动作的底层执行：不做额度补刷，供 [performAction] 与 [performActionAll] 共用。 */
+    private fun performActionRaw(
+        providerId: String,
+        uid: String,
+        action: String,
+        payload: JsonObject,
+    ): ProviderActionResult {
+        val provider = registry.get(providerId) ?: return ProviderActionResult.failure("未知供应商")
+        val account = pool.account(providerId, uid) ?: return ProviderActionResult.failure("账号不存在")
+        return provider.performAction(account, action, payload)
+    }
+
+    /** 有界并发刷新一批账号的额度；结果顺序与 [targets] 一致（与串行版可比）。 */
+    private fun refreshCreditsBounded(
+        targets: List<BatchTarget>,
+        parallelism: Int,
+        onProgress: ((BatchProgress) -> Unit)? = null,
+    ): List<CreditRefreshResult> = runBounded(
+        targets,
+        parallelism,
+        onDone = { done, index ->
+            if (onProgress != null) {
+                val target = targets[index]
+                val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                onProgress(BatchProgress(done, targets.size, target.providerId, target.uid, nickname))
+            }
+        },
+    ) { target ->
+        refreshCredits(target.providerId, target.uid)
+    }
+
+    /**
+     * 有界并发跑一批任务，结果按 [targets] 下标存放（返回顺序与入参一致）。
+     *
+     * 不复用 [ioPool]：它是 0~8 线程 + SynchronousQueue + CallerRunsPolicy，
+     * 队列满时会把任务丢回调用线程执行，并发度既保证不了、上限也不可控；
+     * 这里每次批量调用新建一个固定大小线程池，跑完即销毁，天然把并发钉在 [parallelism] 以内。
+     * 批量动作是低频操作，线程创建开销可忽略。
+     */
+    private fun <R> runBounded(
+        targets: List<BatchTarget>,
+        parallelism: Int,
+        onDone: ((done: Int, index: Int) -> Unit)? = null,
+        task: (BatchTarget) -> R,
+    ): List<R> {
+        if (targets.isEmpty()) return emptyList()
+        val poolSize = parallelism.coerceIn(1, MAX_BATCH_PARALLELISM)
+        val results = AtomicReferenceArray<R>(targets.size)
+        val finished = AtomicInteger(0)
+        val executor = ThreadPoolExecutor(
+            poolSize, poolSize, 30L, TimeUnit.SECONDS, LinkedBlockingQueue<Runnable>(),
+            { runnable -> Thread(runnable, "aigw-batch").apply { isDaemon = true } },
+        )
+        try {
+            val futures = targets.mapIndexed { index, target ->
+                executor.submit(Runnable {
+                    results.set(index, task(target))
+                    onDone?.invoke(finished.incrementAndGet(), index)
+                })
+            }
+            // 等全部完成；个别任务抛出的异常已被 task 内部消化，这里只是兜底不让等任务卡住。
+            futures.forEach { runCatching { it.get() } }
+        } finally {
+            executor.shutdownNow()
+        }
+        return (0 until targets.size).map { index -> results.get(index) }
+    }
 
     // ------------------------------------------------------------------ 登录
 
@@ -1262,6 +1424,15 @@ class GatewayEngine(
 
         /** 自动补刷额度的同账号最小间隔：对话连发时不打爆上游积分接口。 */
         private const val AUTO_CREDIT_REFRESH_MIN_INTERVAL_MS = 10_000L
+
+        /**
+         * 批量动作的默认并发度：3 个账号同时打上游是「明显快于串行」又「不至于齐发触发风控」的折中。
+         * 多账号同时打上游容易被上游风控盯上（本项目第一优先级是账号稳定），故取保守值。
+         */
+        const val DEFAULT_BATCH_PARALLELISM = 3
+
+        /** 并发度上限：再大就和「一次打全部」没区别了，只会放大风控，不能放开。 */
+        private const val MAX_BATCH_PARALLELISM = 8
 
         /** Trae 登录回调用的本地端口（避开 Antigravity 的 51121）。 */
         const val TRAE_CALLBACK_PORT = 51120

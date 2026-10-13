@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import com.google.gson.JsonObject
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.OutlineActionButton
+import dev.aigw.app.ui.PagedAccountList
 import dev.aigw.app.ui.SectionCard
 import dev.aigw.app.ui.SectionLabel
 import dev.aigw.app.ui.accountStatusText
@@ -155,7 +156,7 @@ object TraeUi : ProviderUi {
             }
             SectionCard(enterIndex = 1) {
                 SectionLabel("账号 · ${scoped.size} 个")
-                for (account in scoped) {
+                PagedAccountList(scoped, keyOf = { it.uid }) { _, account ->
                     AccountBlock(account, actions)
                 }
                 OutlineActionButton("刷新额度") { actions.onRefreshCredits(id, null) }

@@ -531,6 +531,8 @@ class GatewayHttpServer(
             var failure = ""
             var sawData = false
             var sawPayload = false
+            // 上游是否已自己给出 [DONE]：正常结束但没给时要补一个，否则客户端只看到截断流
+            var sawDone = false
             // 网关自身转发异常（非客户端断开）：需补一个错误帧 + [DONE]，
             // 否则客户端只看到一条没有 [DONE] 的截断流，会误判为网络异常。
             var gatewayError = false
@@ -550,7 +552,10 @@ class GatewayHttpServer(
                             flushBatch(batch, writer)
                             continue
                         }
-                        if (line.startsWith("data:")) sawData = true
+                        if (line.startsWith("data:")) {
+                            sawData = true
+                            if (line.removePrefix("data:").trim() == "[DONE]") sawDone = true
+                        }
                         rawLines.append(line + "\n")
                         batch.append(line).append("\n\n")
                         if (batch.length >= FLUSH_THRESHOLD_CHARS) flushBatch(batch, writer)
@@ -602,6 +607,11 @@ class GatewayHttpServer(
                         writer.write("data: " + OpenAiApi.errorBody("internal_error", failure) + "\n\n")
                         writer.write("data: [DONE]\n\n")
                     }
+                } else if (status == CallStatus.SUCCESS && !sawDone) {
+                    // 上游正常结束（EOF）但没发 [DONE]：原样透传类供应商常见。
+                    // 走到这里说明 sawData/sawPayload 均已满足（前两个分支已排除），
+                    // 补一个结束标记，避免客户端把截断流误判为网络异常。本链保证最多补一次。
+                    runCatching { writer.write("data: [DONE]\n\n") }
                 }
                 call.close()
                 if (status == CallStatus.SUCCESS) {
@@ -958,9 +968,16 @@ internal class SimpleStatus(private val code: Int, private val text: String) : N
 }
 
 /** 分块编码写出器，每次写出后立即 flush，保证 SSE 实时到达客户端。 */
-internal class ChunkWriter(private val out: OutputStream) {
+internal class ChunkWriter(
+    private val out: OutputStream,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
+) {
 
     private var finished = false
+
+    /** 最近一次真正写出数据的时刻；心跳线程据此判断是否已静默，避免活跃流期间发冗余心跳。 */
+    @Volatile
+    private var lastWriteAtMillis: Long = nowMillis()
 
     fun write(text: String) = write(text.toByteArray(StandardCharsets.UTF_8))
 
@@ -973,7 +990,11 @@ internal class ChunkWriter(private val out: OutputStream) {
         out.write(bytes)
         out.write(CRLF)
         out.flush()
+        lastWriteAtMillis = nowMillis()
     }
+
+    /** 距最近一次写出数据的毫秒数，供心跳判断活跃/静默。 */
+    fun idleMillis(): Long = nowMillis() - lastWriteAtMillis
 
     @Synchronized
     fun finish() {
@@ -992,6 +1013,8 @@ internal class ChunkWriter(private val out: OutputStream) {
 /** 流式响应：自己做分块编码，避免 NanoHTTPD 默认实现不逐块 flush 导致 SSE 卡顿。 */
 internal class SseResponse(
     private val scheduler: ScheduledExecutorService,
+    private val heartbeatIdleSeconds: Long = HEARTBEAT_IDLE_SECONDS,
+    private val heartbeatCheckSeconds: Long = HEARTBEAT_CHECK_SECONDS,
     private val produce: (ChunkWriter) -> Unit,
 ) : NanoHTTPD.Response(SimpleStatus(200, "OK"), "text/event-stream; charset=utf-8", null, -1) {
 
@@ -1017,11 +1040,19 @@ internal class SseResponse(
 
         // 上游长思考时可能几十秒不出任何 chunk，客户端会读超时并把连接判成断开；
         // 定时发 SSE 注释行（按规范客户端会忽略）把空闲连接续上。
+        // 只在「已静默 ≥ heartbeatIdleSeconds」时才发：活跃流期间不制造冗余心跳，
+        // 也不再无条件掩盖客户端自身的读超时。检查周期 heartbeatCheckSeconds，
+        // 故最坏 keepalive 间隔 ≈ idle + check，仍远小于常见客户端读超时。
         // 复用引擎的共享定时器，只取消本流的这一个周期任务，不额外创建/销毁线程。
+        val idleThresholdMillis = TimeUnit.SECONDS.toMillis(heartbeatIdleSeconds)
         val beat = scheduler.scheduleAtFixedRate(
-            { runCatching { writer.write(HEARTBEAT) } },
-            HEARTBEAT_SECONDS,
-            HEARTBEAT_SECONDS,
+            {
+                if (writer.idleMillis() >= idleThresholdMillis) {
+                    runCatching { writer.write(HEARTBEAT) }
+                }
+            },
+            heartbeatCheckSeconds,
+            heartbeatCheckSeconds,
             TimeUnit.SECONDS,
         )
         try {
@@ -1034,7 +1065,11 @@ internal class SseResponse(
     }
 
     private companion object {
-        const val HEARTBEAT_SECONDS = 15L
+        /** 静默多久后开始补心跳。 */
+        const val HEARTBEAT_IDLE_SECONDS = 15L
+
+        /** 心跳检查周期：最坏 keepalive 间隔 ≈ IDLE + CHECK = 20s。 */
+        const val HEARTBEAT_CHECK_SECONDS = 5L
         val HEARTBEAT = ": keep-alive\n\n".toByteArray(StandardCharsets.US_ASCII)
     }
 }
