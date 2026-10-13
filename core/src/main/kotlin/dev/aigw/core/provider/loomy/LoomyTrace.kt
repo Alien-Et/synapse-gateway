@@ -1,6 +1,6 @@
 package dev.aigw.core.provider.loomy
 
-import java.security.SecureRandom
+import dev.aigw.core.util.randomHex
 
 /**
  * W3C Trace Context 的 `traceparent`。
@@ -11,13 +11,5 @@ import java.security.SecureRandom
  */
 object LoomyTrace {
 
-    private val random = SecureRandom()
-
-    fun newTraceparent(): String = "00-${hex(16)}-${hex(8)}-01"
-
-    private fun hex(bytes: Int): String {
-        val out = ByteArray(bytes)
-        random.nextBytes(out)
-        return out.joinToString("") { "%02x".format(it) }
-    }
+    fun newTraceparent(): String = "00-${randomHex(16)}-${randomHex(8)}-01"
 }

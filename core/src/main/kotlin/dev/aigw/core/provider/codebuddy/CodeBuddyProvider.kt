@@ -27,14 +27,14 @@ import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.HttpSupport
+import dev.aigw.core.util.firstLong
+import dev.aigw.core.util.firstString
+import dev.aigw.core.util.jwtClaim
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.str
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -118,7 +118,7 @@ class CodeBuddyProvider(
             return FailedChatCall(0, e.message ?: "连接失败")
         }
         if (status !in 200..299) {
-            val errorBody = runCatching { readLimited(conn.errorStream) }.getOrDefault("")
+            val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
             return FailedChatCall(status, errorBody)
         }
@@ -137,7 +137,7 @@ class CodeBuddyProvider(
             return AggregatedChatCall(status, aggregated)
         }
 
-        val text = runCatching { stream.use { readLimited(it) } }.getOrDefault("")
+        val text = runCatching { stream.use { HttpSupport.readLimited(it) } }.getOrDefault("")
         conn.disconnect()
         return AggregatedChatCall(status, text)
     }
@@ -771,21 +771,11 @@ class CodeBuddyProvider(
         headers: Map<String, String>,
         method: String = if (body == null) "GET" else "POST",
     ): HttpURLConnection {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = false
-            setRequestProperty("Accept-Encoding", "identity")
+        val merged = buildMap {
+            putAll(headers)
+            if (body != null) put("Content-Type", "application/json")
         }
-        for ((key, value) in headers) conn.setRequestProperty(key, value)
-        if (body != null) {
-            conn.doOutput = true
-            val bytes = body.toByteArray(StandardCharsets.UTF_8)
-            conn.setFixedLengthStreamingMode(bytes.size)
-            conn.outputStream.use { it.write(bytes) }
-        }
-        return conn
+        return HttpSupport.open(url, method, merged, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
     }
 
     private fun postJson(
@@ -796,9 +786,7 @@ class CodeBuddyProvider(
     ): Pair<Int, String> {
         val conn = open(url, credential, body, headers)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -807,9 +795,7 @@ class CodeBuddyProvider(
     private fun getJson(url: String, headers: Map<String, String> = emptyMap()): Pair<Int, String> {
         val conn = open(url, null, null, headers, method = "GET")
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -963,22 +949,6 @@ class CodeBuddyProvider(
     private fun matchesSessionDead(body: String): Boolean =
         SESSION_DEAD_MARKERS.any { body.contains(it) }
 
-    private fun readLimited(input: InputStream?): String {
-        if (input == null) return ""
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (out.size() + read > MAX_BODY_BYTES) {
-                out.write(buffer, 0, MAX_BODY_BYTES - out.size())
-                break
-            }
-            out.write(buffer, 0, read)
-        }
-        return out.toString("UTF-8")
-    }
-
     private fun requestedModel(body: String): String =
         runCatching { JsonParser.parseString(body).asJsonObject.get("model")?.asString.orEmpty() }
             .getOrDefault("")
@@ -1058,7 +1028,6 @@ class CodeBuddyProvider(
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
-        private const val MAX_BODY_BYTES = 1 shl 20
     }
 }
 
@@ -1108,27 +1077,6 @@ internal fun normalizeCodeBuddyToolChoice(obj: JsonObject) {
 private fun jsonOf(body: String): JsonObject? =
     runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull()
 
-/** 取第一个非空字段（兼容 camelCase / snake_case 两套命名）。 */
-internal fun JsonObject.firstString(vararg keys: String): String {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val text = runCatching { value.asString }.getOrNull().orEmpty()
-        if (text.isNotEmpty()) return text
-    }
-    return ""
-}
-
-internal fun JsonObject.firstLong(vararg keys: String): Long {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val number = runCatching { value.asLong }.getOrNull()
-        if (number != null && number > 0) return number
-    }
-    return 0L
-}
-
 /** 按顺序取第一个能解析成数字的字段（用于 credits / reward_credit 这类可能是字符串的字段）。 */
 internal fun JsonObject.firstNumber(vararg keys: String): Double? {
     for (key in keys) {
@@ -1158,20 +1106,4 @@ private fun describeBody(body: String): String {
     val message = obj?.firstString("msg", "message", "desc", "error") ?: ""
     if (message.isNotEmpty()) return "：$message"
     return "：${body.trim().take(160)}"
-}
-
-/**
- * 从 access_token（JWT）的 payload 里取某个声明；取不到返回空串。
- *
- * 登录响应里不一定带 uid，但 access_token 是 JWT，里面通常有 user_id ——
- * 靠这个兜底，已经存进账号池的旧凭证也能自动补上 uid。
- */
-internal fun jwtClaim(accessToken: String, vararg keys: String): String {
-    val payload = accessToken.split('.').getOrNull(1) ?: return ""
-    if (payload.isEmpty()) return ""
-    val json = runCatching {
-        String(java.util.Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)
-    }.getOrNull() ?: return ""
-    val obj = runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull() ?: return ""
-    return obj.firstString(*keys)
 }

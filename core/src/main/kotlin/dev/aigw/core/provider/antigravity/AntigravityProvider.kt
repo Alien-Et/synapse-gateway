@@ -21,12 +21,12 @@ import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.provider.queryParam
 import dev.aigw.core.protocol.OpenAiGemini
+import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.longOrNull
+import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.stringOrNull
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -204,7 +204,7 @@ class AntigravityProvider(
             return FailedChatCall(0, e.message ?: "连接失败")
         }
         if (status !in 200..299) {
-            val errorBody = runCatching { readLimited(conn.errorStream) }.getOrDefault("")
+            val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
             return FailedChatCall(status, errorBody)
         }
@@ -504,55 +504,45 @@ class AntigravityProvider(
     }
 
     private fun open(url: String, accessToken: String, body: String?): HttpURLConnection {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = if (body == null) "GET" else "POST"
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = false
-            setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("Authorization", "Bearer $accessToken")
-            setRequestProperty("User-Agent", USER_AGENT)
+        val headers = buildMap {
+            put("Authorization", "Bearer $accessToken")
+            put("User-Agent", USER_AGENT)
+            if (body != null) put("Content-Type", "application/json")
         }
-        if (body != null) {
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            val bytes = body.toByteArray(StandardCharsets.UTF_8)
-            conn.setFixedLengthStreamingMode(bytes.size)
-            conn.outputStream.use { it.write(bytes) }
-        }
-        return conn
+        return HttpSupport.open(
+            url = url,
+            method = if (body == null) "GET" else "POST",
+            headers = headers,
+            body = body,
+            connectTimeoutMs = CONNECT_TIMEOUT_MS,
+            readTimeoutMs = READ_TIMEOUT_MS,
+        )
     }
 
     private fun get(url: String, accessToken: String): Pair<Int, String> {
         val conn = open(url, accessToken, null)
         return try {
-            val status = conn.responseCode
-            val body = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to body
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
     }
 
     private fun postJson(url: String, accessToken: String, body: String, connectTimeout: Int = CONNECT_TIMEOUT_MS, readTimeout: Int = READ_TIMEOUT_MS): Pair<Int, String> {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            this.connectTimeout = connectTimeout
-            this.readTimeout = readTimeout
-            instanceFollowRedirects = false
-            setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("Authorization", "Bearer $accessToken")
-            setRequestProperty("User-Agent", USER_AGENT)
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            val bytes = body.toByteArray(StandardCharsets.UTF_8)
-            setFixedLengthStreamingMode(bytes.size)
-            outputStream.use { it.write(bytes) }
-        }
+        val conn = HttpSupport.open(
+            url = url,
+            method = "POST",
+            headers = mapOf(
+                "Authorization" to "Bearer $accessToken",
+                "User-Agent" to USER_AGENT,
+                "Content-Type" to "application/json",
+            ),
+            body = body,
+            connectTimeoutMs = connectTimeout,
+            readTimeoutMs = readTimeout,
+        )
         return try {
-            val status = conn.responseCode
-            val response = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to response
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -575,7 +565,7 @@ class AntigravityProvider(
             conn.setFixedLengthStreamingMode(bytes.size)
             conn.outputStream.use { it.write(bytes) }
             val status = conn.responseCode
-            val body = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
+            val body = if (status in 200..299) HttpSupport.readLimited(conn.inputStream) else HttpSupport.readLimited(conn.errorStream)
             status to body
         } finally {
             conn.disconnect()
@@ -624,22 +614,6 @@ class AntigravityProvider(
         }
         obj.get("message")?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
         return ""
-    }
-
-    private fun readLimited(input: InputStream?): String {
-        if (input == null) return ""
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (out.size() + read > MAX_BODY_BYTES) {
-                out.write(buffer, 0, MAX_BODY_BYTES - out.size())
-                break
-            }
-            out.write(buffer, 0, read)
-        }
-        return out.toString("UTF-8")
     }
 
     private fun requestedModel(body: String): String =
@@ -815,9 +789,6 @@ class AntigravityProvider(
         runCatching { JsonParser.parseString(body).asJsonObject.get("stream")?.asBoolean ?: false }
             .getOrDefault(false)
 
-    private fun newCompletionId(): String =
-        "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
-
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private data class Tokens(val accessToken: String, val refreshToken: String, val expiresAt: Long)
@@ -915,6 +886,5 @@ class AntigravityProvider(
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
-        private const val MAX_BODY_BYTES = 1 shl 20
     }
 }

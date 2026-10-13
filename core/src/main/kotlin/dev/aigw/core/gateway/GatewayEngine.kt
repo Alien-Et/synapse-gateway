@@ -200,6 +200,14 @@ class GatewayEngine(
     private val providerSettingsCache = ConcurrentHashMap<String, ProviderSettings>()
 
     /**
+     * 供应商上游域名表的缓存：`providerHosts()` 被 [GatewayProxySelector] 在每次建连时读取
+     * （仅当配置了 `excludedProviderIds`），原来每次新建一个 Map 并遍历全部 provider。
+     * providers 注册变更（[reloadCustomProviders]）时失效即可，其余时间复用。
+     */
+    @Volatile
+    private var providerHostsCache: Map<String, List<String>>? = null
+
+    /**
      * 共享 I/O 线程池：模型目录、额度查询等会阻塞在网络上的并行任务都走这里。
      * 之前每次请求都 new 一个线程池再 shutdown，短连接 + 线程反复创建销毁纯属浪费；
      * 这里常驻复用，空闲线程 60 秒自行回收，不常占资源。
@@ -381,9 +389,18 @@ class GatewayEngine(
         log(if (updated.usable) "代理已启用：${updated.host}:${updated.port}" else "代理未启用")
     }
 
-    /** 各供应商的上游域名，供代理规则匹配（按供应商开关代理）。 */
-    fun providerHosts(): Map<String, List<String>> =
-        registry.all().associate { it.id to it.hosts() }
+    /**
+     * 各供应商的上游域名，供代理规则匹配（按供应商开关代理）。
+     *
+     * provider 注册集合只在 [reloadCustomProviders] 改变，故建连热路径（ProxySelector 每次
+     * `select`）复用缓存，避免每次都遍历全部 provider 现拼一个 Map。
+     */
+    fun providerHosts(): Map<String, List<String>> {
+        providerHostsCache?.let { return it }
+        val built = registry.all().associate { it.id to it.hosts() }
+        providerHostsCache = built
+        return built
+    }
 
     /**
      * 安装全局代理选择器。
@@ -493,7 +510,10 @@ class GatewayEngine(
     }
 
     /** 重新读取自定义供应商配置并登记（增删改后调用）。 */
-    fun reloadCustomProviders() {        // 先摘掉已登记的，避免删掉的供应商还留在列表里
+    fun reloadCustomProviders() {
+        // provider 集合即将变化，先失效域名表缓存（见 [providerHosts]）
+        providerHostsCache = null
+        // 先摘掉已登记的，避免删掉的供应商还留在列表里
         for (provider in registry.all()) {
             if (provider.id.startsWith(CUSTOM_PREFIX)) registry.unregister(provider.id)
         }
@@ -1426,13 +1446,17 @@ class GatewayEngine(
         private const val AUTO_CREDIT_REFRESH_MIN_INTERVAL_MS = 10_000L
 
         /**
-         * 批量动作的默认并发度：3 个账号同时打上游是「明显快于串行」又「不至于齐发触发风控」的折中。
-         * 多账号同时打上游容易被上游风控盯上（本项目第一优先级是账号稳定），故取保守值。
+         * 批量动作的默认并发度：6 个账号同时打上游，是「吞吐较 3 明显提升」又「不齐发触发风控」
+         * 的折中。上游风控与账号稳定是第一优先级，故不再往上抬；爱快的人可用显式 parallelism
+         * 提到 [MAX_BATCH_PARALLELISM]。
          */
-        const val DEFAULT_BATCH_PARALLELISM = 3
+        const val DEFAULT_BATCH_PARALLELISM = 6
 
-        /** 并发度上限：再大就和「一次打全部」没区别了，只会放大风控，不能放开。 */
-        private const val MAX_BATCH_PARALLELISM = 8
+        /**
+         * 并发度上限：给「想更快」留出的天花板（默认仍保守取 [DEFAULT_BATCH_PARALLELISM]）。
+         * 再大就和「一次打全部」没区别，只会放大风控。
+         */
+        private const val MAX_BATCH_PARALLELISM = 12
 
         /** Trae 登录回调用的本地端口（避开 Antigravity 的 51121）。 */
         const val TRAE_CALLBACK_PORT = 51120

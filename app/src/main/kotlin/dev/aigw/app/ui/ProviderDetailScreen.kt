@@ -11,7 +11,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -36,7 +35,7 @@ fun ProviderDetailScreen(
     onBack: () -> Unit,
     onEditCustom: (String) -> Unit,
 ) {
-    val ui = ProviderUiRegistry.require(providerId)
+    val ui = remember(providerId) { ProviderUiRegistry.require(providerId) }
     val info = state.providerOf(providerId)
     val accounts = state.accountsOf(providerId)
 
@@ -144,39 +143,18 @@ private fun AccountRow(
     actions: ProviderUiActions,
     index: Int,
 ) {
-    Column(
+    AccountCardShell(
+        account = account,
+        providerId = account.providerId,
+        actions = actions,
         modifier = Modifier.fillMaxWidth().staggeredAppear(index),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = account.nickname.ifEmpty { account.uid },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                // 额度与明细交给各供应商自己的组件展示（它们知道该怎么解读），这里只报状态
-                Text(
-                    text = accountStatusText(account),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+        extra = { ui.AccountExtra(account, actions) },
+        footer = {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                LinkText("删除账号") { actions.onRemoveAccount(account.providerId, account.uid) }
             }
-            Switch(
-                checked = account.enabled,
-                onCheckedChange = { actions.onToggleAccount(account.providerId, account.uid, it) },
-            )
-        }
-
-        ui.AccountExtra(account, actions)
-
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            LinkText("删除账号") { actions.onRemoveAccount(account.providerId, account.uid) }
-        }
-    }
+        },
+    )
 }
 
 @Composable

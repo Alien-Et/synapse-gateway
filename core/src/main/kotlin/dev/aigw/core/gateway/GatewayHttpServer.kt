@@ -5,11 +5,13 @@ import com.google.gson.JsonParser
 import dev.aigw.core.provider.ChatCall
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.OpenAiSseAggregator
+import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.CallStatus
 import dev.aigw.core.util.CappedStringBuilder
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.asObjectOrNull
+import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.stringOrNull
 import fi.iki.elonen.NanoHTTPD
@@ -19,7 +21,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
-import java.util.UUID
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
@@ -590,7 +591,7 @@ class GatewayHttpServer(
                     engine.logError("$providerId 的流式响应没有任何 data 行，已向客户端报错")
                     runCatching {
                         writer.write("data: " + OpenAiApi.errorBody("upstream_empty", failure) + "\n\n")
-                        writer.write("data: [DONE]\n\n")
+                        writer.write(SSE_DONE)
                     }
                 } else if (status == CallStatus.SUCCESS && sawData && !sawPayload) {
                     // 有 data 行但全是元数据（role/finish/usage），零实际内容：同样不能算成功
@@ -599,19 +600,19 @@ class GatewayHttpServer(
                     engine.logError("$providerId 的流式响应零内容，已向客户端报错")
                     runCatching {
                         writer.write("data: " + OpenAiApi.errorBody("upstream_empty", failure) + "\n\n")
-                        writer.write("data: [DONE]\n\n")
+                        writer.write(SSE_DONE)
                     }
                 } else if (gatewayError) {
                     // 网关转发异常：补错误帧 + [DONE]，让客户端看到可解析的结束信号而不是截断流
                     runCatching {
                         writer.write("data: " + OpenAiApi.errorBody("internal_error", failure) + "\n\n")
-                        writer.write("data: [DONE]\n\n")
+                        writer.write(SSE_DONE)
                     }
                 } else if (status == CallStatus.SUCCESS && !sawDone) {
                     // 上游正常结束（EOF）但没发 [DONE]：原样透传类供应商常见。
                     // 走到这里说明 sawData/sawPayload 均已满足（前两个分支已排除），
                     // 补一个结束标记，避免客户端把截断流误判为网络异常。本链保证最多补一次。
-                    runCatching { writer.write("data: [DONE]\n\n") }
+                    runCatching { writer.write(SSE_DONE) }
                 }
                 call.close()
                 if (status == CallStatus.SUCCESS) {
@@ -900,8 +901,6 @@ class GatewayHttpServer(
         503 -> "Service Unavailable"
         else -> "Status"
     }
-
-    private fun newCompletionId(): String = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
 
     private fun recordCall(
         id: String,

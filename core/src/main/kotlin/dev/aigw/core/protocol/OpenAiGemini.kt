@@ -3,6 +3,7 @@ package dev.aigw.core.protocol
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.asObjectOrNull
 import dev.aigw.core.util.boolOrNull
@@ -598,10 +599,6 @@ object OpenAiGemini {
                     })
                 }
             }
-        }
-
-        companion object {
-            const val SSE_DONE = "data: [DONE]\n\n"
         }
     }
 }

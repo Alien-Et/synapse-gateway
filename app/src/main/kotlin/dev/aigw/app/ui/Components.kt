@@ -25,7 +25,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,7 +41,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -260,11 +258,6 @@ private fun PagerChip(text: String, enabled: Boolean, onClick: () -> Unit) {
 @Composable
 fun StatusChip(running: Boolean) {
     val gold = LocalAppColors.current.goldStart
-    val content by animateColorAsState(
-        targetValue = MaterialTheme.colorScheme.onSurface,
-        animationSpec = tween(200),
-        label = "chipContent",
-    )
     Row(
         modifier = Modifier
             .clip(CircleShape)
@@ -293,7 +286,7 @@ fun StatusChip(running: Boolean) {
         Text(
             text = if (running) "运行中" else "已停止",
             style = MaterialTheme.typography.labelMedium,
-            color = content,
+            color = MaterialTheme.colorScheme.onSurface,
         )
     }
 }
@@ -402,46 +395,6 @@ fun OutlineActionButton(
             .clickable(onClick = onClick)
             .padding(vertical = 14.dp),
     )
-}
-
-/** 带图标的功能行（「我的」页的功能列表）。 */
-@Composable
-fun NavRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit,
-) {
-    val gold = LocalAppColors.current.goldStart
-    Row(
-        modifier = Modifier.fillMaxWidth().pressScale().clickable(onClick = onClick).padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(22.dp))
-        }
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = gold,
-        )
-    }
 }
 
 @Composable

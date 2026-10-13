@@ -20,6 +20,7 @@ import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.provider.ProviderModel
 import dev.aigw.core.provider.ProviderModelCatalogView
+import dev.aigw.core.provider.SSE_DONE
 import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
@@ -28,19 +29,21 @@ import dev.aigw.core.provider.WebLoginTicket
 import dev.aigw.core.provider.isStreamingBody
 import dev.aigw.core.provider.queryParam
 import dev.aigw.core.provider.requestedModelOf
+import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.boolOrNull
+import dev.aigw.core.util.firstLong
+import dev.aigw.core.util.firstString
+import dev.aigw.core.util.jwtClaim
+import dev.aigw.core.util.jwtClaimLong
 import dev.aigw.core.util.longOrNull
+import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
+import dev.aigw.core.util.randomHex
 import dev.aigw.core.util.stringOrNull
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.security.SecureRandom
-import java.util.UUID
 
 /**
  * 商汤「小浣熊」（`xiaohuanxiong.com`）的插件账号通道。
@@ -143,7 +146,7 @@ class RaccoonProvider(
         model: String,
     ): ChatCall {
         if (status !in 200..299) {
-            val errorBody = runCatching { readLimited(conn.errorStream) }.getOrDefault("")
+            val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
             return FailedChatCall(status, errorBody)
         }
@@ -171,7 +174,7 @@ class RaccoonProvider(
             return AggregatedChatCall(status, aggregated)
         }
 
-        val text = runCatching { stream.use { readLimited(it) } }.getOrDefault("")
+        val text = runCatching { stream.use { HttpSupport.readLimited(it) } }.getOrDefault("")
         conn.disconnect()
         if (text.isBlank()) return emptyUpstreamFailure(status, contentType, text)
         val parsed = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
@@ -465,31 +468,25 @@ class RaccoonProvider(
     // ------------------------------------------------------------------ HTTP
 
     private fun open(url: String, body: String?, headers: Map<String, String>): HttpURLConnection {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = if (body == null) "GET" else "POST"
-            connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
-            instanceFollowRedirects = false
-            setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("Accept", "text/event-stream, application/json")
+        val merged = buildMap {
+            put("Accept", "text/event-stream, application/json")
+            putAll(headers)
+            if (body != null) put("Content-Type", "application/json")
         }
-        for ((key, value) in headers) conn.setRequestProperty(key, value)
-        if (body != null) {
-            conn.doOutput = true
-            conn.setRequestProperty("Content-Type", "application/json")
-            val bytes = body.toByteArray(StandardCharsets.UTF_8)
-            conn.setFixedLengthStreamingMode(bytes.size)
-            conn.outputStream.use { it.write(bytes) }
-        }
-        return conn
+        return HttpSupport.open(
+            url = url,
+            method = if (body == null) "GET" else "POST",
+            headers = merged,
+            body = body,
+            connectTimeoutMs = CONNECT_TIMEOUT_MS,
+            readTimeoutMs = READ_TIMEOUT_MS,
+        )
     }
 
     private fun postJson(url: String, body: String?, headers: Map<String, String>): Pair<Int, String> {
         val conn = open(url, body, headers)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -498,9 +495,7 @@ class RaccoonProvider(
     private fun getJson(url: String, headers: Map<String, String>): Pair<Int, String> {
         val conn = open(url, null, headers)
         return try {
-            val status = conn.responseCode
-            val text = if (status in 200..299) readLimited(conn.inputStream) else readLimited(conn.errorStream)
-            status to text
+            conn.responseCode to HttpSupport.readBody(conn)
         } finally {
             conn.disconnect()
         }
@@ -574,24 +569,6 @@ class RaccoonProvider(
         return ""
     }
 
-    private fun readLimited(input: InputStream?): String {
-        if (input == null) return ""
-        val out = ByteArrayOutputStream()
-        val buffer = ByteArray(8192)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (out.size() + read > MAX_BODY_BYTES) {
-                out.write(buffer, 0, MAX_BODY_BYTES - out.size())
-                break
-            }
-            out.write(buffer, 0, read)
-        }
-        return out.toString("UTF-8")
-    }
-
-    private fun newCompletionId(): String = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
-
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 
     private data class Credential(
@@ -636,15 +613,6 @@ class RaccoonProvider(
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
-        private const val MAX_BODY_BYTES = 1 shl 20
-
-        private val random = SecureRandom()
-
-        fun randomHex(byteCount: Int): String {
-            val bytes = ByteArray(byteCount)
-            random.nextBytes(bytes)
-            return bytes.joinToString("") { "%02x".format(it) }
-        }
     }
 }
 
@@ -769,53 +737,7 @@ internal class RaccoonSseTranslator(
         }
         return "data: $obj\n\n"
     }
-
-    companion object {
-        const val SSE_DONE = "data: [DONE]\n\n"
-    }
 }
 
 private fun JsonObject.doubleOrNull(name: String): Double? =
     get(name)?.takeIf { it.isJsonPrimitive }?.asDouble
-
-/** 取第一个非空字符串字段（兼容 camelCase / snake_case 两套命名）。 */
-internal fun JsonObject.firstString(vararg keys: String): String {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val text = runCatching { value.asString }.getOrNull().orEmpty()
-        if (text.isNotEmpty()) return text
-    }
-    return ""
-}
-
-internal fun JsonObject.firstLong(vararg keys: String): Long {
-    for (key in keys) {
-        val value = get(key) ?: continue
-        if (!value.isJsonPrimitive) continue
-        val number = runCatching { value.asLong }.getOrNull()
-        if (number != null && number > 0) return number
-    }
-    return 0L
-}
-
-/** 从 JWT 的 payload 里取某个字符串声明；取不到返回空串。 */
-internal fun jwtClaim(accessToken: String, key: String): String {
-    val obj = jwtPayload(accessToken) ?: return ""
-    return obj.firstString(key)
-}
-
-/** 从 JWT 的 payload 里取某个数值声明（如 exp）；取不到返回 null。 */
-internal fun jwtClaimLong(accessToken: String, key: String): Long? {
-    val obj = jwtPayload(accessToken) ?: return null
-    return obj.get(key)?.takeIf { it.isJsonPrimitive }?.asLong
-}
-
-private fun jwtPayload(accessToken: String): JsonObject? {
-    val payload = accessToken.split('.').getOrNull(1) ?: return null
-    if (payload.isEmpty()) return null
-    val json = runCatching {
-        String(java.util.Base64.getUrlDecoder().decode(payload), StandardCharsets.UTF_8)
-    }.getOrNull() ?: return null
-    return runCatching { JsonParser.parseString(json).asJsonObject }.getOrNull()
-}

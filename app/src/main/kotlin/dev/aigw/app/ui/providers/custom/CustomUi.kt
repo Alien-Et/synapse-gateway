@@ -26,7 +26,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -39,6 +38,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.aigw.app.ui.AccountDeleteChipRow
+import dev.aigw.app.ui.AccountEnableSwitch
+import dev.aigw.app.ui.AccountTitleRow
 import dev.aigw.app.ui.ChoiceChip
 import dev.aigw.app.ui.EmptyHint
 import dev.aigw.app.ui.OutlineActionButton
@@ -237,7 +239,7 @@ class CustomUi(override val id: String) : ProviderUi {
         }
         var search by remember { mutableStateOf("") }
         val selectedCount = selected.values.count { it }
-        val filtered = fetched.filter { it.contains(search, ignoreCase = true) }
+        val filtered = remember(fetched, search) { fetched.filter { it.contains(search, ignoreCase = true) } }
         ModalBottomSheet(onDismissRequest = onDismiss) {
             Column(
                 modifier = Modifier
@@ -305,30 +307,17 @@ class CustomUi(override val id: String) : ProviderUi {
     private fun AccountDetailCard(account: AccountStatus, actions: ProviderUiActions) {
         var expanded by rememberSaveable(account.uid) { mutableStateOf(false) }
         SectionCard(modifier = Modifier.animateContentSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = account.nickname.ifEmpty { account.uid },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
+            AccountTitleRow(
+                account = account,
+                modifier = Modifier.clickable { expanded = !expanded },
+                trailing = {
+                    Icon(
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "收起" else "展开",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Text(
-                        text = accountStatusText(account),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Icon(
-                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (expanded) "收起" else "展开",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+                },
+            )
             if (expanded) {
                 AccountDetailBody(account, actions)
             }
@@ -356,9 +345,10 @@ class CustomUi(override val id: String) : ProviderUi {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("启用", modifier = Modifier.weight(1f))
-                Switch(
-                    checked = account.enabled,
-                    onCheckedChange = { actions.onToggleAccount(id, account.uid, it) },
+                AccountEnableSwitch(
+                    account = account,
+                    providerId = id,
+                    actions = actions,
                 )
             }
             Text(
@@ -373,9 +363,7 @@ class CustomUi(override val id: String) : ProviderUi {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                ChoiceChip("删除账号", false) { actions.onRemoveAccount(id, account.uid) }
-            }
+            AccountDeleteChipRow(onRemove = { actions.onRemoveAccount(id, account.uid) })
         }
     }
 }

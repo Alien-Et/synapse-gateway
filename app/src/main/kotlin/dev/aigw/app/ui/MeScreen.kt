@@ -110,9 +110,9 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 "02.3",
                 "额度中心 · CREDITS",
                 "按供应商查看额度包明细",
-                if (state.pool.creditsKnown > 0) formatNumber(state.pool.totalCredits) else "",
+                if (state.pool.creditsKnown > 0) formatCount(state.pool.totalCredits) else "",
             ) { open(SubPage.CreditCenter) }
-            EditorialRow("02.4", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatHumanTokens(state.today.totalTokens)) {
+            EditorialRow("02.4", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatTokens(state.today.totalTokens)) {
                 open(SubPage.Usage)
             }
             EditorialRow(
@@ -363,9 +363,9 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
         SectionCard(enterIndex = 3) {
             SectionLabel("今日")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatCell(formatNumber(state.today.requests), "请求")
-                StatCell(formatNumber(state.today.success), "成功")
-                StatCell(formatNumber(state.today.failed), "失败")
+                StatCell(formatCount(state.today.requests), "请求")
+                StatCell(formatCount(state.today.success), "成功")
+                StatCell(formatCount(state.today.failed), "失败")
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             TokenUsageRow("输入 Tokens", state.today.promptTokens, MaterialTheme.colorScheme.primary)
@@ -376,9 +376,9 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
         SectionCard(enterIndex = 4) {
             SectionLabel("累计")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatCell(formatNumber(state.total.requests), "请求")
-                StatCell(formatNumber(state.total.success), "成功")
-                StatCell(formatNumber(state.total.failed), "失败")
+                StatCell(formatCount(state.total.requests), "请求")
+                StatCell(formatCount(state.total.success), "成功")
+                StatCell(formatCount(state.total.failed), "失败")
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             TokenUsageRow("输入 Tokens", state.total.promptTokens, MaterialTheme.colorScheme.primary)
@@ -421,17 +421,6 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
 }
 
 
-/** 格式化数字：带千分位逗号 */
-private fun formatNumber(n: Long): String = String.format(java.util.Locale.US, "%,d", n)
-
-/** 人类友好的数字紧凑缩写（如 73.25M / 276.6K） */
-private fun formatHumanTokens(tokens: Long): String = when {
-    tokens >= 1_000_000_000L -> String.format(java.util.Locale.US, "%.2fB", tokens / 1_000_000_000.0)
-    tokens >= 1_000_000L -> String.format(java.util.Locale.US, "%.2fM", tokens / 1_000_000.0)
-    tokens >= 1_000L -> String.format(java.util.Locale.US, "%.1fK", tokens / 1_000.0)
-    else -> tokens.toString()
-}
-
 /** 方案 C：用量统计单项明细行 */
 @Composable
 private fun TokenUsageRow(
@@ -467,14 +456,14 @@ private fun TokenUsageRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                text = formatNumber(tokens),
+                text = formatCount(tokens),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
             )
             if (tokens >= 1_000L) {
                 Text(
-                    text = formatHumanTokens(tokens),
+                    text = formatTokens(tokens),
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.primary,

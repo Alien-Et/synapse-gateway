@@ -5,6 +5,7 @@ import com.google.gson.JsonParser
 import dev.aigw.core.provider.ProviderAccount
 import dev.aigw.core.store.KeyValueStore
 import dev.aigw.core.util.objOrNull
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -70,40 +71,67 @@ class AccountPool(
     /** 按 provider 分组的条目索引：选号只需扫该供应商的账号，不必遍历整个池。 */
     private val byProvider = HashMap<String, MutableList<Entry>>()
 
+    /**
+     * 每个账号一把落盘串行锁（键 = providerId/uid）：同一账号的凭证/状态落盘与删除在这里互斥。
+     *
+     * 内存状态在 [lock] 写锁内更新后，落盘被移到锁外执行 `store.write`：Android 侧一次 write
+     * 就是整文件的加密 commit，持写锁落盘会把整个账号池的读（含选号 [pick]）全堵住，批量并发时
+     * 线程越多等锁越久，拿不到线性收益。
+     *
+     * 锁外写会引入「同一账号多次落盘相互乱序」的风险（旧值覆盖新值）。这里用「同账号串行 + 落盘
+     * 前重取最新内存状态」消除它：同账号写盘不会并行交错；每次写盘重新读当前内存里的状态/凭证，
+     * 而不是用调用时捕获的旧快照，故最终写出去的一定是最新值（详见 [persistState]）。
+     */
+    private val persistLocks = ConcurrentHashMap<String, Any>()
+
     init {
         load()
     }
 
+    private fun accountIoLock(providerId: String, uid: String): Any =
+        persistLocks.computeIfAbsent(keyOf(providerId, uid)) { Any() }
+
     // ---------------------------------------------------------------- 账号
 
-    fun upsert(account: ProviderAccount) = lock.write {
-        val key = keyOf(account.providerId, account.uid)
-        val existing = entries[key]
-        if (existing != null) {
-            existing.account = account
-            // 重新登录/刷新凭证意味着用户提供了新凭证：清除硬禁用状态。
-            // 否则会出现「重新登录后依然 503」——旧凭证的失效状态沾在新凭证上。
-            existing.disabled = false
-            existing.reason = ""
-        } else {
-            val entry = Entry(account)
-            entries[key] = entry
-            byProvider.getOrPut(account.providerId) { ArrayList() }.add(entry)
+    fun upsert(account: ProviderAccount) {
+        // 锁内只改内存，落盘移到锁外（见 [persistLocks] 的说明）。
+        lock.write {
+            val key = keyOf(account.providerId, account.uid)
+            val existing = entries[key]
+            if (existing != null) {
+                existing.account = account
+                // 重新登录/刷新凭证意味着用户提供了新凭证：清除硬禁用状态。
+                // 否则会出现「重新登录后依然 503」——旧凭证的失效状态沾在新凭证上。
+                existing.disabled = false
+                existing.reason = ""
+            } else {
+                val entry = Entry(account)
+                entries[key] = entry
+                byProvider.getOrPut(account.providerId) { ArrayList() }.add(entry)
+            }
         }
         persistAccount(account)
         persistState(account.providerId, account.uid)
     }
 
-    fun remove(providerId: String, uid: String): Boolean = lock.write {
-        val entry = entries.remove(keyOf(providerId, uid)) ?: return@write false
-        val group = byProvider[providerId]
-        group?.remove(entry)
-        if (group != null && group.isEmpty()) byProvider.remove(providerId)
-        store.delete(accountKey(providerId, uid))
-        store.delete(stateKey(providerId, uid))
-        // 同 uid 重新登录时若旧格式文件还留着该账号状态，会与新建的默认状态冲突，故一并摘除。
-        purgeLegacyState(providerId, uid)
-        true
+    fun remove(providerId: String, uid: String): Boolean {
+        val removed = lock.write {
+            val entry = entries.remove(keyOf(providerId, uid)) ?: return@write false
+            val group = byProvider[providerId]
+            group?.remove(entry)
+            if (group != null && group.isEmpty()) byProvider.remove(providerId)
+            true
+        }
+        if (!removed) return false
+        // 删除同样放到锁外，并与该账号的落盘串行：[persistState] 落盘前会重读内存，若删除先完成
+        // 它会读到「条目已不在」而直接跳过，不会把刚删掉的键又写回来。
+        synchronized(accountIoLock(providerId, uid)) {
+            store.delete(accountKey(providerId, uid))
+            store.delete(stateKey(providerId, uid))
+            // 同 uid 重新登录时若旧格式文件还留着该账号状态，会与新建的默认状态冲突，故一并摘除。
+            purgeLegacyState(providerId, uid)
+        }
+        return true
     }
 
     fun account(providerId: String, uid: String): ProviderAccount? =
@@ -138,23 +166,29 @@ class AccountPool(
 
     // ---------------------------------------------------------------- 状态
 
-    fun setEnabled(providerId: String, uid: String, enabled: Boolean, reason: String = "") = lock.write {
-        val entry = entries[keyOf(providerId, uid)] ?: return@write
-        entry.enabled = enabled
-        if (!enabled) {
-            if (reason.isNotEmpty()) entry.reason = reason
-        } else if (entry.reason.isNotEmpty() && !entry.disabled) {
-            entry.reason = ""
+    fun setEnabled(providerId: String, uid: String, enabled: Boolean, reason: String = "") {
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            entry.enabled = enabled
+            if (!enabled) {
+                if (reason.isNotEmpty()) entry.reason = reason
+            } else if (entry.reason.isNotEmpty() && !entry.disabled) {
+                entry.reason = ""
+            }
+            true
         }
-        persistState(providerId, uid)
+        if (found) persistState(providerId, uid)
     }
 
     /** 凭证失效：硬禁用，只能重新登录恢复。 */
-    fun disable(providerId: String, uid: String, reason: String) = lock.write {
-        val entry = entries[keyOf(providerId, uid)] ?: return@write
-        entry.disabled = true
-        entry.reason = reason
-        persistState(providerId, uid)
+    fun disable(providerId: String, uid: String, reason: String) {
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            entry.disabled = true
+            entry.reason = reason
+            true
+        }
+        if (found) persistState(providerId, uid)
     }
 
     /** 更新额度。 */
@@ -164,17 +198,22 @@ class AccountPool(
         credits: Long,
         known: Boolean = true,
         detail: String = "",
-    ) = lock.write {
-        val entry = entries[keyOf(providerId, uid)] ?: return@write
-        entry.credits = credits
-        entry.creditsKnown = known
-        entry.detail = detail
-        persistState(providerId, uid)
+    ) {
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            entry.credits = credits
+            entry.creditsKnown = known
+            entry.detail = detail
+            true
+        }
+        if (found) persistState(providerId, uid)
     }
 
     /** 刷新凭证后落盘（refreshToken 会轮换，必须立刻写回）。 */
-    fun saveAccount(account: ProviderAccount) = lock.write {
-        entries[keyOf(account.providerId, account.uid)]?.account = account
+    fun saveAccount(account: ProviderAccount) {
+        lock.write {
+            entries[keyOf(account.providerId, account.uid)]?.account = account
+        }
         persistAccount(account)
     }
 
@@ -194,14 +233,16 @@ class AccountPool(
 
     /** 供界面展示的摘要；[providerId] 为空时统计全部。 */
     fun summary(providerId: String? = null): PoolSummary = lock.read {
+        // 指定 provider 时直接复用 [byProvider] 分片索引（O(N) 而非遍历整池再过滤的 O(P×N)），
+        // 该索引与 entries 同步维护，两者内容一致，结果不变。
+        val source: Collection<Entry> = if (providerId == null) entries.values else byProvider[providerId].orEmpty()
         var total = 0
         var usable = 0
         var disabled = 0
         var disabledByUser = 0
         var totalCredits = 0L
         var creditsKnown = 0
-        for (entry in entries.values) {
-            if (providerId != null && entry.account.providerId != providerId) continue
+        for (entry in source) {
             total++
             when {
                 entry.disabled -> disabled++
@@ -242,7 +283,11 @@ class AccountPool(
     private fun accountKey(providerId: String, uid: String) = "$ACCOUNT_PREFIX$providerId/$uid"
 
     private fun persistAccount(account: ProviderAccount) {
-        store.write(accountKey(account.providerId, account.uid), account.toJson().toString())
+        synchronized(accountIoLock(account.providerId, account.uid)) {
+            // 重取当前内存里的最新凭证，避免并发写回时旧凭证覆盖新凭证（refreshToken 轮换最怕这个）。
+            val latest = lock.read { entries[keyOf(account.providerId, account.uid)]?.account } ?: account
+            store.write(accountKey(account.providerId, account.uid), latest.toJson().toString())
+        }
     }
 
     /**
@@ -251,8 +296,13 @@ class AccountPool(
      * Android 侧每次 write 都是一整次文件提交，这里必须精确到 uid。
      */
     private fun persistState(providerId: String, uid: String) {
-        val entry = entries[keyOf(providerId, uid)] ?: return
-        store.write(stateKey(providerId, uid), stateJson(entry).toString())
+        // 同账号落盘串行（[accountIoLock]），并在此刻重读内存状态而非用调用时的旧快照：
+        // 于是「排在后面的落盘」读到的必定是当前最新状态，绝不会把更旧的值覆盖到新值上——
+        // 因为最后一次落盘执行时，所有内存更新都已完成（每个更新都会紧随一次落盘）。
+        synchronized(accountIoLock(providerId, uid)) {
+            val json = lock.read { entries[keyOf(providerId, uid)]?.let { stateJson(it).toString() } } ?: return
+            store.write(stateKey(providerId, uid), json)
+        }
     }
 
     private fun stateJson(entry: Entry): JsonObject = JsonObject().apply {

@@ -26,7 +26,7 @@ import dev.aigw.core.provider.isStreamingBody
 import dev.aigw.core.provider.queryParam
 import dev.aigw.core.provider.requestedModelOf
 import dev.aigw.core.store.KeyValueStore
-import java.util.UUID
+import dev.aigw.core.util.newCompletionId
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -442,8 +442,6 @@ class TraeProvider(
 
     private fun parseOrNull(account: ProviderAccount): TraeAccount? =
         runCatching { TraeAccount.parse(account.secret) }.getOrNull()
-
-    private fun newCompletionId(): String = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
 
     companion object {
         const val ID = "trae"

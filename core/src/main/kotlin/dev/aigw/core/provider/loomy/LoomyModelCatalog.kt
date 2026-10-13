@@ -1,5 +1,11 @@
 package dev.aigw.core.provider.loomy
 
+import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.bool
+import dev.aigw.core.util.long
+import dev.aigw.core.util.objOrNull
+import dev.aigw.core.util.str
+
 /**
  * 模型目录：从 `GET /api/v1/models` 拉取（需要 session）。
  *
@@ -82,17 +88,17 @@ class LoomyModelCatalog(
         )
         val (status, body) = httpJson("$apiBase${LoomyConstants.PATH_MODELS}", "GET", headers)
         val obj = decodeEnvelope(status, body)
-        val array = obj.array("data") ?: return emptyList()
+        val array = obj.arrayOrNull("data") ?: return emptyList()
         val result = ArrayList<LoomyModel>()
         for (element in array) {
             val item = runCatching { element.asJsonObject }.getOrNull() ?: continue
             val id = item.str("id").trim()
             if (id.isEmpty()) continue
-            val limit = item.obj("limit")
+            val limit = item.objOrNull("limit")
             val context = limit?.long("context") ?: item.long("context_length")
             val output = limit?.long("output") ?: item.long("max_output_tokens")
-            val capabilities = item.obj("capabilities")
-            val inputModalities = item.obj("modalities")?.array("input")
+            val capabilities = item.objOrNull("capabilities")
+            val inputModalities = item.objOrNull("modalities")?.arrayOrNull("input")
             val hasImage = inputModalities?.any { it.asString == "image" } == true
             result.add(
                 LoomyModel(
