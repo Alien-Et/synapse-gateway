@@ -33,8 +33,6 @@ sealed interface SubPage {
     /** 并发与容错：并发闸门、重试退避与熔断器。 */
     data object Resilience : SubPage
 
-    data object DataManagement : SubPage
-
     /** 外观主题：明暗模式、配色方案与金色文字。 */
     data object AppearanceTheme : SubPage
 }

@@ -107,41 +107,32 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 if (state.security.sanitizeEnabled) "脱敏开启" else "脱敏关闭",
             ) { open(SubPage.SecurityProtection) }
             EditorialRow(
-                "02.2b",
+                "02.3",
                 "并发与容错 · RESILIENCE",
                 "并发闸门、重试退避与熔断器",
                 concurrencySummary(state.failover),
             ) { open(SubPage.Resilience) }
             EditorialRow(
-                "02.3",
+                "02.4",
                 "额度中心 · CREDITS",
                 "按供应商查看额度包明细",
                 if (state.pool.creditsKnown > 0) formatCount(state.pool.totalCredits) else "",
             ) { open(SubPage.CreditCenter) }
-            EditorialRow("02.4", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatTokens(state.today.totalTokens)) {
+            EditorialRow("02.5", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatTokens(state.today.totalTokens)) {
                 open(SubPage.Usage)
             }
             EditorialRow(
-                "02.5",
+                "02.6",
                 "代理设置 · NETWORK PROXY",
                 "境外供应商需要走代理",
                 if (state.proxy.usable) "已启用" else "未启用",
             ) { open(SubPage.Proxy) }
             EditorialRow(
-                "02.6",
+                "02.7",
                 "保活与权限 · BACKGROUND",
                 "通知、电池优化与后台限制",
                 if (state.keepAlive?.allGood == true) "就绪" else "待配置",
             ) { open(SubPage.KeepAlive) }
-            EditorialRow(
-                "02.7",
-                "数据管理 · STORAGE AUDIT",
-                "存储占用、清理与截断",
-                StorageAudit.formatSize(state.storage?.totalChars ?: 0L),
-            ) {
-                viewModel.refreshStorage()
-                open(SubPage.DataManagement)
-            }
         }
 
         EditorialGroupHeader("03", "架构关于 · ABOUT THE ENGINE")
@@ -329,8 +320,8 @@ private fun AboutDialog(onDismiss: () -> Unit) {
 
 @Composable
 fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) {
-    // 存储占用只在数据管理页刷过，本页「存储」卡片读的是同一份 state，
-    // 不主动刷新会恒为 0；进入本页时算一次（代价高，不放进 refresh）。
+    // 存储占用不挂在全局 refresh 里（要扫全量存储键并解密，代价高），
+    // 本页「存储」卡片读的是 state 里的同一份，不主动刷新会恒为 0，故进入本页时算一次。
     LaunchedEffect(Unit) { viewModel.refreshStorage() }
     PageScaffold(
         title = "用量统计",

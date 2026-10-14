@@ -60,7 +60,6 @@ import dev.aigw.app.ui.AppViewModel
 import dev.aigw.app.ui.AppearanceThemeScreen
 import dev.aigw.app.ui.CustomProviderScreen
 import dev.aigw.app.ui.CreditCenterScreen
-import dev.aigw.app.ui.DataManagementScreen
 import dev.aigw.app.ui.HomeScreen
 import dev.aigw.app.ui.KeepAliveScreen
 import dev.aigw.app.ui.LogsScreen
@@ -244,7 +243,6 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 SubPage.ApiSettings -> ApiSettingsScreen(state, viewModel) { subPage = null }
                 SubPage.SecurityProtection -> SecurityProtectionScreen(state, viewModel) { subPage = null }
                 SubPage.Resilience -> ResilienceScreen(state, viewModel) { subPage = null }
-                SubPage.DataManagement -> DataManagementScreen(state, viewModel) { subPage = null }
                 SubPage.AppearanceTheme -> AppearanceThemeScreen(state, viewModel) { subPage = null }
                 null -> MainTabs(
                     viewModel = viewModel,

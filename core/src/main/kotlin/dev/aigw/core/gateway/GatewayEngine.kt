@@ -1445,13 +1445,6 @@ class GatewayEngine(
         return removed
     }
 
-    /** 截断超长记录内容；返回「截断条数 to 释放字符数」。 */
-    fun truncateLongRecords(maxChars: Int = DEFAULT_TRUNCATE_CHARS): Pair<Int, Long> {
-        val (count, saved) = callLogStore.truncateFields(maxChars)
-        if (count > 0) log("截断了 $count 条记录的长内容，释放约 ${StorageAudit.formatSize(saved)}")
-        return count to saved
-    }
-
     /** 服务运行时调一次：跨天则按保留天数自动清理，保证长时间挂机不会无限增重。 */
     fun autoPurgeIfDue() {
         val today = nowMillis() / DAY_MILLIS
@@ -1500,9 +1493,6 @@ class GatewayEngine(
 
         /** 详细日志单条上限：环形日志每条都全量展示，太长会淹没其它日志。 */
         const val VERBOSE_LINE_LIMIT = 1500
-
-        /** 「截断超长记录内容」默认截到 4K 字符：足够看清请求，又不至于让存储爆掉。 */
-        const val DEFAULT_TRUNCATE_CHARS = 4_000
 
         /** `/v1/models` 单个供应商拉取模型目录的超时（秒）：上游 READ_TIMEOUT 300s 不能无限等。 */
         const val MODELS_FETCH_TIMEOUT_SECONDS = 20L

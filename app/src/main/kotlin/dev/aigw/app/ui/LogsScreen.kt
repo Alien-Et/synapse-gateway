@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
@@ -44,9 +45,11 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import dev.aigw.core.gateway.GatewaySettings
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.CallStatus
 import kotlinx.coroutines.delay
@@ -433,6 +436,43 @@ private fun CallLogSettings(state: AppUiState, viewModel: AppViewModel) {
             )
             OutlineActionButton("清空调用记录") { viewModel.clearCalls() }
         }
+    }
+}
+
+/**
+ * 保留天数输入。
+ *
+ * 失焦或回车才提交，避免边输入边保存把「30」中间的「3」当成 30 天。越界值由 core 夹回，
+ * 这里只做即时提示。
+ */
+@Composable
+fun RetentionField(current: Int, onCommit: (Int) -> Unit) {
+    var text by remember(current) { mutableStateOf(current.toString()) }
+    val parsed = text.toIntOrNull()
+    val valid = parsed != null && parsed in GatewaySettings.MIN_RETENTION_DAYS..GatewaySettings.MAX_RETENTION_DAYS
+    val changed = parsed != null && parsed != current
+
+    Text(
+        text = "保留天数（${GatewaySettings.MIN_RETENTION_DAYS}-${GatewaySettings.MAX_RETENTION_DAYS}）",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    OutlinedTextField(
+        value = text,
+        onValueChange = { input -> text = input.filter(Char::isDigit).take(4) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        isError = text.isNotEmpty() && !valid,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        supportingText = {
+            when {
+                text.isEmpty() -> Text("不能为空")
+                !valid -> Text("需在 ${GatewaySettings.MIN_RETENTION_DAYS}-${GatewaySettings.MAX_RETENTION_DAYS} 之间")
+            }
+        },
+    )
+    if (changed) {
+        OutlineActionButton("保存保留天数") { onCommit(parsed) }
     }
 }
 

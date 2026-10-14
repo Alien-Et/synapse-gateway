@@ -52,7 +52,6 @@ import dev.aigw.core.provider.trae.TraeProvider
 import dev.aigw.core.store.KeyValueStore
 import dev.aigw.core.usage.CallRecord
 import dev.aigw.core.usage.LogLine
-import dev.aigw.core.usage.StorageAudit
 import dev.aigw.core.usage.StorageReport
 import dev.aigw.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
@@ -245,7 +244,7 @@ data class AppUiState(
     /** 模型测速状态，键为 `model.fullId`。 */
     val modelTestLatencies: Map<String, ModelTestStatus> = emptyMap(),
     val calls: List<CallRecord> = emptyList(),
-    /** 存储中的记录条数（含未载入内存的，仅供「数据管理」展示）。 */
+    /** 存储中的记录条数（含未载入内存的）。 */
     val storedCalls: Int = 0,
     /** 已拉取的额度包明细，键为 `providerId/uid`。 */
     val creditPacks: Map<String, List<QuotaPack>> = emptyMap(),
@@ -484,7 +483,7 @@ class AppViewModel(
     }
 
     /**
-     * 单独刷新「数据管理」的存储占用。
+     * 单独刷新存储占用（用量统计页展示用）。
      *
      * 刻意不放在 [refresh] 里：它要扫全部加密存储键并遍历缓存目录，代价高，
      * 而记录页每 5 秒就会调一次 refresh。
@@ -1369,17 +1368,6 @@ class AppViewModel(
         val clamped = GatewaySettings.clampRetentionDays(days)
         engine.updateSettings(engine.settings().copy(logRetentionDays = clamped))
         if (clamped != days) "保留天数需在 1~3650 之间，已按 $clamped 天保存" else "保留天数已设为 $clamped 天"
-    }
-
-    fun purgeExpiredRecords() = action(alsoRefreshStorage = true) {
-        val removed = engine.purgeExpiredRecords()
-        val days = engine.settings().logRetentionDays
-        if (removed == 0) "没有超过 $days 天的记录可清理" else "已清理 $removed 条过期记录"
-    }
-
-    fun truncateLongRecords() = action(alsoRefreshStorage = true) {
-        val (count, saved) = engine.truncateLongRecords()
-        if (count == 0) "没有超长记录需要截断" else "已截断 $count 条记录，释放约 ${StorageAudit.formatSize(saved)}"
     }
 
     // ------------------------------------------------------------------ 记录

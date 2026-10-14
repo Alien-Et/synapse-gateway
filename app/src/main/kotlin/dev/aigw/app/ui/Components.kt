@@ -376,7 +376,7 @@ fun BackButton(onBack: () -> Unit) {
     )
 }
 
-/** 全宽描边按钮（「数据管理」的清理动作）。onClick 放最后以支持尾随 lambda。 */
+/** 全宽描边按钮。onClick 放最后以支持尾随 lambda。 */
 @Composable
 fun OutlineActionButton(
     text: String,
