@@ -127,12 +127,9 @@ class CodeBuddyImportTest {
     }
 
     @Test
-    fun `国际版模型目录走 v2 API 路由`() {
-        // console 那条是网页控制台路由（无凭证 302 跳登录页），Bearer token 打它会 500
-        assertEquals(
-            "/v2/enterprises/personal/models",
-            CodeBuddyProvider.modelsPath(CodeBuddyProvider.REGION_GLOBAL),
-        )
+    fun `国际版模型目录走 v3 config`() {
+        // 国内那条 console 路径只服务网页会话（无凭证 302 跳登录页），Bearer token 打它会 500
+        assertEquals("/v3/config", CodeBuddyProvider.modelsPath(CodeBuddyProvider.REGION_GLOBAL))
         assertEquals(
             "/console/enterprises/personal/models",
             CodeBuddyProvider.modelsPath(CodeBuddyProvider.REGION_CN),

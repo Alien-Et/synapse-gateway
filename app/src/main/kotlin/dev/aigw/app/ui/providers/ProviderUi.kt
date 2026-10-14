@@ -44,8 +44,6 @@ class ProviderUiActions(
     val onRefreshCredits: (providerId: String, uid: String?) -> Unit = { _, _ -> },
     /** 执行供应商专属动作（签到、兑换码等）。 */
     val onAction: (providerId: String, uid: String, action: String, payload: JsonObject) -> Unit = { _, _, _, _ -> },
-    /** 重新检查设备授权状态（浏览器里已登录但轮询错过时手动重试）；region 与登录时一致。 */
-    val onCheckDeviceAuth: (providerId: String, region: String) -> Unit = { _, _ -> },
     val onToggleAccount: (providerId: String, uid: String, enabled: Boolean) -> Unit = { _, _, _ -> },
     val onRemoveAccount: (providerId: String, uid: String) -> Unit = { _, _ -> },
     /** 账号凭证级修改（如 Trae 的设备指纹）：直接替换 secret。 */

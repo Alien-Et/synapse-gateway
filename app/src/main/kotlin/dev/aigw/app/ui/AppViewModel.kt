@@ -350,12 +350,6 @@ class AppViewModel(
     /** 下次可重新发送验证码的时间，按供应商记（界面倒计时会随页面重置，不能只靠界面拦）。 */
     private val smsResendAt = HashMap<String, Long>()
 
-    /** 最近一次设备授权登录的 state，供「重新检查授权状态」手动重试。 */
-    private val deviceStates = HashMap<String, String>()
-
-    /** 最近一次设备授权登录的区域，保证手动重试轮询与登录时打同一个端点。 */
-    private val deviceRegions = HashMap<String, String>()
-
     /** 金色渐变去抖落盘的挂起任务；每次取色取消上一轮，松手后才真正写盘。 */
     private var persistAppearanceJob: Job? = null
 
@@ -832,11 +826,9 @@ class AppViewModel(
 
     /**
      * 设备授权的区域感知版本（WorkBuddy）：先把区域同步写进供应商设置，
-     * 引擎开登录页时才能读到正确的端点（cn=copilot.tencent.com / global=workbuddy.ai），
-     * 同时记住本轮登录的区域，保证「重新检查授权状态」轮询同一端点。
+     * 引擎开登录页时才能读到正确的端点（cn=copilot.tencent.com / global=workbuddy.ai）。
      */
     fun beginDeviceLogin(providerId: String, region: String) {
-        deviceRegions[providerId] = region
         val settings = providerSettings(providerId)
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
@@ -875,7 +867,6 @@ class AppViewModel(
                         return@fold
                     }
                     if (ticket.pollState.isNotEmpty()) {
-                        deviceStates[providerId] = ticket.pollState
                         // 用票据自带的区域轮询：授权页创建在哪个区域，就只能在该区域查这个 state
                         pollDeviceLogin(providerId, ticket.pollState, ticket.region)
                     } else {
@@ -940,17 +931,6 @@ class AppViewModel(
                 onFailure = { onResult(emptyList(), it.message ?: "拉取失败") },
             )
         }
-    }
-
-    /** 手动重新检查设备授权状态（浏览器里已完成登录但轮询错过时）。 */
-    fun checkDeviceAuth(providerId: String, region: String = "") {
-        val state = deviceStates[providerId]
-        if (state.isNullOrEmpty()) {
-            notice("请先点「在浏览器中打开登录页」，完成登录后再回来检查")
-            return
-        }
-        if (region.isNotEmpty()) deviceRegions[providerId] = region
-        pollDeviceLogin(providerId, state, deviceRegions[providerId].orEmpty())
     }
 
     /** 发短信验证码（msgid 内部暂存）；[onResult] 回传错误信息（空串表示成功）。 */

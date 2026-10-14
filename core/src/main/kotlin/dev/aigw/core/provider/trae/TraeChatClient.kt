@@ -16,7 +16,7 @@ class TraeChatCall(
 /** SOLO 对话通道客户端。请求体改写交给 [TraePayload]。 */
 class TraeChatClient(
     private val version: TraeVersion,
-    private val host: String = TraeConstants.AGENT_HOST,
+    private val host: String,
     private val idleTimeoutMs: Int = TraeHttp.STREAM_IDLE_TIMEOUT_MS,
 ) {
 

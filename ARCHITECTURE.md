@@ -198,9 +198,14 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 ### 腾讯 WorkBuddy
 - 上游**拒绝非流式**：必须强制 `stream:true`，网关侧聚合。
 - `tool_choice` 只认字符串。
+- ⚠️ **国内与国际是两套端点，不能混用**：国内主域 `copilot.tencent.com` / `codebuddy.cn`，国际 `workbuddy.ai`（历史域名 `codebuddy.ai`）。
+  - 拿国际版 token 打国内站会被直接拒（500/401）；区域靠 JWT `iss` 判定最可靠（`workbuddy.ai`=国际），凭证里的 `domain` 次之。
+  - **模型目录两条路径不通用**：国内走网页控制台 `/console/enterprises/personal/models`（无凭证 302 跳 OIDC 登录页）；国际版走客户端 product config `/v3/config`（该路径国内也能用）。国际版拿 Bearer token 打 console 路径会被后端 500，打 `/v2/enterprises/personal/models` 会挂死不返回。两份响应的结构相同（`data.agents[name=cli].models` + `data.models[]`），解析可共用。
+  - 设备授权的 state 与 token **不通用**：跨站轮询 `/v2/plugin/auth/token` 对未知 state 恒返回 `{"code":11217}`，不报错、只会静默等到超时——所以「打开登录页」与「轮询」必须用同一个区域。
 - 签到 `/v2/daily-checkin` 幂等；成长中心在 `/v2/activity/growth/*` 下；**仅国内版有**，国际版（workbuddy.ai）没有签到制度。
 
 ### 字节 Trae（SOLO）
+- ⚠️ **agent host 分区域且与 OAuth host 不同**：国内 agent `trae-api-cn.mchost.guru`、额度 `api.trae.cn`、鉴权 `api.trae.com.cn`；国际 agent `trae-api-sg.mchost.guru`、额度 `ug-normal.trae.ai`、鉴权 `api.trae.ai`。国际版把 agent host 写成 `api.trae.ai` 会让对话与模型目录全部 **404**（该域上 `/api/agent/v3/llm_utils_chat`、`/api/ide/v1/get_detail_param` 都不存在）。额度接口版本段也不同：国内 v2、国际 v1。
 - `content` 必须是 `[{type:"text",text}]` 数组；`tools[].function.parameters` 必须是 JSON 字符串；`tool_choice` 只认字符串；assistant 的 `tool_calls[].function` 要改名 `function_call`。
 - 流内 `notify_usage.ide_credits` 是真实积分消耗，需回写账号池。
 

@@ -167,7 +167,11 @@ class CodeBuddyProvider(
                 billingHeaders(credential),
             )
             if (status !in 200..299) {
-                return CreditInfo(0, known = false, detail = "上游 HTTP $status" + describeBody(text))
+                return CreditInfo(
+                    0,
+                    known = false,
+                    detail = failure("额度接口", endpoint(credential), "${billingBase(credential)}$PATH_USER_RESOURCE", status, text),
+                )
             }
             val data = envelopeData(text) ?: return CreditInfo(0, known = false, detail = "响应缺少 data")
             val accounts = data.objOrNull("Response")?.objOrNull("Data")?.arrayOrNull("Accounts")
@@ -517,7 +521,10 @@ class CodeBuddyProvider(
         return try {
             val (status, body) = getJson("${chatBase(credential)}$PATH_GROWTH/tasks", billingHeaders(credential))
             if (status !in 200..299) {
-                return ProviderTaskListView(emptyList(), error = "上游 HTTP $status" + describeBody(body))
+                return ProviderTaskListView(
+                    emptyList(),
+                    error = failure("成长中心", endpoint(credential), "${chatBase(credential)}$PATH_GROWTH/tasks", status, body),
+                )
             }
             val obj = jsonOf(body) ?: return ProviderTaskListView(emptyList(), error = "响应不是合法 JSON")
             val inPeriod = obj.get("in_period")?.asBoolean ?: false
@@ -607,7 +614,7 @@ class CodeBuddyProvider(
             )
             if (status !in 200..299) {
                 return ProviderActionResult.failure(
-                    "签到失败（HTTP $status）" + describeBody(text),
+                    failure("签到", endpoint(credential), "${billingBase(credential)}$PATH_CHECKIN", status, text),
                 )
             }
             val code = runCatching { JsonParser.parseString(text).asJsonObject.get("code")?.asLong }.getOrNull() ?: -1L
@@ -679,7 +686,7 @@ class CodeBuddyProvider(
     // ------------------------------------------------------------------ 设备授权登录
 
     override fun startDeviceAuth(region: String): DeviceAuthTicket {
-        val base = if (region == REGION_GLOBAL) GLOBAL_CHAT_BASE else CN_CHAT_BASE
+        val base = endpointOf(region).chatBase
         val (status, text) = try {
             postJson("$base$PATH_AUTH_STATE?platform=CLI", null, "{}", emptyMap())
         } catch (e: Exception) {
@@ -694,7 +701,7 @@ class CodeBuddyProvider(
     }
 
     override fun pollDeviceAuth(state: String, region: String): DeviceAuthPoll {
-        val base = if (region == REGION_GLOBAL) GLOBAL_CHAT_BASE else CN_CHAT_BASE
+        val base = endpointOf(region).chatBase
         val encoded = URLEncoder.encode(state, "UTF-8")
         val (status, text) = try {
             getJson("$base$PATH_AUTH_TOKEN?state=$encoded")
@@ -717,26 +724,33 @@ class CodeBuddyProvider(
     // ------------------------------------------------------------------ 上游
 
     private fun fetchModels(credential: Credential): List<ProviderModel> {
-        val region = regionOf(credential)
-        val global = region == REGION_GLOBAL
-        val host = chatBase(credential)
-        val path = modelsPath(region)
-        val (status, text) = getJson("$host$path", chatHeaders(credential))
+        val ep = endpoint(credential)
+        val host = ep.chatBase
+        val path = ep.modelsPath
+        val (status, text) = try {
+            getJson("$host$path", modelsHeaders(credential), MODELS_READ_TIMEOUT_MS)
+        } catch (e: Exception) {
+            throw IllegalStateException("模型接口请求失败（${ep.label} $host$path）：${e.message}", e)
+        }
         if (status !in 200..299) {
-            // 只报状态码无法定位：把实际用的区域/域名/路径与上游响应原文一并带出来
-            val label = if (global) "国际版" else "国内版"
-            throw IllegalStateException(
-                "模型接口 HTTP $status（$label $host$path，domain=${credential.domain.ifEmpty { "空" }}）" +
-                    describeBody(text).ifEmpty { "（响应体为空）" },
-            )
+            throw IllegalStateException(failure("模型接口", ep, "$host$path", status, text))
         }
         val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
             ?: throw IllegalStateException("模型响应不是合法 JSON：${text.trim().take(160)}")
         if (obj.get("code")?.asLong != 0L) {
             throw IllegalStateException("模型接口 code=${obj.get("code")}" + describeBody(text))
         }
-        val data = obj.objOrNull("data") ?: return emptyList()
+        return parseModelsCatalog(obj.objOrNull("data") ?: return emptyList())
+    }
 
+    /**
+     * 从目录响应解析模型清单。
+     *
+     * 国内（网页控制台）与国际（客户端 product config）两份响应的结构相同：
+     * `data.models[]` 是模型定义，`data.agents[name=cli].models` 是 CLI 可用的白名单，
+     * 所以解析逻辑共用。
+     */
+    internal fun parseModelsCatalog(data: JsonObject): List<ProviderModel> {
         val cliIds = LinkedHashSet<String>()
         data.arrayOrNull("agents")?.forEach { element ->
             val agent = runCatching { element.asJsonObject }.getOrNull() ?: return@forEach
@@ -783,12 +797,13 @@ class CodeBuddyProvider(
         body: String?,
         headers: Map<String, String>,
         method: String = if (body == null) "GET" else "POST",
+        readTimeoutMs: Int = READ_TIMEOUT_MS,
     ): HttpURLConnection {
         val merged = buildMap {
             putAll(headers)
             if (body != null) put("Content-Type", "application/json")
         }
-        return HttpSupport.open(url, method, merged, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
+        return HttpSupport.open(url, method, merged, body, CONNECT_TIMEOUT_MS, readTimeoutMs)
     }
 
     private fun postJson(
@@ -805,8 +820,12 @@ class CodeBuddyProvider(
         }
     }
 
-    private fun getJson(url: String, headers: Map<String, String> = emptyMap()): Pair<Int, String> {
-        val conn = open(url, null, null, headers, method = "GET")
+    private fun getJson(
+        url: String,
+        headers: Map<String, String> = emptyMap(),
+        readTimeoutMs: Int = READ_TIMEOUT_MS,
+    ): Pair<Int, String> {
+        val conn = open(url, null, null, headers, method = "GET", readTimeoutMs = readTimeoutMs)
         return try {
             conn.responseCode to HttpSupport.readBody(conn)
         } finally {
@@ -835,6 +854,14 @@ class CodeBuddyProvider(
         put("X-Product", "SaaS")
     }
 
+    /**
+     * 模型目录请求头：同 [chatHeaders]，再叠加该区域的附加头（国际版要 `X-Agent-Type: main`）。
+     */
+    private fun modelsHeaders(credential: Credential): Map<String, String> = buildMap {
+        putAll(chatHeaders(credential))
+        putAll(endpoint(credential).extraHeaders)
+    }
+
     private fun billingHeaders(credential: Credential): Map<String, String> = buildMap {
         put("Authorization", "Bearer ${credential.accessToken}")
         put("Accept", "application/json")
@@ -860,6 +887,14 @@ class CodeBuddyProvider(
         if (credential.enterpriseId.isNotEmpty()) put("X-Enterprise-Id", credential.enterpriseId)
         put("X-Auth-Refresh-Source", "workbuddy")
     }
+
+    /**
+     * 上游失败的统一描述：`<前缀>（<区域> <URL>）HTTP <状态码>：<上游原文>`。
+     *
+     * 只报状态码无法定位（同一个 500 可能来自完全不同的原因），所以原文一律带出来。
+     */
+    private fun failure(prefix: String, endpoint: Endpoint, url: String, status: Int, body: String): String =
+        "$prefix（${endpoint.label} $url）HTTP $status" + describeBody(body).ifEmpty { "（响应体为空）" }
 
     private fun userResourceBody(): String {
         val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -908,14 +943,14 @@ class CodeBuddyProvider(
 
     override fun regions(): List<String> = listOf(REGION_CN, REGION_GLOBAL)
 
-    private fun chatBase(credential: Credential?): String =
-        if (regionOf(credential) == REGION_GLOBAL) GLOBAL_CHAT_BASE else CN_CHAT_BASE
+    /** 该凭证的区域端点；所有按区域分叉的 host / 路径 / 头都从这里取。 */
+    private fun endpoint(credential: Credential?): Endpoint = endpointOf(regionOf(credential))
 
-    private fun billingBase(credential: Credential?): String =
-        if (regionOf(credential) == REGION_GLOBAL) GLOBAL_BILLING_BASE else CN_BILLING_BASE
+    private fun chatBase(credential: Credential?): String = endpoint(credential).chatBase
 
-    private fun originFor(credential: Credential?): String =
-        if (regionOf(credential) == REGION_GLOBAL) GLOBAL_ORIGIN else CN_ORIGIN
+    private fun billingBase(credential: Credential?): String = endpoint(credential).billingBase
+
+    private fun originFor(credential: Credential?): String = endpoint(credential).origin
 
     private fun parse(account: ProviderAccount): Credential? {
         val obj = runCatching { JsonParser.parseString(account.secret).asJsonObject }.getOrNull() ?: return null
@@ -1007,12 +1042,42 @@ class CodeBuddyProvider(
         const val REGION_CN = "cn"
         const val REGION_GLOBAL = "global"
 
-        const val CN_CHAT_BASE = "https://copilot.tencent.com"
-        const val CN_BILLING_BASE = "https://www.codebuddy.cn"
-        const val CN_ORIGIN = "https://www.codebuddy.cn"
-        const val GLOBAL_CHAT_BASE = "https://www.workbuddy.ai"
-        const val GLOBAL_BILLING_BASE = "https://www.workbuddy.ai"
-        const val GLOBAL_ORIGIN = "https://www.workbuddy.ai"
+        /**
+         * 一个区域对应的出站端点。
+         *
+         * 按区域分叉的一切（host / Origin / 模型目录路径 / 附加头 / 展示名）都收在这里：
+         * 同一个账号的每个请求都必须从同一处取端点，否则会出现「一部分请求打到另一个站点」
+         * （见项目记忆 provider-region-consistency）。
+         */
+        internal data class Endpoint(
+            val label: String,
+            val chatBase: String,
+            val billingBase: String,
+            val origin: String,
+            val modelsPath: String,
+            val extraHeaders: Map<String, String> = emptyMap(),
+        )
+
+        internal val CN_ENDPOINT = Endpoint(
+            label = "国内版",
+            chatBase = "https://copilot.tencent.com",
+            billingBase = "https://www.codebuddy.cn",
+            origin = "https://www.codebuddy.cn",
+            modelsPath = PATH_MODELS_CN,
+        )
+
+        internal val GLOBAL_ENDPOINT = Endpoint(
+            label = "国际版",
+            chatBase = "https://www.workbuddy.ai",
+            billingBase = "https://www.workbuddy.ai",
+            origin = "https://www.workbuddy.ai",
+            modelsPath = PATH_MODELS_GLOBAL,
+            // WorkBuddy AI 客户端的客户端类型标识，国际版站点要求
+            extraHeaders = mapOf("X-Agent-Type" to "main"),
+        )
+
+        internal fun endpointOf(region: String): Endpoint =
+            if (region == REGION_GLOBAL) GLOBAL_ENDPOINT else CN_ENDPOINT
 
         const val CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
 
@@ -1020,17 +1085,22 @@ class CodeBuddyProvider(
         const val PATH_AUTH_TOKEN = "/v2/plugin/auth/token"
         const val PATH_TOKEN_REFRESH = "/v2/plugin/auth/token/refresh"
         const val PATH_CHAT = "/v2/chat/completions"
-        const val PATH_MODELS = "/console/enterprises/personal/models"
-
-        /** 国际版的模型目录（CLI / 插件 API 路由，与国内那条网页控制台路由不同）。 */
-        const val PATH_MODELS_GLOBAL = "/v2/enterprises/personal/models"
+        const val PATH_MODELS_CN = "/console/enterprises/personal/models"
 
         /**
-         * 模型目录路径：国际版走 v2 API 路由（console 那条是网页控制台路由，
-         * 无凭证会 302 跳 OIDC 登录页，拿 Bearer token 打它会被后端直接 500）。
+         * 国际版的模型目录来源：客户端 product config（`/v3/config`）。
+         *
+         * 国内那条 `/console/...` 只服务网页会话：无凭证时 302 跳 OIDC 登录页，拿 Bearer token 打
+         * 它会被后端直接 500；`/v2/enterprises/personal/models` 则会一直不返回（请求挂死）。
+         * 国际版客户端（CLI / 桌面端）实际读 `/v3/config` 的 `data.agents[cli].models`，
+         * 与国内那份响应同构，解析逻辑共用。
          */
-        internal fun modelsPath(region: String): String =
-            if (region == REGION_GLOBAL) PATH_MODELS_GLOBAL else PATH_MODELS
+        const val PATH_MODELS_GLOBAL = "/v3/config"
+
+        /**
+         * 模型目录路径：国内走网页控制台接口，国际版走客户端 product config。
+         */
+        internal fun modelsPath(region: String): String = endpointOf(region).modelsPath
         const val PATH_USER_RESOURCE = "/v2/billing/meter/get-user-resource"
         const val PATH_CHECKIN = "/v2/billing/meter/daily-checkin"
 
@@ -1070,6 +1140,10 @@ class CodeBuddyProvider(
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000
+
+        /** 模型目录是普通 JSON 接口（非流式），给它一个短超时：
+         *  用对话那套 300s 会被网关侧的 20s 聚合超时盖掉，看不到真实错误。 */
+        private const val MODELS_READ_TIMEOUT_MS = 15_000
     }
 }
 

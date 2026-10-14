@@ -145,13 +145,16 @@ class TraeProvider(
 
     override fun isInternalModel(id: String): Boolean = TraeModelCatalog.isInternal(id)
 
+    /**
+     * 上游域名后缀（代理分流的判定依据），从区域定义推导，避免手写清单与区域脱节。
+     *
+     * 只列网关自己会出站访问的 host（agent / 额度 / 鉴权）：登录页由系统浏览器打开，不走这里。
+     */
     override fun hosts(): List<String> =
-        listOf(
-            // 国内：agent / oauth / ug
-            "trae-api-cn.mchost.guru", "api.trae.com.cn", "api.trae.cn",
-            // 国际版同样要列上，否则国际版账号的请求不走代理
-            "api.trae.ai", "ug-normal.trae.ai",
-        )
+        TraeRegion.entries
+            .flatMap { listOf(it.agentHost, it.ugHost, it.oauthHost) }
+            .map { it.removePrefix("https://") }
+            .distinct()
 
     // ------------------------------------------------------------------ 对话
 

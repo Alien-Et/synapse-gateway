@@ -65,7 +65,7 @@ data class EntUsage(
  */
 class TraeCheckinClient(
     private val version: TraeVersion,
-    private val host: String = TraeConstants.UG_HOST,
+    private val host: String,
 ) {
 
     fun status(account: TraeAccount): CheckinStatus {

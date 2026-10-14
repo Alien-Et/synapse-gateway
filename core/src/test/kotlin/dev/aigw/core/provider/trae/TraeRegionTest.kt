@@ -36,6 +36,15 @@ class TraeRegionTest {
     }
 
     @Test
+    fun `国际版 agent host 不是 OAuth host`() {
+        // 探测实测：api.trae.ai 上 /api/agent/v3/llm_utils_chat 与 /api/ide/v1/get_detail_param
+        // 都是 404（它是 OAuth/控制台 host），agent 集群在 -sg 域名上，错回 api.trae.ai
+        // 会让国际版账号的对话与模型目录全部 404。
+        assertEquals("https://trae-api-sg.mchost.guru", TraeRegion.INTL.agentHost)
+        assertEquals("https://api.trae.ai", TraeRegion.INTL.oauthHost)
+    }
+
+    @Test
     fun `代理域名清单同时覆盖国内与国际版`() {
         val provider = TraeProvider(
             store = InMemoryKeyValueStore(),
@@ -63,7 +72,7 @@ class TraeRegionTest {
             machineId = "m".repeat(64),
             deviceId = "1700000000000000",
             domain = TraeRegion.INTL.id,
-            apiHost = TraeConstants.OAUTH_HOST,
+            apiHost = TraeRegion.CN.oauthHost,
         )
 
         // 存量数据：旧版把国内 OAuth host 当缺省值写进了国际版凭证
@@ -77,7 +86,7 @@ class TraeRegionTest {
         )
         // 国内账号保持原样
         assertEquals(
-            TraeConstants.OAUTH_HOST,
+            TraeRegion.CN.oauthHost,
             client.authHost(international.copy(domain = TraeRegion.CN.id)),
         )
     }

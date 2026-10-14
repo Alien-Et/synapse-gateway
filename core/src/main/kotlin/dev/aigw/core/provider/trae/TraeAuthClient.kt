@@ -23,7 +23,7 @@ class TraeAuthClient(private val version: TraeVersion) {
     internal fun authHost(account: TraeAccount): String {
         val region = TraeRegion.infer(account.domain, account.apiHost)
         val host = account.apiHost.ifEmpty { region.oauthHost }
-        return if (region == TraeRegion.INTL && host == TraeConstants.OAUTH_HOST) region.oauthHost else host
+        return if (region == TraeRegion.INTL && host == TraeRegion.CN.oauthHost) region.oauthHost else host
     }
 
     /** refreshToken → 新 accessToken，并轮换 refreshToken。 */
