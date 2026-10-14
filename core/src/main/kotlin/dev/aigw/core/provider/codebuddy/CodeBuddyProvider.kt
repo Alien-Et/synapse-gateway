@@ -717,11 +717,24 @@ class CodeBuddyProvider(
     // ------------------------------------------------------------------ 上游
 
     private fun fetchModels(credential: Credential): List<ProviderModel> {
-        val (status, text) = getJson("${chatBase(credential)}$PATH_MODELS", chatHeaders(credential))
-        if (status !in 200..299) throw IllegalStateException("模型接口 HTTP $status")
+        val region = regionOf(credential)
+        val global = region == REGION_GLOBAL
+        val host = chatBase(credential)
+        val path = modelsPath(region)
+        val (status, text) = getJson("$host$path", chatHeaders(credential))
+        if (status !in 200..299) {
+            // 只报状态码无法定位：把实际用的区域/域名/路径与上游响应原文一并带出来
+            val label = if (global) "国际版" else "国内版"
+            throw IllegalStateException(
+                "模型接口 HTTP $status（$label $host$path，domain=${credential.domain.ifEmpty { "空" }}）" +
+                    describeBody(text).ifEmpty { "（响应体为空）" },
+            )
+        }
         val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
-            ?: throw IllegalStateException("模型响应不是合法 JSON")
-        if (obj.get("code")?.asLong != 0L) throw IllegalStateException("模型接口 code=${obj.get("code")}")
+            ?: throw IllegalStateException("模型响应不是合法 JSON：${text.trim().take(160)}")
+        if (obj.get("code")?.asLong != 0L) {
+            throw IllegalStateException("模型接口 code=${obj.get("code")}" + describeBody(text))
+        }
         val data = obj.objOrNull("data") ?: return emptyList()
 
         val cliIds = LinkedHashSet<String>()
@@ -1008,6 +1021,16 @@ class CodeBuddyProvider(
         const val PATH_TOKEN_REFRESH = "/v2/plugin/auth/token/refresh"
         const val PATH_CHAT = "/v2/chat/completions"
         const val PATH_MODELS = "/console/enterprises/personal/models"
+
+        /** 国际版的模型目录（CLI / 插件 API 路由，与国内那条网页控制台路由不同）。 */
+        const val PATH_MODELS_GLOBAL = "/v2/enterprises/personal/models"
+
+        /**
+         * 模型目录路径：国际版走 v2 API 路由（console 那条是网页控制台路由，
+         * 无凭证会 302 跳 OIDC 登录页，拿 Bearer token 打它会被后端直接 500）。
+         */
+        internal fun modelsPath(region: String): String =
+            if (region == REGION_GLOBAL) PATH_MODELS_GLOBAL else PATH_MODELS
         const val PATH_USER_RESOURCE = "/v2/billing/meter/get-user-resource"
         const val PATH_CHECKIN = "/v2/billing/meter/daily-checkin"
 
