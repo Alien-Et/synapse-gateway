@@ -271,6 +271,8 @@ data class AppUiState(
     val storage: StorageReport? = null,
     /** 安全防护与风控设置。 */
     val security: dev.aigw.core.security.SecuritySettings = dev.aigw.core.security.SecuritySettings(),
+    /** 可选的悬浮窗保活是否开启（需「显示在其他应用上层」权限）。 */
+    val overlayKeepAlive: Boolean = false,
     /** 模型开放名单：只对外暴露勾选的模型。 */
     val modelExposure: dev.aigw.core.gateway.ModelExposureSettings = dev.aigw.core.gateway.ModelExposureSettings(),
     /** 故障转移与并发配置。 */
@@ -320,6 +322,7 @@ private class Snapshot(
     val sanitizerRulesCount: Int,
     val modelExposure: dev.aigw.core.gateway.ModelExposureSettings,
     val failover: dev.aigw.core.failover.ModelFailoverSettings,
+    val overlayKeepAlive: Boolean,
 )
 
 class AppViewModel(
@@ -425,6 +428,7 @@ class AppViewModel(
                     sanitizerRulesCount = engine.sanitizer.currentRulesCount(),
                     modelExposure = engine.modelExposureSettings(),
                     failover = engine.failoverSettings(),
+                    overlayKeepAlive = dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(engine.store()),
                 )
             }
             _state.value = _state.value.copy(
@@ -449,6 +453,7 @@ class AppViewModel(
                 sanitizerRulesCount = snapshot.sanitizerRulesCount,
                 modelExposure = snapshot.modelExposure,
                 failover = snapshot.failover,
+                overlayKeepAlive = snapshot.overlayKeepAlive,
             )
         }
     }
@@ -695,6 +700,38 @@ class AppViewModel(
             withContext(Dispatchers.IO) { engine.updateFailoverSettings(updated) }
             refresh()
         }
+    }
+
+    /**
+     * 开关「悬浮窗保活」：落盘后立即生效（无需重启网关）。
+     * 开时若未授「显示在其他应用上层」权限，则只记开关并提示去授权；授权后回到本页会自动重试显示。
+     */
+    fun setOverlayKeepAlive(enabled: Boolean) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { dev.aigw.app.data.KeepAlivePrefs.setOverlayEnabled(engine.store(), enabled) }
+            if (enabled) {
+                val label = "网关 ${engine.settings().port}"
+                val shown = dev.aigw.app.service.FloatingKeepAlive.show(app, label)
+                notice(
+                    if (shown) "悬浮窗保活已开启"
+                    else "已开启，但缺少「显示在其他应用上层」权限，请在上方授权",
+                )
+            } else {
+                dev.aigw.app.service.FloatingKeepAlive.hide(app)
+                notice("悬浮窗保活已关闭")
+            }
+            refresh()
+        }
+    }
+
+    /**
+     * 授权返回后重新应用悬浮窗：权限已授予且开关开着时补显示（已在显示则忽略）。
+     */
+    fun reapplyOverlayIfEnabled() {
+        if (!dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(engine.store())) return
+        if (dev.aigw.app.service.FloatingKeepAlive.isShowing()) return
+        val label = "网关 ${engine.settings().port}"
+        dev.aigw.app.service.FloatingKeepAlive.show(app, label)
     }
 
     /** 重新加载反审核脱敏处理链。 */
