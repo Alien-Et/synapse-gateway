@@ -30,7 +30,8 @@ object HttpSupport {
         body: String? = null,
         connectTimeoutMs: Int,
         readTimeoutMs: Int,
-    ): HttpURLConnection = configure(url, method, connectTimeoutMs, readTimeoutMs) { conn ->
+        allowCompression: Boolean = false,
+    ): HttpURLConnection = configure(url, method, connectTimeoutMs, readTimeoutMs, allowCompression) { conn ->
         for ((key, value) in headers) conn.setRequestProperty(key, value)
     }.apply { writeBody(this, body) }
 
@@ -42,7 +43,7 @@ object HttpSupport {
         readTimeoutMs: Int,
         body: String?,
         applyHeaders: (HttpURLConnection) -> Unit,
-    ): HttpURLConnection = configure(url, method, connectTimeoutMs, readTimeoutMs, applyHeaders)
+    ): HttpURLConnection = configure(url, method, connectTimeoutMs, readTimeoutMs, applyHeaders = applyHeaders)
         .apply { writeBody(this, body) }
 
     /** 读取响应体（非 2xx 时自动落到 errorStream）。不关闭连接，由调用方决定生命周期。 */
@@ -77,6 +78,7 @@ object HttpSupport {
         method: String,
         connectTimeoutMs: Int,
         readTimeoutMs: Int,
+        allowCompression: Boolean = false,
         applyHeaders: (HttpURLConnection) -> Unit,
     ): HttpURLConnection = (URL(url).openConnection() as HttpURLConnection).apply {
         requestMethod = method
@@ -84,7 +86,9 @@ object HttpSupport {
         readTimeout = readTimeoutMs
         // 上游若对 SSE/JSON 做重定向或 gzip，流式解析会错乱，显式关闭
         instanceFollowRedirects = false
-        setRequestProperty("Accept-Encoding", "identity")
+        // 流式路径固定不压缩（逐字节解析 SSE）；JSON 接口允许压缩，交平台自己带上
+        // gzip 并透明解压（Android 的 HttpURLConnection 会代劳），大目录响应能小几倍
+        if (!allowCompression) setRequestProperty("Accept-Encoding", "identity")
         applyHeaders(this)
     }
 

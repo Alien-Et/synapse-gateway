@@ -293,6 +293,7 @@ class GatewayHttpServer(
                 }
 
                 var account = picked
+                val refreshStartedAt = System.currentTimeMillis()
                 try {
                     val refreshed = provider.refreshAccount(account, settings.refreshSkewSeconds)
                     if (refreshed != null) {
@@ -306,6 +307,13 @@ class GatewayHttpServer(
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", "刷新凭证异常：$providerLastError")
                     gateHandle.release()
                     continue
+                }
+
+                // 凭证刷新的条件判断若失效（expiresAt 未知），每个请求都会多一次上游往返，
+                // 直接体现在首字延迟上；verbose 下单独记出来便于定位
+                val refreshMs = System.currentTimeMillis() - refreshStartedAt
+                if (refreshMs > 200 && engine.verboseLogging()) {
+                    log("凭证刷新耗时（${currentRoute.providerId}/${account.nickname}）：${refreshMs}ms")
                 }
 
                 // 账号级限速与节拍抖动：控制同一账号调用频率，规避上游自动化行为特征检测
@@ -332,6 +340,11 @@ class GatewayHttpServer(
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", "openChat 异常：$providerLastError")
                     gateHandle.release()
                     continue
+                }
+
+                // “上游已应答”= 拿到响应头（含建连/握手/上游排队），与首字出站之间的差就是模型的思考时间
+                if (engine.verboseLogging()) {
+                    log("上游已应答（${currentRoute.providerId}）：${System.currentTimeMillis() - attemptStart}ms")
                 }
 
                 // 流内业务错误（如 Loomy 的 HTTP 200 + 业务码）

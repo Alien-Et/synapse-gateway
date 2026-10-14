@@ -728,7 +728,8 @@ class CodeBuddyProvider(
         val host = ep.chatBase
         val path = ep.modelsPath
         val (status, text) = try {
-            getJson("$host$path", modelsHeaders(credential), MODELS_READ_TIMEOUT_MS)
+            // 目录响应带内嵌图标，可能上百 KB：允许 gzip（平台自己带上并透明解压）
+            getJson("$host$path", modelsHeaders(credential), MODELS_READ_TIMEOUT_MS, allowCompression = true)
         } catch (e: Exception) {
             throw IllegalStateException("模型接口请求失败（${ep.label} $host$path）：${e.message}", e)
         }
@@ -798,12 +799,13 @@ class CodeBuddyProvider(
         headers: Map<String, String>,
         method: String = if (body == null) "GET" else "POST",
         readTimeoutMs: Int = READ_TIMEOUT_MS,
+        allowCompression: Boolean = false,
     ): HttpURLConnection {
         val merged = buildMap {
             putAll(headers)
             if (body != null) put("Content-Type", "application/json")
         }
-        return HttpSupport.open(url, method, merged, body, CONNECT_TIMEOUT_MS, readTimeoutMs)
+        return HttpSupport.open(url, method, merged, body, CONNECT_TIMEOUT_MS, readTimeoutMs, allowCompression)
     }
 
     private fun postJson(
@@ -824,8 +826,9 @@ class CodeBuddyProvider(
         url: String,
         headers: Map<String, String> = emptyMap(),
         readTimeoutMs: Int = READ_TIMEOUT_MS,
+        allowCompression: Boolean = false,
     ): Pair<Int, String> {
-        val conn = open(url, null, null, headers, method = "GET", readTimeoutMs = readTimeoutMs)
+        val conn = open(url, null, null, headers, method = "GET", readTimeoutMs = readTimeoutMs, allowCompression = allowCompression)
         return try {
             conn.responseCode to HttpSupport.readBody(conn)
         } finally {
@@ -964,7 +967,13 @@ class CodeBuddyProvider(
         return Credential(
             accessToken = accessToken,
             refreshToken = obj.firstString("refreshToken", "refresh_token"),
-            expiresAt = obj.firstLong("expiresAt", "expires_at"),
+            // 设备授权/刷新返回的是**相对的** expiresIn（秒），没有绝对时间戳。不换算成绝对时间的话
+            // expiresAt 恒为 0，[refreshAccount] 的「距过期还早就不刷」判断失效，
+            // 每个请求都会先做一次 token 刷新往返（首字延迟平白多一跳）。
+            expiresAt = obj.firstLong("expiresAt", "expires_at").takeIf { it > 0 }
+                ?: obj.firstLong("expiresIn", "expires_in").takeIf { it > 0 }
+                    ?.let { nowMillis() / 1000 + it }
+                ?: 0L,
             domain = obj.firstString("domain"),
             // 响应里没给时从 access_token（JWT）里解，旧的存量账号也能自动修好
             uid = obj.firstString("uid", "userId", "user_id")

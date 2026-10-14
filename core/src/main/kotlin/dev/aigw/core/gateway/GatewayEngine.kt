@@ -1150,44 +1150,86 @@ class GatewayEngine(
         return try {
             val regionAware = provider as? dev.aigw.core.provider.RegionAwareSupport
                 ?: return fetchWholeProviderModels(provider)
-
-            val models = ArrayList<RoutedModel>()
-            var firstError: String? = null
-            for (region in regionAware.regions()) {
-                val picked = pickAccount(provider.id, region = region) ?: continue
-                val label = when (region) {
-                    "cn" -> "国内"
-                    "global" -> "国外"
-                    else -> region
-                }
-                val view = try {
-                    fetchCatalog(provider, picked)
-                } catch (e: Exception) {
-                    logWarn("拉取模型目录失败（${provider.id}/$region）：${e.message}")
-                    firstError = firstError ?: (e.message ?: "拉取失败")
-                    continue
-                }
-                for (model in view.models) {
-                    if (settings.onlyUsableModels && provider.isInternalModel(model.id)) continue
-                    models.add(
-                        RoutedModel(
-                            provider.id,
-                            "${provider.displayName}（$label）",
-                            model,
-                            routePrefix = "${provider.id}-$region",
-                            region = region,
-                        ),
-                    )
-                }
-                if (view.error.isNotEmpty()) firstError = firstError ?: view.error
-            }
-            // 供应商自报错误只在拿不到任何模型时才算失败；没有内置快照兜底后，
-            // 无账号/拉取失败是否报红由各家 listModels 的 error 决定
-            ProviderModelsChunk(provider.id, models, if (models.isEmpty()) firstError else null)
+            fetchRegionalModels(provider, regionAware)
         } catch (e: Exception) {
             logWarn("拉取模型目录失败（${provider.id}）：${e.message}")
             ProviderModelsChunk(provider.id, emptyList(), e.message ?: "拉取失败")
         }
+    }
+
+    /**
+     * 区域型供应商的目录拉取：每个区域各用本区域账号拉一次，**并行**执行。
+     *
+     * 串行会把两个区域的耗时相加，容易顶穿 [MODELS_FETCH_TIMEOUT_SECONDS] 的聚合超时
+     * （目录响应带内嵌图标、可能上百 KB，慢的时候单区域就要十几秒）。
+     * 某区域没有可用账号就不为该区域生成分组。
+     */
+    private fun fetchRegionalModels(
+        provider: Provider,
+        regionAware: dev.aigw.core.provider.RegionAwareSupport,
+    ): ProviderModelsChunk {
+        val views = ConcurrentHashMap<String, ProviderModelCatalogView>()
+        val failures = ConcurrentHashMap<String, String>()
+        val started = ArrayList<String>()
+        val jobs = ArrayList<Thread>()
+
+        for (region in regionAware.regions()) {
+            val picked = pickAccount(provider.id, region = region) ?: continue
+            started.add(region)
+            jobs.add(
+                Thread {
+                    val startedAt = now()
+                    try {
+                        views[region] = fetchCatalog(provider, picked)
+                    } catch (e: Exception) {
+                        val message = e.message ?: "拉取失败"
+                        failures[region] = message
+                        logWarn("拉取模型目录失败（${provider.id}/$region，${now() - startedAt}ms）：$message")
+                    }
+                }.apply {
+                    isDaemon = true
+                    start()
+                },
+            )
+        }
+
+        // 各区域的 HTTP 请求自带读超时；这里再兜一层，避免个别实现把整轮拖过网关侧的聚合超时
+        val deadline = now() + REGIONAL_FETCH_WAIT_MS
+        for (job in jobs) {
+            val remain = deadline - now()
+            if (remain > 0) job.join(remain)
+        }
+
+        val models = ArrayList<RoutedModel>()
+        var firstError: String? = null
+        for (region in started) {
+            val view = views[region]
+            if (view == null) {
+                firstError = firstError ?: failures[region] ?: "拉取超时"
+                continue
+            }
+            val label = when (region) {
+                "cn" -> "国内"
+                "global" -> "国外"
+                else -> region
+            }
+            for (model in view.models) {
+                if (settings.onlyUsableModels && provider.isInternalModel(model.id)) continue
+                models.add(
+                    RoutedModel(
+                        provider.id,
+                        "${provider.displayName}（$label）",
+                        model,
+                        routePrefix = "${provider.id}-$region",
+                        region = region,
+                    ),
+                )
+            }
+            if (view.error.isNotEmpty()) firstError = firstError ?: view.error
+        }
+        // 供应商自报错误只在拿不到任何模型时才算失败；没有内置快照兜底后，
+        // 无账号/拉取失败是否报红由各家 listModels 的 error 决定
+        return ProviderModelsChunk(provider.id, models, if (models.isEmpty()) firstError else null)
     }
 
     /** 无区域概念的供应商：用池里挑出的那一个账号拉一份目录。 */
@@ -1531,6 +1573,9 @@ class GatewayEngine(
 
         /** `/v1/models` 单个供应商拉取模型目录的超时（秒）：上游 READ_TIMEOUT 300s 不能无限等。 */
         const val MODELS_FETCH_TIMEOUT_SECONDS = 20L
+
+        /** 区域型供应商：等待各区域目录拉取的预算（单个请求自身的读超时另算）。 */
+        private const val REGIONAL_FETCH_WAIT_MS = 16_000L
 
         const val CUSTOM_PREFIX = "custom:"
 

@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * WorkBuddy 粘贴凭证 JSON 导入。
@@ -124,6 +125,21 @@ class CodeBuddyImportTest {
             provider.importCredentials("""{"accessToken":"$token","domain":"www.codebuddy.cn","uid":"u-6"}"""),
         )
         assertEquals(CodeBuddyProvider.REGION_GLOBAL, provider.regionOf(account))
+    }
+
+    @Test
+    fun `缺 expiresAt 时用 expiresIn 换算绝对过期时间`() {
+        // 设备授权只给相对的 expiresIn；不换算的话 expiresAt 恒为 0，
+        // 「距过期还早就不刷」判断失效 —— 每个请求都会先刷一次 token（首字延迟多一跳）
+        val before = System.currentTimeMillis() / 1000
+        val account = assertNotNull(
+            provider.importCredentials(
+                """{"accessToken":"at-9","refreshToken":"rt-9","expiresIn":3600,
+                 "domain":"www.workbuddy.ai","uid":"u-9"}""".trimIndent(),
+            ),
+        )
+        val expiresAt = secretOf(account.secret).get("expiresAt").asLong
+        assertTrue(expiresAt in (before + 3500)..(before + 3700), "expiresAt=$expiresAt")
     }
 
     @Test
