@@ -387,29 +387,6 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
         }
 
         SectionCard(enterIndex = 5) {
-            SectionLabel("最近调用")
-            if (state.calls.isEmpty()) {
-                EmptyHint("还没有调用记录", "客户端发起请求后，这里会显示模型、账号与耗时。")
-            } else {
-                for (record in state.calls.take(20)) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text(
-                            text = "${record.providerId}/${record.model}",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            text = "${record.status} · ${record.durationMillis}ms · " +
-                                "tokens ${record.totalTokens} · ${record.accountNickname.ifEmpty { record.accountUid }}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-
-        SectionCard(enterIndex = 6) {
             SectionLabel("存储")
             Text(
                 text = "调用记录 ${state.storedCalls} 条，占用约 ${StorageAudit.formatSize(state.storage?.totalChars ?: 0L)}",
