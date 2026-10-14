@@ -165,27 +165,6 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 },
             )
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("调用记录归档", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "把每次调用的请求/响应原文存入调用记录；关闭后不再新增（存储大幅减少），历史记录不受影响",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = state.settings.callLoggingEnabled,
-                onCheckedChange = {
-                    viewModel.updateSettings(state.settings.copy(callLoggingEnabled = it))
-                },
-            )
-        }
-
         EditorialGroupHeader("04", "架构关于 · ABOUT THE ENGINE")
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(

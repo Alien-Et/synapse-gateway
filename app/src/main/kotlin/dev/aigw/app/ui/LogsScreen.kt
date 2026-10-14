@@ -357,7 +357,7 @@ private fun truncatedNote(fullMissing: Boolean, summary: String): String? = when
 }
 
 /**
- * 调用记录的参数设置：归档开关、保留天数、清空；与「我的/数据管理」的入口指向同一份配置。
+ * 调用记录的参数设置：归档开关、保留天数、清空。
  */
 @Composable
 private fun CallLogSettings(state: AppUiState, viewModel: AppViewModel) {
@@ -408,7 +408,7 @@ private fun CallLogSettings(state: AppUiState, viewModel: AppViewModel) {
 
 /**
  * 请求日志的参数设置：每项参数一个控件，展开后直接调整，不折叠到弹窗里。
- * 只改「请求日志」相关项；调用记录归档开关与保留天数在「我的 → 排查诊断 / 数据管理」。
+ * 只改「请求日志」相关项；调用记录的归档开关与保留天数在「调用记录」标签的设置面板里。
  */
 @Composable
 private fun RequestLogSettings(state: AppUiState, viewModel: AppViewModel) {
