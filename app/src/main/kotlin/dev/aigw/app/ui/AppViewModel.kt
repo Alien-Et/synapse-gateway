@@ -703,19 +703,25 @@ class AppViewModel(
     }
 
     /**
-     * 开关「悬浮窗保活」：落盘后立即生效（无需重启网关）。
-     * 开时若未授「显示在其他应用上层」权限，则只记开关并提示去授权；授权后回到本页会自动重试显示。
+     * 开关「悬浮窗保活」：落盘后立即生效。
+     *
+     * 悬浮窗只在**网关服务运行时**显示（它服务于保活，网关没跑时没有意义）；
+     * 未启动时只记开关，下次启动网关时由前台服务拉起。
      */
     fun setOverlayKeepAlive(enabled: Boolean) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { dev.aigw.app.data.KeepAlivePrefs.setOverlayEnabled(engine.store(), enabled) }
             if (enabled) {
-                val label = "网关 ${engine.settings().port}"
-                val shown = dev.aigw.app.service.FloatingKeepAlive.show(app, label)
-                notice(
-                    if (shown) "悬浮窗保活已开启"
-                    else "已开启，但缺少「显示在其他应用上层」权限，请在上方授权",
-                )
+                if (!engine.isRunning()) {
+                    notice("已开启，悬浮窗将在网关服务启动后显示")
+                } else {
+                    val label = "网关 ${engine.settings().port}"
+                    val shown = dev.aigw.app.service.FloatingKeepAlive.show(app, label)
+                    notice(
+                        if (shown) "悬浮窗保活已开启"
+                        else "已开启，但缺少「显示在其他应用上层」权限，请在上方授权",
+                    )
+                }
             } else {
                 dev.aigw.app.service.FloatingKeepAlive.hide(app)
                 notice("悬浮窗保活已关闭")
@@ -725,13 +731,13 @@ class AppViewModel(
     }
 
     /**
-     * 授权返回后重新应用悬浮窗：权限已授予且开关开着时补显示（已在显示则忽略）。
+     * 授权返回后重新应用悬浮窗：仅在网关服务运行时补显示（开关开着且未在显示）。
      */
     fun reapplyOverlayIfEnabled() {
+        if (!engine.isRunning()) return
         if (!dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(engine.store())) return
         if (dev.aigw.app.service.FloatingKeepAlive.isShowing()) return
-        val label = "网关 ${engine.settings().port}"
-        dev.aigw.app.service.FloatingKeepAlive.show(app, label)
+        dev.aigw.app.service.FloatingKeepAlive.show(app, "网关 ${engine.settings().port}")
     }
 
     /** 重新加载反审核脱敏处理链。 */

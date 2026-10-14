@@ -87,7 +87,7 @@ fun KeepAliveScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Un
                     Text("悬浮窗保活", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Text(
                         text = "在屏幕上留一个小悬浮标签，让系统把本应用视为可见进程，降低后台被回收的概率；" +
-                            "可拖动、点按回到应用，不拦截其他应用的操作。",
+                            "网关服务启动后出现、停止时移除，可拖动、点按回到应用。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -95,6 +95,13 @@ fun KeepAliveScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Un
                 Switch(
                     checked = state.overlayKeepAlive,
                     onCheckedChange = { viewModel.setOverlayKeepAlive(it) },
+                )
+            }
+            if (state.overlayKeepAlive && !state.running) {
+                Text(
+                    text = "网关未启动：悬浮窗将在服务启动后显示。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             if (state.overlayKeepAlive && status?.overlayGranted != true) {
