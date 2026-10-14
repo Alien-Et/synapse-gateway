@@ -151,6 +151,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                 }
             }
             if (showLogSettings) {
+                DiagnosticsSettings(state, viewModel)
                 if (tab == LogTab.Requests) {
                     RequestLogSettings(state, viewModel)
                 } else {
@@ -354,6 +355,35 @@ private fun truncatedNote(fullMissing: Boolean, summary: String): String? = when
     summary.length >= dev.aigw.core.usage.CallLogStore.MAX_SUMMARY_CHARS ->
         "内容较长，仅保留前 ${dev.aigw.core.usage.CallLogStore.MAX_SUMMARY_CHARS} 字符摘要（完整原文已被清理或本次未启用完整保存）"
     else -> null
+}
+
+/**
+ * 排查诊断：详细日志开关。开启后记录每次调用的请求、转发、发送与返回原文，用于排查 503 类问题。
+ */
+@Composable
+private fun DiagnosticsSettings(state: AppUiState, viewModel: AppViewModel) {
+    SectionCard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("详细日志", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = "记录每次调用的请求、转发、发送与返回原文，用于排查 503 等问题；关闭后立即生效",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = state.settings.verboseLogging,
+                onCheckedChange = {
+                    viewModel.updateSettings(state.settings.copy(verboseLogging = it))
+                },
+            )
+        }
+    }
 }
 
 /**

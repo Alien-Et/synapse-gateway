@@ -144,28 +144,7 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
             }
         }
 
-        EditorialGroupHeader("03", "排查诊断 · DIAGNOSTICS")
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("详细日志", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "记录每次调用的请求、转发、发送与返回原文，用于排查 503 等问题；关闭后立即生效",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = state.settings.verboseLogging,
-                onCheckedChange = {
-                    viewModel.updateSettings(state.settings.copy(verboseLogging = it))
-                },
-            )
-        }
-        EditorialGroupHeader("04", "架构关于 · ABOUT THE ENGINE")
+        EditorialGroupHeader("03", "架构关于 · ABOUT THE ENGINE")
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = "ai-gateway · 本地 OpenAI 兼容网关",
