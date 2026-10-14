@@ -745,8 +745,30 @@ class GatewayEngine(
         payload: JsonObject,
     ): ProviderActionResult {
         val provider = registry.get(providerId) ?: return ProviderActionResult.failure("未知供应商")
-        val account = pool.account(providerId, uid) ?: return ProviderActionResult.failure("账号不存在")
+        val stored = pool.account(providerId, uid) ?: return ProviderActionResult.failure("账号不存在")
+        val account = freshAccount(provider, stored)
         return provider.performAction(account, action, payload)
+    }
+
+    /**
+     * 非对话路径（动作 / 模型目录）的凭证保鲜：临期则刷新并回存账号池，返回实际该用的账号。
+     *
+     * 与对话路径（[GatewayHttpServer] 自带换号重试语义）不同：这里保鲜失败**不能**中断操作，
+     * 刷新返回 null 或抛异常都静默降级为原账号，让动作照原凭证执行——把「临期」当「可用」的
+     * 代价远小于因保鲜失败直接拒绝用户操作。
+     */
+    private fun freshAccount(provider: Provider, account: ProviderAccount): ProviderAccount {
+        return try {
+            val refreshed = provider.refreshAccount(account, settings.refreshSkewSeconds)
+            if (refreshed != null) {
+                pool.saveAccount(refreshed)
+                refreshed
+            } else {
+                account
+            }
+        } catch (_: Exception) {
+            account
+        }
     }
 
     /** 有界并发刷新一批账号的额度；结果顺序与 [targets] 一致（与串行版可比）。 */
@@ -1057,17 +1079,8 @@ class GatewayEngine(
     private fun fetchProviderModels(provider: Provider): ProviderModelsChunk {
         return try {
             val picked = pool.pick(provider.id)
-            var account = picked
             // 若选中的账号凭证临期或已过期，在拉取前执行一次安全的 refreshAccount 保鲜
-            if (account != null) {
-                try {
-                    val refreshed = provider.refreshAccount(account, settings.refreshSkewSeconds)
-                    if (refreshed != null) {
-                        pool.saveAccount(refreshed)
-                        account = refreshed
-                    }
-                } catch (_: Exception) {}
-            }
+            val account = picked?.let { freshAccount(provider, it) }
             val view = provider.listModels(account)
             val models = ArrayList<RoutedModel>()
             val regionAware = provider as? dev.aigw.core.provider.RegionAwareSupport
