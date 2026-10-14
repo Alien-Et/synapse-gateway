@@ -42,6 +42,7 @@ import dev.aigw.app.ui.providers.ProviderUi
 import dev.aigw.app.ui.providers.ProviderUiActions
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.provider.ACTION_CHECKIN
+import dev.aigw.core.provider.trae.TraeRegion
 
 object TraeUi : ProviderUi {
 
@@ -70,6 +71,7 @@ object TraeUi : ProviderUi {
         var global by rememberSaveable {
             mutableStateOf(actions.providerOptionOf(id, "region", "cn") == "global")
         }
+        val region = if (global) TraeRegion.INTL.id else TraeRegion.CN.id
 
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SectionCard(enterIndex = 0) {
@@ -100,7 +102,7 @@ object TraeUi : ProviderUi {
                 }
                 SectionLabel(if (global) "登录 · 国际版 trae.ai" else "登录 · 国内版 trae.cn")
                 Button(
-                    onClick = { actions.onWebLogin(id) },
+                    onClick = { actions.onWebLogin(id, region) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(if (global) "在浏览器中打开 Trae 国际版登录页" else "在浏览器中打开 Trae 登录页")

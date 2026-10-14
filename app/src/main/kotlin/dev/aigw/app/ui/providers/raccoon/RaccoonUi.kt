@@ -60,7 +60,7 @@ object RaccoonUi : ProviderUi {
             SectionCard(enterIndex = 0) {
                 SectionLabel("登录")
                 Button(
-                    onClick = { actions.onWebLogin(id) },
+                    onClick = { actions.onWebLogin(id, "") },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("在浏览器中打开小浣熊登录页")

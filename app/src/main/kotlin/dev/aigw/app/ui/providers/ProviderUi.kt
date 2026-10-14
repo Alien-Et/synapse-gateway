@@ -16,8 +16,13 @@ import dev.aigw.core.provider.QuotaPack
  * 因此新增/替换一个供应商的实现不会牵动页面骨架与其它供应商。
  */
 class ProviderUiActions(
-    /** 拉起 WebView 登录（Trae 回调型 / Antigravity OAuth）。 */
-    val onWebLogin: (providerId: String) -> Unit = {},
+    /**
+     * 拉起浏览器登录（Trae 回调型 / Antigravity OAuth / 小浣熊）。
+     *
+     * region 由组件按滑块传入：供应商设置是异步写入的，登录流程不能把正确性押在它上面
+     * （区域型供应商会按它选登录端点）。无区域概念时传空串。
+     */
+    val onWebLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
     /** 设备授权登录（WorkBuddy）：拉起 WebView 并开始轮询；region 由组件按滑块传入。 */
     val onDeviceLogin: (providerId: String, region: String) -> Unit = { _, _ -> },
     /** 读供应商私有设置项（同步，取引擎内存值）。 */

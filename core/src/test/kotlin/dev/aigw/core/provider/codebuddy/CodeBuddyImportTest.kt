@@ -115,4 +115,14 @@ class CodeBuddyImportTest {
         )
         assertEquals(CodeBuddyProvider.REGION_GLOBAL, provider.regionOf(issuerOnly))
     }
+
+    @Test
+    fun `JWT issuer 优先于凭证里的国内域名`() {
+        // 拿国际版 token 打国内站点会被上游直接回 500，所以 issuer 说国际就是国际
+        val token = jwt("""{"iss":"https://workbuddy.ai/auth/realms/copilot","sub":"u-6"}""")
+        val account = assertNotNull(
+            provider.importCredentials("""{"accessToken":"$token","domain":"www.codebuddy.cn","uid":"u-6"}"""),
+        )
+        assertEquals(CodeBuddyProvider.REGION_GLOBAL, provider.regionOf(account))
+    }
 }

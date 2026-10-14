@@ -864,7 +864,18 @@ class CodeBuddyProvider(
 
     // ------------------------------------------------------------------ 工具
 
+    /**
+     * 区域判定：
+     * 1. access_token 的 JWT `iss` 是权威依据——上游两个 realm（国内 codebuddy.cn / 国际
+     *    workbuddy.ai）就靠它区分，而拿国际版 token 打国内站点会被直接回 500；
+     * 2. 否则看凭证里的 `domain`：`workbuddy.ai` / `codebuddy.ai`（国际历史域名）为国际，
+     *    其余非空值为国内；
+     * 3. 都没有时回退到供应商设置里的区域。
+     */
     private fun regionOf(credential: Credential?): String {
+        val issuer = jwtClaim(credential?.accessToken.orEmpty(), "iss", "issuer").lowercase()
+        if (issuer.contains("workbuddy.ai") || issuer.contains("codebuddy.ai")) return REGION_GLOBAL
+
         val domain = credential?.domain.orEmpty().trim().lowercase()
         if (
             domain == REGION_GLOBAL ||
@@ -876,9 +887,6 @@ class CodeBuddyProvider(
             return REGION_GLOBAL
         }
         if (domain.isNotEmpty()) return REGION_CN
-
-        val issuer = jwtClaim(credential?.accessToken.orEmpty(), "iss", "issuer").lowercase()
-        if (issuer.contains("workbuddy.ai") || issuer.contains("codebuddy.ai")) return REGION_GLOBAL
         return region()
     }
 

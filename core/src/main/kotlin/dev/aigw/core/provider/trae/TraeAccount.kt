@@ -79,7 +79,7 @@ data class TraeAccount(
                 machineId = auth.str("machineId"),
                 deviceId = auth.str("deviceId"),
                 domain = auth.str("domain").ifEmpty { TraeConstants.REGION_CN },
-                apiHost = auth.str("apiHost").ifEmpty { TraeConstants.OAUTH_HOST },
+                apiHost = auth.str("apiHost"),
             )
         }
     }

@@ -48,7 +48,7 @@ fun ProviderDetailScreen(
         ProviderUiActions(
             // 登录一律交给系统浏览器：本机 WebView 渲染异常（整页缩放错乱、输入框文字镜像），
             // 网关会在本地临时监听回调端口接住登录结果。
-            onWebLogin = { id -> viewModel.beginBrowserLogin(id) },
+            onWebLogin = { id, region -> viewModel.beginBrowserLogin(id, region) },
             onDeviceLogin = { id, region -> viewModel.beginDeviceLogin(id, region) },
             onSmsLogin = { id, phone, code, ccode, onResult ->
                 if (code.isEmpty()) {

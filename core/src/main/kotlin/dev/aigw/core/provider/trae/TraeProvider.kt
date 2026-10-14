@@ -145,7 +145,13 @@ class TraeProvider(
 
     override fun isInternalModel(id: String): Boolean = TraeModelCatalog.isInternal(id)
 
-    override fun hosts(): List<String> = listOf("trae-api-cn.mchost.guru", "api.trae.com.cn", "api.trae.cn")
+    override fun hosts(): List<String> =
+        listOf(
+            // 国内：agent / oauth / ug
+            "trae-api-cn.mchost.guru", "api.trae.com.cn", "api.trae.cn",
+            // 国际版同样要列上，否则国际版账号的请求不走代理
+            "api.trae.ai", "ug-normal.trae.ai",
+        )
 
     // ------------------------------------------------------------------ 对话
 

@@ -35,6 +35,53 @@ class TraeRegionTest {
         assertEquals(TraeRegion.CN.id, provider.regionOf(accountWith(apiHost = "https://api.trae.com.cn")))
     }
 
+    @Test
+    fun `代理域名清单同时覆盖国内与国际版`() {
+        val provider = TraeProvider(
+            store = InMemoryKeyValueStore(),
+            version = { TraeVersion() },
+            defaultModel = { "glm-5.2" },
+        )
+
+        val hosts = provider.hosts()
+        // 国际版账号请求的是另外一套 host，漏掉就会绕过代理开关
+        assertEquals(true, hosts.contains(TraeRegion.INTL.agentHost.removePrefix("https://")))
+        assertEquals(true, hosts.contains(TraeRegion.INTL.ugHost.removePrefix("https://")))
+        assertEquals(true, hosts.contains(TraeRegion.CN.agentHost.removePrefix("https://")))
+    }
+
+    @Test
+    fun `国际版账号不会用国内鉴权 host`() {
+        val client = TraeAuthClient(TraeVersion())
+        val international = TraeAccount(
+            uid = "u1",
+            accessToken = "at",
+            refreshToken = "rt",
+            expiresAt = 0,
+            nickname = "",
+            enterpriseId = "",
+            machineId = "m".repeat(64),
+            deviceId = "1700000000000000",
+            domain = TraeRegion.INTL.id,
+            apiHost = TraeConstants.OAUTH_HOST,
+        )
+
+        // 存量数据：旧版把国内 OAuth host 当缺省值写进了国际版凭证
+        assertEquals(TraeRegion.INTL.oauthHost, client.authHost(international))
+        // 凭证没带 apiHost 时按区域补
+        assertEquals(TraeRegion.INTL.oauthHost, client.authHost(international.copy(apiHost = "")))
+        // 用户自己配的 host 不被改写
+        assertEquals(
+            "https://trae-mirror.example.com",
+            client.authHost(international.copy(apiHost = "https://trae-mirror.example.com")),
+        )
+        // 国内账号保持原样
+        assertEquals(
+            TraeConstants.OAUTH_HOST,
+            client.authHost(international.copy(domain = TraeRegion.CN.id)),
+        )
+    }
+
     private fun accountWith(apiHost: String): ProviderAccount {
         val secret = """
             {"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":0,"apiHost":"$apiHost",
