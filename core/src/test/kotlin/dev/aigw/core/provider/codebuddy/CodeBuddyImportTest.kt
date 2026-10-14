@@ -99,4 +99,20 @@ class CodeBuddyImportTest {
         )
         assertEquals(CodeBuddyProvider.REGION_GLOBAL, provider.regionOf(account))
     }
+
+    @Test
+    fun `国际版历史域名与 JWT issuer 都判为国际版`() {
+        val legacyDomain = assertNotNull(
+            provider.importCredentials(
+                """{"accessToken":"at-4","domain":"www.codebuddy.ai","uid":"u-4"}""",
+            ),
+        )
+        assertEquals(CodeBuddyProvider.REGION_GLOBAL, provider.regionOf(legacyDomain))
+
+        val token = jwt("""{"iss":"https://workbuddy.ai/auth/realms/copilot","sub":"u-jwt"}""")
+        val issuerOnly = assertNotNull(
+            provider.importCredentials("""{"accessToken":"$token","uid":"u-5"}"""),
+        )
+        assertEquals(CodeBuddyProvider.REGION_GLOBAL, provider.regionOf(issuerOnly))
+    }
 }

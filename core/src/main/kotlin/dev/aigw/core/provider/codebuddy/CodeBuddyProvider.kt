@@ -865,9 +865,20 @@ class CodeBuddyProvider(
     // ------------------------------------------------------------------ 工具
 
     private fun regionOf(credential: Credential?): String {
-        val domain = credential?.domain.orEmpty().lowercase()
-        if (domain.endsWith(".workbuddy.ai") || domain == "workbuddy.ai") return REGION_GLOBAL
+        val domain = credential?.domain.orEmpty().trim().lowercase()
+        if (
+            domain == REGION_GLOBAL ||
+            domain == "workbuddy.ai" ||
+            domain.endsWith(".workbuddy.ai") ||
+            domain == "codebuddy.ai" ||
+            domain.endsWith(".codebuddy.ai")
+        ) {
+            return REGION_GLOBAL
+        }
         if (domain.isNotEmpty()) return REGION_CN
+
+        val issuer = jwtClaim(credential?.accessToken.orEmpty(), "iss", "issuer").lowercase()
+        if (issuer.contains("workbuddy.ai") || issuer.contains("codebuddy.ai")) return REGION_GLOBAL
         return region()
     }
 
