@@ -49,11 +49,19 @@ enum class TraeRegion(
         fun of(id: String?): TraeRegion =
             entries.firstOrNull { it.id.equals(id?.trim(), ignoreCase = true) } ?: CN
 
-        /** 按域名推断区域（含 `trae.ai` → 国际）。 */
+        /**
+         * 推断区域。
+         *
+         * 两个入参都参与判定：`explicit` 是凭证里的 `domain`（历史上既写过区域 id `cn`/`global`，
+         * 也写过主机名 `trae.cn`，缺字段时还会被 TraeAccount.parse 填成 `trae.cn`），
+         * `domain` 是 `apiHost` 或登录回调里的 host。
+         * 只认第一个参数会把 apiHost 已是 `api.trae.ai` 的国际版凭证判成国内版。
+         */
         fun infer(explicit: String?, domain: String?): TraeRegion {
-            if (!explicit.isNullOrBlank()) return of(explicit)
-            val host = domain.orEmpty().lowercase()
-            return if (host.contains("trae.ai")) INTL else CN
+            val values = listOf(explicit, domain).map { it?.trim().orEmpty() }
+            if (values.any { it.equals(CN.id, ignoreCase = true) }) return CN
+            if (values.any { it.equals(INTL.id, ignoreCase = true) }) return INTL
+            return if (values.any { it.lowercase().contains("trae.ai") }) INTL else CN
         }
     }
 }

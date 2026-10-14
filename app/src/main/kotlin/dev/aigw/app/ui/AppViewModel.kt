@@ -46,7 +46,6 @@ import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.custom.CustomProvider
 import dev.aigw.core.provider.RoutedModel
-import dev.aigw.core.provider.codebuddy.CodeBuddyProvider
 import dev.aigw.core.provider.trae.TraeRegion
 import dev.aigw.core.provider.trae.TraeProvider
 import dev.aigw.core.store.KeyValueStore
@@ -1263,19 +1262,16 @@ class AppViewModel(
     }
 
     /**
-     * 账号所属区域：WorkBuddy（workbuddy.ai = global）与 Trae（trae.ai = global），无区域概念返回空串。
+     * 账号所属区域（无区域概念的供应商返回空串）；判定统一走 provider 的
+     * [dev.aigw.core.provider.RegionAwareSupport.regionOf]——各家的凭证结构与区域字段口径
+     * 都不同（Trae 的 secret 是嵌套结构且存区域 id，WorkBuddy 是扁平结构且存主机名），
+     * UI 再解析一遍 secret 必然走样。
      */
     fun accountRegion(providerId: String, uid: String): String {
-        if (providerId != CodeBuddyProvider.ID && providerId != TraeProvider.ID) return ""
+        val provider = engine.registry.get(providerId) as? dev.aigw.core.provider.RegionAwareSupport
+            ?: return ""
         val account = engine.account(providerId, uid) ?: return ""
-        val domain = runCatching {
-            com.google.gson.JsonParser.parseString(account.secret).asJsonObject.get("domain")?.asString.orEmpty()
-        }.getOrDefault("").lowercase()
-        return when {
-            providerId == CodeBuddyProvider.ID ->
-                if (domain.endsWith("workbuddy.ai")) TraeRegion.INTL.id else CodeBuddyProvider.REGION_CN
-            else -> if (domain.endsWith("trae.ai")) TraeRegion.INTL.id else TraeRegion.CN.id
-        }
+        return provider.regionOf(account).orEmpty()
     }
 
     fun regenerateDeviceId(providerId: String, uid: String) = action {
