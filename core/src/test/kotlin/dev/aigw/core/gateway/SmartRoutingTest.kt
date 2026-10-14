@@ -39,7 +39,9 @@ class SmartRoutingTest {
         override fun resolveModel(requested: String) = requested
         override fun classify(status: Int, body: String) = UpstreamError(ErrorKind.CLIENT, body)
         override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall = throw UnsupportedOperationException()
-        override fun regionOf(account: ProviderAccount) = regions.first()
+        override fun regionOf(account: ProviderAccount) =
+            regions.firstOrNull { account.uid.endsWith("-$it") } ?: regions.first()
+
         override fun regions() = regions
     }
 
@@ -77,7 +79,9 @@ class SmartRoutingTest {
         assertEquals("cn", engine.resolveRoute("workbuddy-cn/deepseek-v3")?.region)
         assertEquals("global", engine.resolveRoute("workbuddy-global/deepseek-v3")?.region)
 
-        // 模型列表里针对区域型供应商拆出两个独立前缀组
+        // 模型列表里针对区域型供应商拆出两个独立前缀组（每个区域各用本区域账号拉一次）
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-global", "国际号", "{}"))
         val models = engine.models().filter { it.providerId == "codebuddy" }
         val prefixes = models.map { it.routePrefix }.distinct()
         assertTrue(prefixes.contains("codebuddy-cn"), "应包含国内组前缀：$prefixes")

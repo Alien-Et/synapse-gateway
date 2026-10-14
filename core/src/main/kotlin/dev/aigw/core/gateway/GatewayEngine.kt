@@ -20,6 +20,7 @@ import dev.aigw.core.provider.PointsBill
 import dev.aigw.core.provider.PointsBillListView
 import dev.aigw.core.provider.ProviderCapability
 import dev.aigw.core.provider.ProviderHooks
+import dev.aigw.core.provider.ProviderModelCatalogView
 import dev.aigw.core.provider.ProviderRegistry
 import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.RoutedModel
@@ -1129,45 +1130,71 @@ class GatewayEngine(
     /** 阻塞聚合版：HTTP `/v1/models`、CLI 等需要一次性完整列表的场景使用。 */
     fun models(): List<RoutedModel> = modelsStreaming { }.models
 
-    /** 拉取单个供应商的模型目录（id 带 `provider/` 前缀；区域型供应商按区域拆成多组）。 */
+    /**
+     * 拉取单个供应商的模型目录（id 带 `provider/` 前缀；区域型供应商按区域拆成多组）。
+     *
+     * 区域型供应商（见 [dev.aigw.core.provider.RegionAwareSupport]）必须**按区域各拉一次**：
+     * 国内与国际是两套不同的上游站点、两份不同的模型清单，只用一个账号拉一次再复制给所有区域
+     * 会把国内清单冒充成「国际版模型」。该区域没有可用账号时不为它生成任何条目——没有账号支撑的分组
+     * 点进去必然调用失败，列出来只会误导用户。
+     */
     private fun fetchProviderModels(provider: Provider): ProviderModelsChunk {
         return try {
-            val picked = pool.pick(provider.id)
-            // 若选中的账号凭证临期或已过期，在拉取前执行一次安全的 refreshAccount 保鲜
-            val account = picked?.let { freshAccount(provider, it) }
-            val view = provider.listModels(account)
-            val models = ArrayList<RoutedModel>()
             val regionAware = provider as? dev.aigw.core.provider.RegionAwareSupport
-            for (model in view.models) {
-                if (settings.onlyUsableModels && provider.isInternalModel(model.id)) continue
-                if (regionAware != null) {
-                    for (region in regionAware.regions()) {
-                        val label = when (region) {
-                            "cn" -> "国内"
-                            "global" -> "国外"
-                            else -> region
-                        }
-                        models.add(
-                            RoutedModel(
-                                provider.id,
-                                "${provider.displayName}（$label）",
-                                model,
-                                routePrefix = "${provider.id}-$region",
-                                region = region,
-                            ),
-                        )
-                    }
-                } else {
-                    models.add(RoutedModel(provider.id, provider.displayName, model))
+                ?: return fetchWholeProviderModels(provider)
+
+            val models = ArrayList<RoutedModel>()
+            var firstError: String? = null
+            for (region in regionAware.regions()) {
+                val picked = pickAccount(provider.id, region = region) ?: continue
+                val label = when (region) {
+                    "cn" -> "国内"
+                    "global" -> "国外"
+                    else -> region
                 }
+                val view = try {
+                    fetchCatalog(provider, picked)
+                } catch (e: Exception) {
+                    logWarn("拉取模型目录失败（${provider.id}/$region）：${e.message}")
+                    firstError = firstError ?: (e.message ?: "拉取失败")
+                    continue
+                }
+                for (model in view.models) {
+                    if (settings.onlyUsableModels && provider.isInternalModel(model.id)) continue
+                    models.add(
+                        RoutedModel(
+                            provider.id,
+                            "${provider.displayName}（$label）",
+                            model,
+                            routePrefix = "${provider.id}-$region",
+                            region = region,
+                        ),
+                    )
+                }
+                if (view.error.isNotEmpty()) firstError = firstError ?: view.error
             }
             // 供应商自报错误只在拿不到任何模型时才算失败；没有内置快照兜底后，
             // 无账号/拉取失败是否报红由各家 listModels 的 error 决定
-            ProviderModelsChunk(provider.id, models, if (models.isEmpty()) view.error.ifEmpty { null } else null)
+            ProviderModelsChunk(provider.id, models, if (models.isEmpty()) firstError else null)
         } catch (e: Exception) {
             logWarn("拉取模型目录失败（${provider.id}）：${e.message}")
             ProviderModelsChunk(provider.id, emptyList(), e.message ?: "拉取失败")
         }
+    }
+
+    /** 无区域概念的供应商：用池里挑出的那一个账号拉一份目录。 */
+    private fun fetchWholeProviderModels(provider: Provider): ProviderModelsChunk {
+        val view = fetchCatalog(provider, pool.pick(provider.id))
+        val models = view.models
+            .filterNot { settings.onlyUsableModels && provider.isInternalModel(it.id) }
+            .map { RoutedModel(provider.id, provider.displayName, it) }
+        return ProviderModelsChunk(provider.id, models, if (models.isEmpty()) view.error.ifEmpty { null } else null)
+    }
+
+    /** 用给定账号拉一份模型目录；凭证临期或已过期时先做一次安全的 refreshAccount 保鲜。 */
+    private fun fetchCatalog(provider: Provider, picked: ProviderAccount?): ProviderModelCatalogView {
+        val account = picked?.let { freshAccount(provider, it) }
+        return provider.listModels(account)
     }
 
     /**

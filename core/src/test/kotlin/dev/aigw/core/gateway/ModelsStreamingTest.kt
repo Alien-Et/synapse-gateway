@@ -161,23 +161,41 @@ class ModelsStreamingTest {
     }
 
     @Test
-    fun `区域型供应商按区域拆分进 chunk`() {
+    fun `区域型供应商按区域各拉一次目录`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(RegionStub())
-        val chunks = CopyOnWriteArrayList<ProviderModelsChunk>()
-        val catalog = engine.modelsStreaming { chunks.add(it) }
+        // 两个区域各有自己的账号：目录必须各拉各的，不能把一次结果复制给所有区域
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-global", "国际号", "{}"))
 
-        val chunk = chunks.single { it.providerId == "codebuddy" }
-        assertEquals(catalog.models.filter { it.providerId == "codebuddy" }, chunk.models)
-        assertEquals(listOf("codebuddy-cn/glm-5.2", "codebuddy-global/glm-5.2"), chunk.models.map { it.fullId })
+        val chunk = engine.modelsStreaming { }.models.filter { it.providerId == "codebuddy" }
+        assertEquals(
+            listOf("codebuddy-cn/glm-5.2", "codebuddy-global/gpt-5.6-sol"),
+            chunk.map { it.fullId },
+        )
     }
 
-    /** 仅用于验证区域拆分：regions 返回 cn/global。 */
-    private class RegionStub : StubProvider("codebuddy"), dev.aigw.core.provider.RegionAwareSupport {
-        override fun listModels(account: ProviderAccount?) =
-            ProviderModelCatalogView(listOf(ProviderModel("glm-5.2", "GLM")), false, "")
+    @Test
+    fun `没有账号的区域不生成模型分组`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(RegionStub())
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
 
-        override fun regionOf(account: ProviderAccount) = "cn"
+        val chunk = engine.modelsStreaming { }.models.filter { it.providerId == "codebuddy" }
+        assertEquals(listOf("codebuddy-cn/glm-5.2"), chunk.map { it.fullId })
+    }
+
+    /**
+     * 仅用于验证区域拆分：regions 返回 cn/global，各区域的账号返回各自的目录。
+     */
+    private class RegionStub : StubProvider("codebuddy"), dev.aigw.core.provider.RegionAwareSupport {
+        override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(
+            listOf(ProviderModel(if (account?.uid == "u-global") "gpt-5.6-sol" else "glm-5.2", "m")),
+            false,
+            "",
+        )
+
+        override fun regionOf(account: ProviderAccount) = if (account.uid == "u-global") "global" else "cn"
 
         override fun regions() = listOf("cn", "global")
     }
