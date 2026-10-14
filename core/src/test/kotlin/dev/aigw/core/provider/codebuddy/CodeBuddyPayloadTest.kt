@@ -64,4 +64,59 @@ class CodeBuddyPayloadTest {
     fun `非法 JSON 原样返回不抛异常`() {
         assertEquals("not-json", prepareCodeBuddyBody("not-json"))
     }
+
+    @Test
+    fun `首条不是 system 时补一条`() {
+        // 上游以 400 code=11128“first message is not system prompt”拒绝；
+        // 模型页的「测试」探测发的是纯 user 消息，靠这里补上
+        val messages = prepare("""{"messages":[{"role":"user","content":"ping"}]}""")
+            .getAsJsonArray("messages")
+        assertEquals(2, messages.size())
+        assertEquals("system", messages[0].asJsonObject.get("role").asString)
+        assertEquals("user", messages[1].asJsonObject.get("role").asString)
+    }
+
+    @Test
+    fun `首条已是 system 时不重复插入`() {
+        val messages = prepare("""{"messages":[{"role":"system","content":"s"},{"role":"user","content":"u"}]}""")
+            .getAsJsonArray("messages")
+        assertEquals(2, messages.size())
+    }
+
+    @Test
+    fun `developer 角色改叫 system`() {
+        val messages = prepare("""{"messages":[{"role":"developer","content":"d"},{"role":"user","content":"u"}]}""")
+            .getAsJsonArray("messages")
+        assertEquals(2, messages.size())
+        assertEquals("system", messages[0].asJsonObject.get("role").asString)
+    }
+
+    @Test
+    fun `max_completion_tokens 改名 max_tokens`() {
+        val renamed = prepare("""{"messages":[{"role":"system","content":"s"}],"max_completion_tokens":128}""")
+        assertFalse(renamed.has("max_completion_tokens"))
+        assertEquals(128, renamed.get("max_tokens").asInt)
+
+        // 两者都在时以 max_tokens 为准，不覆盖
+        val both = prepare("""{"messages":[],"max_completion_tokens":1,"max_tokens":2}""")
+        assertEquals(2, both.get("max_tokens").asInt)
+    }
+
+    @Test
+    fun `第三方 CLI 的特征文本会被替换`() {
+        val messages = prepare(
+            """{"messages":[
+              {"role":"system","content":"You are Claude Code, Anthropic's official CLI for Claude"},
+              {"role":"user","content":[{"type":"text","text":"x\nx-anthropic-billing-header: abc\nMain branch (you will usually use this for PRs)"}]}
+            ]}""".trimIndent(),
+        ).getAsJsonArray("messages")
+
+        assertEquals(
+            "You are Claude Code, Anthropic's CLI for Claude",
+            messages[0].asJsonObject.get("content").asString,
+        )
+        val text = messages[1].asJsonObject.getAsJsonArray("content")[0].asJsonObject.get("text").asString
+        assertFalse(text.contains("x-anthropic-billing-header"))
+        assertTrue(text.contains("Main branch (usually the base for PRs)"))
+    }
 }

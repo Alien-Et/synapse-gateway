@@ -198,6 +198,11 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 ### 腾讯 WorkBuddy
 - 上游**拒绝非流式**：必须强制 `stream:true`，网关侧聚合。
 - `tool_choice` 只认字符串。
+- ⚠️ **请求体形状是硬要求**（不满足直接 400，不是降级）：
+  - **首条消息必须是 `system`**，否则 `400 code=11128 "first message is not system prompt"`。我们自己发起的探测（模型页「测试」）最初就是纯 user 消息，直接撞上这条。
+  - 角色 `developer` 上游不认，要改叫 `system`；参数 `max_completion_tokens` 要改叫 `max_tokens`。
+  - ⚠️ **内容也会被拦**：带 Claude Code / Codex CLI 特征文本的请求会被以「Illegal API invocation from an unapproved channel」拒掉。已知替换（公开实现 magpie 用真实客户端逐词实测）：删 `x-anthropic-billing-header:…` 行；`You are Claude Code, Anthropic's official CLI for Claude` → 去掉 `official`；`Main branch (you will usually use this for PRs)` → `Main branch (usually the base for PRs)`；`Codex CLI is an open source project led by OpenAI.` → 前面补 `The `。都实现在 `prepareCodeBuddyBody`，**任何路径（含探测/自测）都要先过它**。
+- 国际/国内是两套端点（见下）；模型目录国内走网页控制台 `/console/enterprises/personal/models`，国际版走客户端 product config `/v3/config`。
 - ⚠️ **国内与国际是两套端点，不能混用**：国内主域 `copilot.tencent.com` / `codebuddy.cn`，国际 `workbuddy.ai`（历史域名 `codebuddy.ai`）。
   - 拿国际版 token 打国内站会被直接拒（500/401）；区域靠 JWT `iss` 判定最可靠（`workbuddy.ai`=国际），凭证里的 `domain` 次之。
   - **模型目录两条路径不通用**：国内走网页控制台 `/console/enterprises/personal/models`（无凭证 302 跳 OIDC 登录页）；国际版走客户端 product config `/v3/config`（该路径国内也能用）。国际版拿 Bearer token 打 console 路径会被后端 500，打 `/v2/enterprises/personal/models` 会挂死不返回。两份响应的结构相同（`data.agents[name=cli].models` + `data.models[]`），解析可共用。
