@@ -80,10 +80,10 @@ fun DataManagementScreen(state: AppUiState, viewModel: AppViewModel, onBack: () 
  * 保留天数输入。
  *
  * 失焦或回车才提交，避免边输入边保存把「30」中间的「3」当成 30 天。越界值由 core 夹回，
- * 这里只做即时提示。
+ * 这里只做即时提示。记录页与数据管理页共用。
  */
 @Composable
-private fun RetentionField(current: Int, onCommit: (Int) -> Unit) {
+fun RetentionField(current: Int, onCommit: (Int) -> Unit) {
     var text by remember(current) { mutableStateOf(current.toString()) }
     val parsed = text.toIntOrNull()
     val valid = parsed != null && parsed in GatewaySettings.MIN_RETENTION_DAYS..GatewaySettings.MAX_RETENTION_DAYS

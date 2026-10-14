@@ -28,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -126,33 +127,35 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     ChoiceChip(LogTab.Calls.label, tab == LogTab.Calls) { tab = LogTab.Calls }
                     ChoiceChip(LogTab.Requests.label, tab == LogTab.Requests) { tab = LogTab.Requests }
                 }
-                // 请求日志的参数设置入口就放在它的标签旁，不再沉到列表底部
-                if (tab == LogTab.Requests) {
-                    Row(
-                        modifier = Modifier
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .clickable { showLogSettings = !showLogSettings }
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        Icon(
-                            Icons.Filled.Settings,
-                            contentDescription = "日志设置",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            text = if (showLogSettings) "收起设置" else "日志设置",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                // 两个标签下都保留设置入口，面板内容跟随当前标签（调用记录 / 请求日志 各自参数）
+                Row(
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { showLogSettings = !showLogSettings }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Settings,
+                        contentDescription = "日志设置",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = if (showLogSettings) "收起设置" else "日志设置",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
-            if (tab == LogTab.Requests && showLogSettings) {
-                RequestLogSettings(state, viewModel)
+            if (showLogSettings) {
+                if (tab == LogTab.Requests) {
+                    RequestLogSettings(state, viewModel)
+                } else {
+                    CallLogSettings(state, viewModel)
+                }
             }
             if (tab == LogTab.Calls) {
                 Text(
@@ -166,7 +169,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
                 Text(
-                    text = "点卡片看原文 · 长按删除 · 停留本页自动刷新",
+                    text = "点卡片看原文 · 长按删除 · 参数在右上「日志设置」里逐项调整",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -351,6 +354,56 @@ private fun truncatedNote(fullMissing: Boolean, summary: String): String? = when
     summary.length >= dev.aigw.core.usage.CallLogStore.MAX_SUMMARY_CHARS ->
         "内容较长，仅保留前 ${dev.aigw.core.usage.CallLogStore.MAX_SUMMARY_CHARS} 字符摘要（完整原文已被清理或本次未启用完整保存）"
     else -> null
+}
+
+/**
+ * 调用记录的参数设置：归档开关、保留天数、清空；与「我的/数据管理」的入口指向同一份配置。
+ */
+@Composable
+private fun CallLogSettings(state: AppUiState, viewModel: AppViewModel) {
+    SectionCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("记录调用", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "保存每次调用的请求/响应原文与用量；关闭后不再新增（已存记录不受影响）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = state.settings.callLoggingEnabled,
+                    onCheckedChange = {
+                        viewModel.updateSettings(state.settings.copy(callLoggingEnabled = it))
+                    },
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Text(
+                text = "服务运行时每日自动清理超过该天数的记录，当前 ${state.settings.logRetentionDays} 天。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            RetentionField(state.settings.logRetentionDays) { viewModel.setLogRetentionDays(it) }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Text("清空记录", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "删除本机保存的全部调用记录（含完整原文），不可恢复。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlineActionButton("清空调用记录") { viewModel.clearCalls() }
+        }
+    }
 }
 
 /**
