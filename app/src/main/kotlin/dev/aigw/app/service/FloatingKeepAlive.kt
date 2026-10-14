@@ -100,19 +100,35 @@ object FloatingKeepAlive {
             WindowManager.LayoutParams.TYPE_PHONE
         }
         val stored = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        return WindowManager.LayoutParams(
+        val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
-            // 不可获焦：不影响任何输入；不拦截触摸以外的行为，用户仍能正常操作下层应用
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            // 不可获焦：不影响任何输入
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = stored.getInt(PREF_X, dp(app, 12))
             y = stored.getInt(PREF_Y, dp(app, 160))
         }
+        // 存的位置可能是上个分辨率/旋转方向下的：先夹回当前屏幕内，避免启动后“看不到”
+        clampToScreen(app, params, 0, 0)
+        return params
+    }
+
+    /**
+     * 把悬浮窗位置夹在屏幕内。
+     *
+     * 保活依赖「窗口真的可见」：拖到屏幕外会既找不回来、又可能不被系统计为可见进程，
+     * 所以这里不允许拖出屏幕；尺寸未知（首帧布局前）时按 0 处理，至少保证左上角在屏内。
+     */
+    private fun clampToScreen(context: Context, params: WindowManager.LayoutParams, viewW: Int, viewH: Int) {
+        val metrics = context.resources.displayMetrics
+        val maxX = (metrics.widthPixels - viewW).coerceAtLeast(0)
+        val maxY = (metrics.heightPixels - viewH).coerceAtLeast(0)
+        params.x = params.x.coerceIn(0, maxX)
+        params.y = params.y.coerceIn(0, maxY)
     }
 
     /** 拖动移动悬浮窗，松手落盘位置（下次启动回到原处）。 */
@@ -144,6 +160,7 @@ object FloatingKeepAlive {
                     if (dragging) {
                         params.x = startX + dx.roundToInt()
                         params.y = startY + dy.roundToInt()
+                        clampToScreen(app, params, target.width, target.height)
                         runCatching { windowManager.updateViewLayout(target, params) }
                     }
                     dragging

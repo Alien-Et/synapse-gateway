@@ -4,6 +4,7 @@ import com.google.gson.JsonObject
 import dev.aigw.core.pool.AccountPool
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.pool.PoolSummary
+import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.AuthKind
 import dev.aigw.core.provider.CreditInfo
 import dev.aigw.core.provider.DeviceAuthPoll
@@ -1048,7 +1049,31 @@ class GatewayEngine(
         refreshCredits(providerId, account.uid)
         log("$verb 成功：${account.nickname.ifEmpty { account.uid }}（$providerId）")
         onAccountsChanged?.invoke()
+        claimDesktopLoginRewardSoon(providerId, account.uid)
         return LoginOutcome(LoginState.SUCCESS, account.uid, account.nickname)
+    }
+
+    /**
+     * 账号加入后自动领取小浣熊的「桌面端登录奖励」。
+     *
+     * 该积分不是「点一下加积分」的签到，而是服务端对官方桌面客户端登录发放的奖励；
+     * 因此领取请求必须带桌面客户端标识（见 RaccoonProvider 的 desktopHeaders），
+     * 不主动触发就只能等用户自己去任务中心点。异步执行：失败只记日志，不影响登录结果。
+     */
+    private fun claimDesktopLoginRewardSoon(providerId: String, uid: String) {
+        if (providerId != dev.aigw.core.provider.raccoon.RaccoonProvider.ID) return
+        ioExecutor().execute {
+            val nickname = pool.account(providerId, uid)?.nickname ?: uid
+            runCatching { performAction(providerId, uid, ACTION_CHECKIN) }
+                .onSuccess { result ->
+                    if (result.ok) {
+                        log("已自动领取桌面端登录奖励（$nickname）：${result.message}")
+                    } else {
+                        logWarn("桌面端登录奖励自动领取未成功（$nickname）：${result.message}")
+                    }
+                }
+                .onFailure { logWarn("桌面端登录奖励自动领取异常（$nickname）：${it.message}") }
+        }
     }
 
     // ------------------------------------------------------------------ 模型

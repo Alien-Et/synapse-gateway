@@ -23,7 +23,7 @@ class AiGatewayApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        engine = GatewayEngine(
+        val created = GatewayEngine(
             store = EncryptedKeyValueStore(this),
             lanAddressProvider = { LanAddresses.current(this) },
             // 调用记录预载与过期清理改走后台，冷启动首帧不再等全量解密
@@ -32,6 +32,11 @@ class AiGatewayApp : Application() {
             // 详情页打开时按记录 id 回读全文
             spillDir = java.io.File(cacheDir, "call-fulltext"),
         )
+        engine = created
+        // 悬浮窗保活开关在应用启动时即生效（不必等网关启动）：用户开启过就一直保持显示。
+        if (dev.aigw.app.data.KeepAlivePrefs.overlayEnabled(created.store())) {
+            dev.aigw.app.service.FloatingKeepAlive.show(this, "网关 ${created.settings().port}")
+        }
         getSystemService<NotificationManager>()?.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,

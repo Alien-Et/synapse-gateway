@@ -579,14 +579,16 @@ class GatewayHttpServer(
             var status = CallStatus.SUCCESS
             var failure = ""
             var sawData = false
+            var firstChunkLogged = false
             var sawPayload = false
             // 上游是否已自己给出 [DONE]：正常结束但没给时要补一个，否则客户端只看到截断流
             var sawDone = false
             // 网关自身转发异常（非客户端断开）：需补一个错误帧 + [DONE]，
             // 否则客户端只看到一条没有 [DONE] 的截断流，会误判为网络异常。
             var gatewayError = false
-            // 上游空行代表一个 SSE 事件结束。把同一事件的非空行攒在一起、遇空行才一次性写出，
-            // 输出字节与“逐行补 \n\n”完全一致，但每个事件只 flush 一次，减少分块帧与网络小包。
+            // 每个非空行即时写出（输出仍是「每行补 \n\n」的规范帧）。
+            // 曾把同一事件的多行攒到 8KB 再 flush 以减少小包，但那会让不发空行分隔的上游
+            // 迟迟不出首字（客户端要等积满 8KB）——首字延迟优先级高于节省小包。
             val batch = StringBuilder(1024)
             try {
                 stream.bufferedReader(Charsets.UTF_8).use { reader ->
@@ -607,7 +609,11 @@ class GatewayHttpServer(
                         }
                         rawLines.append(line + "\n")
                         batch.append(line).append("\n\n")
-                        if (batch.length >= FLUSH_THRESHOLD_CHARS) flushBatch(batch, writer)
+                        flushBatch(batch, writer)
+                        if (!firstChunkLogged && line.startsWith("data:")) {
+                            firstChunkLogged = true
+                            log("首字出站（$providerId/$model）：${System.currentTimeMillis() - startedAt}ms")
+                        }
                         val chunk = runCatching { parseChunk(line) }.getOrNull() ?: continue
                         chunk.usage?.let { usage = it }
                         if (chunk.pointsConsumed > 0) pointsConsumed = chunk.pointsConsumed
@@ -1013,9 +1019,6 @@ class GatewayHttpServer(
 
     companion object {
         const val MAX_BODY_BYTES = 8 * 1024 * 1024
-
-        /** 上游迟迟不给空行事件边界时的兜底 flush 阈值（字符）。 */
-        const val FLUSH_THRESHOLD_CHARS = 8 * 1024
 
         /** `/authorize` 回调固定归 Trae（其它供应商的登录不经过网关端口）。 */
         const val TRAE_PROVIDER_ID = "trae"
