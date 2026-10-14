@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -19,7 +20,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -114,9 +117,42 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ChoiceChip(LogTab.Calls.label, tab == LogTab.Calls) { tab = LogTab.Calls }
-                ChoiceChip(LogTab.Requests.label, tab == LogTab.Requests) { tab = LogTab.Requests }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ChoiceChip(LogTab.Calls.label, tab == LogTab.Calls) { tab = LogTab.Calls }
+                    ChoiceChip(LogTab.Requests.label, tab == LogTab.Requests) { tab = LogTab.Requests }
+                }
+                // 请求日志的参数设置入口就放在它的标签旁，不再沉到列表底部
+                if (tab == LogTab.Requests) {
+                    Row(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .clickable { showLogSettings = !showLogSettings }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            Icons.Filled.Settings,
+                            contentDescription = "日志设置",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            text = if (showLogSettings) "收起设置" else "日志设置",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            if (tab == LogTab.Requests && showLogSettings) {
+                RequestLogSettings(state, viewModel)
             }
             if (tab == LogTab.Calls) {
                 Text(
@@ -146,7 +182,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "网关与上游交互的流水，环形覆盖只保留最近若干条。点右上设置改容量。",
+                    text = "网关与上游交互的流水，环形覆盖只保留最近若干条；参数在右上「日志设置」里逐项调整。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -194,15 +230,6 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 color = levelColor(line.level),
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                             )
-                        }
-                    }
-                }
-                item(key = "clear-logs") {
-                    OutlineActionButton("清空请求日志") { viewModel.clearLogs() }
-                    OutlineActionButton("日志容量设置") { showLogSettings = !showLogSettings }
-                    if (showLogSettings) {
-                        LogCapacityField(state.settings.requestLogCapacity) {
-                            viewModel.updateSettings(state.settings.copy(requestLogCapacity = it))
                         }
                     }
                 }
@@ -326,11 +353,57 @@ private fun truncatedNote(fullMissing: Boolean, summary: String): String? = when
     else -> null
 }
 
+/**
+ * 请求日志的参数设置：每项参数一个控件，展开后直接调整，不折叠到弹窗里。
+ * 只改「请求日志」相关项；调用记录归档开关与保留天数在「我的 → 排查诊断 / 数据管理」。
+ */
+@Composable
+private fun RequestLogSettings(state: AppUiState, viewModel: AppViewModel) {
+    SectionCard {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("日志容量", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "环形缓冲最多保留的日志条数，超出后自动丢弃最旧一条；调大占用更多内存与存储。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LogCapacityField(state.settings.requestLogCapacity) {
+                viewModel.updateSettings(state.settings.copy(requestLogCapacity = it))
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            Text("清空日志", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = "删除当前全部请求日志，容量等设置不受影响。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlineActionButton("清空请求日志") { viewModel.clearLogs() }
+        }
+    }
+}
+
 @Composable
 private fun DetailBlock(title: String, body: String, note: String?, onCopy: () -> Unit) {
+    // 大文本折叠：全文可达 512K 字符，一次性组合进 Text 会让抽屉首帧明显卡顿；
+    // 默认只渲染预览，点「展开全文」后再渲染完整内容。
+    var expanded by remember(body) { mutableStateOf(body.length <= PREVIEW_CHARS) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            if (!expanded && body.length > PREVIEW_CHARS) {
+                Text(
+                    text = "展开全文",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable { expanded = true }
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
             Text(
                 text = "复制",
                 style = MaterialTheme.typography.labelMedium,
@@ -349,8 +422,9 @@ private fun DetailBlock(title: String, body: String, note: String?, onCopy: () -
                 color = MaterialTheme.colorScheme.error,
             )
         }
+        val visible = if (expanded) body else body.take(PREVIEW_CHARS) + "\n…（点击「展开全文」查看剩余部分）"
         Text(
-            text = body.ifEmpty { "（空）" },
+            text = visible.ifEmpty { "（空）" },
             style = MaterialTheme.typography.bodySmall,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier
@@ -361,6 +435,8 @@ private fun DetailBlock(title: String, body: String, note: String?, onCopy: () -
         )
     }
 }
+
+private const val PREVIEW_CHARS = 2_000
 
 private fun statusLabel(status: CallStatus): String = when (status) {
     CallStatus.SUCCESS -> "成功"

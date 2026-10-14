@@ -108,6 +108,9 @@ class RequestLog(
                 ),
             )
         }
+        // 持久化文件可能来自容量更大的旧配置（或 setCapacity 调小前的写盘）：
+        // 载入后立即按当前 capacity 裁剪，避免首条 append 之前列表超容量展示。
+        while (lines.size > capacity) lines.removeLast()
     }
 
     companion object {

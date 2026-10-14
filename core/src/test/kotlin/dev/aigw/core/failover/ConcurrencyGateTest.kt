@@ -112,6 +112,27 @@ class ConcurrencyGateTest {
     }
 
     @Test
+    fun `interrupt while waiting does not corrupt global counter`() {
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxGlobal = 1, queueTimeoutMs = 30_000) }
+        val holder = assertNotNull(gate.tryAcquire("p/a"))
+        assertEquals(1, gate.inFlightGlobal())
+
+        // 另一线程在等待全局许可时被中断：不应把计数多减（旧实现会减成 -1，等效放大上限）
+        val waiter = thread(name = "gate-waiter") {
+            runCatching { gate.tryAcquire("p/b") }
+        }
+        Thread.sleep(120)
+        waiter.interrupt()
+        waiter.join(2_000)
+
+        holder.release()
+        assertEquals(0, gate.inFlightGlobal(), "中断回滚不得使全局计数漂移")
+        val again = assertNotNull(gate.tryAcquire("p/c"))
+        again.release()
+        assertEquals(0, gate.inFlightGlobal())
+    }
+
+    @Test
     fun `config clamps and survives json roundtrip with legacy payload`() {
         val cfg = ConcurrencyConfig.fromJson(
             com.google.gson.JsonParser.parseString(

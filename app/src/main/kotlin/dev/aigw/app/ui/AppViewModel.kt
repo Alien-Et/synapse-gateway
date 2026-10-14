@@ -469,7 +469,8 @@ class AppViewModel(
             // 整体 equals 在主线程上是 O(总字符数) 的开销。
             if (calls.size == current.calls.size && logs.size == current.logs.size &&
                 calls.firstOrNull()?.id == current.calls.firstOrNull()?.id &&
-                logs.firstOrNull()?.atMillis == current.logs.firstOrNull()?.atMillis
+                // 用 seq（单调自增）而不是时间戳：同一毫秒内的多条新日志时间戳相同，会漏刷一轮
+                logs.firstOrNull()?.seq == current.logs.firstOrNull()?.seq
             ) {
                 return@launch
             }

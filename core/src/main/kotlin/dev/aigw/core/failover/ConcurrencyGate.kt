@@ -69,16 +69,19 @@ class ConcurrencyGate(
 
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(cfg.queueTimeoutMs)
         // 全局先入队：账号级许可一定被全局覆盖，顺序保证不会出现「账号拿到了、全局拿不到」的倒挂。
-        // 等待途中被中断会把已取得的全局许可泄漏掉，这里 catch 后回滚再抛。
+        // 等待途中被中断会把已取得的全局许可泄漏掉，这里 catch 后回滚再抛；
+        // 只有「本轮真的已取得全局许可」才回滚，否则会多减（计数漂移为负）。
+        var globalAcquired = false
         try {
             while (true) {
                 if (globalLimit <= 0 || tryIncrement(globalInFlight, globalLimit)) {
+                    globalAcquired = globalLimit > 0
                     if (accountLimit <= 0) return Handle(this, accountKey, false)
                     val counter = accountInFlight.computeIfAbsent(accountKey) { AtomicInteger(0) }
                     while (true) {
                         if (tryIncrement(counter, accountLimit)) return Handle(this, accountKey, true)
                         if (System.nanoTime() >= deadline) {
-                            if (globalLimit > 0) globalInFlight.decrementAndGet()
+                            if (globalAcquired) globalInFlight.decrementAndGet()
                             return null
                         }
                         Thread.sleep(POLL_INTERVAL_MS)
@@ -88,7 +91,7 @@ class ConcurrencyGate(
                 Thread.sleep(POLL_INTERVAL_MS)
             }
         } catch (e: InterruptedException) {
-            if (globalLimit > 0) globalInFlight.decrementAndGet()
+            if (globalAcquired) globalInFlight.decrementAndGet()
             throw e
         }
     }
@@ -103,11 +106,10 @@ class ConcurrencyGate(
 
     private fun doRelease(accountKey: String, accountTracked: Boolean) {
         if (accountTracked) {
-            accountInFlight[accountKey]?.let { counter ->
-                val remaining = counter.decrementAndGet()
-                // 计数到 0 时顺手摘除键，避免长期运行后 Map 里堆积大量空条目
-                if (remaining <= 0) accountInFlight.remove(accountKey, counter)
-            }
+            // 只递减不摘除条目：归零后摘除会与新请求 computeIfAbsent 拿到的旧引用竞争，
+            // 新请求可能 CAS 成功一个「已脱离 Map 的计数器」，随后另一请求又新建条目从 0 起步，
+            // 同账号在途数瞬时超发。空 AtomicInteger 的内存占用可忽略，正确性优先。
+            accountInFlight[accountKey]?.decrementAndGet()
         }
         globalInFlight.decrementAndGet()
     }

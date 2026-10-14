@@ -78,7 +78,7 @@
 | `gateway/ProviderBootstrap.kt` | 内置 Provider 登记处 | 新增供应商在此加一行 |
 | `gateway/LoopbackCallbackServer.kt` | OAuth 登录回调监听（Trae 51120 / Antigravity 51121） | 临时端口，用完即释放 |
 | `gateway/OpenAiApi.kt` | OpenAI 报文拼装（error/modelList） | |
-| `failover/` | 容灾调度：`FailoverConfig`（候选/重试/熔断参数；`FailoverCandidate.weight`/`timeoutMs` **未生效**，仅配置兼容）、`FailoverDecision`（错误→重试/换家/终止）、`ProviderCircuitBreaker`（连续失败熔断）、`ProviderMetricsTracker`（健康指标，仅观测） | 熔断只计上游侧错误，客户端 400 不计 |
+| `failover/` | 容灾调度：`FailoverConfig`（候选/重试/熔断/并发参数；`FailoverCandidate.weight`/`timeoutMs` **未生效**，仅配置兼容）、`FailoverDecision`（错误→重试/换家/终止）、`ProviderCircuitBreaker`（连续失败熔断）、`ConcurrencyGate`（全局/单账号在途上限，`concurrency` 配置热生效）、`ProviderMetricsTracker`（健康指标，仅观测） | 熔断只计上游侧错误，客户端 400 不计；并发许可覆盖含流式转发的全过程，`Handle.release` 幂等 |
 | `pool/AccountPool.kt` | 账号池：选号（余额最高者）、硬禁用（disabled）、持久化；不做本地冷却，上游错误由换号/Failover 应对 | 状态持久化在 `pool/state/<providerId>/<uid>.json`（一账号一文件；旧版 `pool/state/<providerId>.json` 首次读取时惰性迁移） |
 | `protocol/OpenAiGemini.kt` | OpenAI⇄Gemini 双向转换（Antigravity 专用）：严格 user/model 角色交替、tool 聚合、thinking、safetySettings | **上游强制要求 contents 角色交替**，连续同 role 会 400 |
 | `provider/Provider.kt` | Provider 接口 + AuthKind 枚举 | 抽象边界，勿随意扩接口 |
@@ -92,7 +92,7 @@
 | `provider/custom/` | 任意 OpenAI 兼容中转站 | 一个 key = 一个账号 |
 | `store/KeyValueStore.kt` | 存储抽象（App 侧用 EncryptedSharedPreferences 实现） | |
 | `security/` | `SecuritySettings`（脱敏/限速开关）、`RequestSanitizer`（system 提示词零宽字符脱敏 + 出网取证）、`AccountRateLimiter`（账号级最小间隔 + 抖动） | 只改 system 消息，不碰 user 输入 |
-| `usage/` | `CallLogStore`（调用记录，每条一键）、`RequestLog`（环形运行日志）、`StorageAudit`（按前缀统计占用） | 记录有容量淘汰与保留天数清理 |
+| `usage/` | `CallLogStore`（调用记录，每条一键；超出 8K 摘要的完整原文溢出到缓存目录供详情页回读）、`RequestLog`（环形运行日志，容量可运行期调整）、`StorageAudit`（按前缀统计占用） | 记录有容量淘汰与保留天数清理；溢出文件随删除/清空/过期清理/截断一并回收 |
 | `util/` | `CappedStringBuilder`（边收边截）、`CountFormat`、`JsonAccess`、`TimeWindow` | |
 
 ### app/（Android 壳）
@@ -104,6 +104,8 @@
 | `service/GatewayTileService.kt` | 控制中心磁贴开关 |
 | `data/EncryptedKeyValueStore.kt` | 写操作用 `commit()`（同步）而非 `apply()`——换 token 后必须立刻可读 |
 | `ui/ModelsScreen.kt` | 模型列表：点击复制、Q弹测速按钮 |
+| `ui/ResilienceScreen.kt` | 并发与容错设置页：并发闸门参数、重试退避、熔断器（每个对话框一个参数组） |
+| `ui/LogsScreen.kt` | 记录页：调用记录（详情可展开全文、大文本折叠）+ 请求日志（级别过滤/清空/容量设置在标签旁） |
 | `ui/Motion.kt` | 全局动效参数与Modifier |
 
 #### 模型目录流式加载（UI 交接要点）
@@ -138,6 +140,10 @@ settings/proxy.json                # 代理设置
 settings/custom.json               # 自定义供应商配置
 call/...                           # 调用日志
 ```
+
+> 调用记录的完整原文（超出 8K 摘要的部分）不在加密存储里，而是溢出到 `cacheDir/call-fulltext/`
+> （单字段 ≤512K 字符、目录总量 ≤64MB）；缓存被系统回收或记录被清理后，详情页回落展示摘要。
+> CLI 不传溢出目录，`logs` 命令只展示摘要。
 
 ---
 

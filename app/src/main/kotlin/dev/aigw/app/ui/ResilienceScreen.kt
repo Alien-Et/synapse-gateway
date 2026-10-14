@@ -218,11 +218,16 @@ private fun ConcurrencyEditDialog(
         },
         confirmButton = {
             TextButton(onClick = {
+                // 解析失败回落当前值（与重试/熔断对话框一致），不能静默变成「0=不限」
                 onConfirm(
                     ConcurrencyConfig(
-                        maxPerAccount = ConcurrencyConfig.clampMaxPerAccount(perAccount.toIntOrNull() ?: 0),
-                        maxGlobal = ConcurrencyConfig.clampMaxGlobal(global.toIntOrNull() ?: 0),
-                        queueTimeoutMs = ConcurrencyConfig.clampQueueTimeoutMs(timeout.toLongOrNull() ?: 10_000L),
+                        maxPerAccount = current.maxPerAccount,
+                        maxGlobal = current.maxGlobal,
+                        queueTimeoutMs = current.queueTimeoutMs,
+                    ).copy(
+                        maxPerAccount = ConcurrencyConfig.clampMaxPerAccount(perAccount.toIntOrNull() ?: current.maxPerAccount),
+                        maxGlobal = ConcurrencyConfig.clampMaxGlobal(global.toIntOrNull() ?: current.maxGlobal),
+                        queueTimeoutMs = ConcurrencyConfig.clampQueueTimeoutMs(timeout.toLongOrNull() ?: current.queueTimeoutMs),
                     ),
                 )
             }) { Text("保存") }
@@ -251,7 +256,7 @@ private fun RetryEditDialog(
                 NumberField("最大尝试次数（1-10）", attempts, 2) { attempts = it }
                 NumberField("初始退避（毫秒）", initial, 5) { initial = it }
                 NumberField("退避上限（毫秒）", maxBackoff, 6) { maxBackoff = it }
-                NumberField("退避倍率（1.0-5.0）", multiplier, 4) { multiplier = it }
+                NumberField("退避倍率（1.0-5.0）", multiplier, 4, allowDecimal = true) { multiplier = it }
                 NumberField("随机抖动（0-100%）", jitter, 3) { jitter = it }
             }
         },
@@ -318,10 +323,20 @@ private fun CircuitBreakerEditDialog(
 }
 
 @Composable
-private fun NumberField(label: String, value: String, maxLen: Int, onChange: (String) -> Unit) {
+private fun NumberField(
+    label: String,
+    value: String,
+    maxLen: Int,
+    allowDecimal: Boolean = false,
+    onChange: (String) -> Unit,
+) {
     OutlinedTextField(
         value = value,
-        onValueChange = { input -> onChange(input.filter { it.isDigit() || it == '.' }.take(maxLen)) },
+        onValueChange = { input ->
+            // 整数字段不放行小数点：避免「1.5」这类输入被 toIntOrNull 静默丢弃后落回默认值
+            val filtered = input.filter { it.isDigit() || (allowDecimal && it == '.') }
+            onChange(filtered.take(maxLen))
+        },
         label = { Text(label) },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),

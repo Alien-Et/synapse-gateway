@@ -43,6 +43,27 @@ class CallLogSpillTest {
     )
 
     @Test
+    fun `load deduplicates records written before preload finished`() {
+        val store = InMemoryKeyValueStore()
+        val log = CallLogStore(store, preloadOnConstruction = false)
+        // 模拟「网关已开始服务并写入一条记录，后台预载随后才跑」的窄窗口
+        log.add(record("live", request = "r"))
+        log.load()
+        assertEquals(1, log.list().count { it.id == "live" }, "同一 id 不得出现重复条目（UI 的 LazyColumn key 会崩）")
+        assertEquals(1, log.list().size)
+    }
+
+    @Test
+    fun `spill disabled when no directory provided`() {
+        val store = InMemoryKeyValueStore()
+        val log = CallLogStore(store)
+        val long = "x".repeat(CallLogStore.MAX_SUMMARY_CHARS + 10)
+        log.add(record("no-dir", request = long))
+        assertNull(log.fullText("no-dir", CallTextField.REQUEST))
+        assertEquals(CallLogStore.MAX_SUMMARY_CHARS, log.list().first().requestBody.length)
+    }
+
+    @Test
     fun `long bodies spill to files and short ones do not`() {
         val store = InMemoryKeyValueStore()
         val spill = kotlin.io.path.createTempDirectory("spill").toFile()
@@ -74,6 +95,29 @@ class CallLogSpillTest {
 
         val full = log.fullText("id-huge", CallTextField.REQUEST)
         assertEquals(CallLogStore.MAX_SPILL_CHARS, full?.length)
+        spill.deleteRecursively()
+    }
+
+    @Test
+    fun `spill budget evicts oldest files when exceeded`() {
+        val store = InMemoryKeyValueStore()
+        val spill = kotlin.io.path.createTempDirectory("spill-budget").toFile()
+        val log = CallLogStore(store, spillDir = spill)
+        val long = "b".repeat(CallLogStore.MAX_SPILL_CHARS)
+
+        // 写满超出预算的条目数（每条 1 个字段 ≈ 512K 字符），最旧的应被逐出
+        val needed = (CallLogStore.MAX_SPILL_TOTAL_BYTES / (CallLogStore.MAX_SPILL_CHARS * 1L)).toInt() + 2
+        val ids = (0 until needed).map { "id-$it" }
+        for ((index, id) in ids.withIndex()) {
+            log.add(record(id, request = long))
+            // lastModified 分辨率较粗，拉开时间戳保证「最旧」判定稳定
+            File(spill, CallLogStore.spillFileName(id, CallTextField.REQUEST)).setLastModified(1_000_000L + index * 1_000L)
+        }
+        val total = spill.listFiles()!!.sumOf { it.length() }
+        assertTrue(
+            total <= CallLogStore.MAX_SPILL_TOTAL_BYTES,
+            "溢出目录应被压回预算内，实际 $total",
+        )
         spill.deleteRecursively()
     }
 

@@ -312,7 +312,14 @@ class CallLogStore(
             )
         }
         loaded.sortByDescending { it.startedAtMillis }
-        records.addAll(loaded.take(capacity))
+        // 引擎的异步路径会在后台线程调用它；若载入期间已有新记录写入内存（需要网关在进程
+        // 启动后极短时间内就开始服务才会发生），以内存为准、按 id 去重，避免同一 id 出现两条
+        // 导致列表 LazyColumn 的 key 重复崩溃。
+        val known = records.mapTo(HashSet()) { it.id }
+        for (item in loaded) {
+            if (known.add(item.id)) records.addLast(item)
+        }
+        while (records.size > capacity) records.removeLast()
         totalAgg = store.read(TOTAL_KEY)?.let(::usageStatsFromJson) ?: aggregate(records)
         for (key in store.keys(DAY_PREFIX)) {
             val day = key.removePrefix(DAY_PREFIX).toLongOrNull() ?: continue
@@ -358,6 +365,22 @@ class CallLogStore(
             dir.mkdirs()
             val file = File(dir, spillFileName(id, field))
             file.writeText(if (content.length > MAX_SPILL_CHARS) content.substring(0, MAX_SPILL_CHARS) else content)
+            enforceSpillBudget(dir)
+        }
+    }
+
+    /**
+     * 溢出目录总量预算：超出 [MAX_SPILL_TOTAL_BYTES] 时按最后修改时间从最旧开始删，
+     * 直到回到预算内。缓存目录本身可被系统回收，但不应无限制增长（最坏 3 字段×512K×容量）。
+     */
+    private fun enforceSpillBudget(dir: File) {
+        val files = dir.listFiles() ?: return
+        var total = files.sumOf { it.length() }
+        if (total <= MAX_SPILL_TOTAL_BYTES) return
+        for (file in files.sortedBy { it.lastModified() }) {
+            if (total <= MAX_SPILL_TOTAL_BYTES) break
+            val size = file.length()
+            if (file.delete()) total -= size
         }
     }
 
@@ -390,6 +413,9 @@ class CallLogStore(
 
         /** 溢出文件单字段上限（字符）：512K，超出部分不保留（摘要仍提示总长）。 */
         const val MAX_SPILL_CHARS = 512 * 1024
+
+        /** 溢出目录总量预算（字节）：超出时删除最旧文件。 */
+        const val MAX_SPILL_TOTAL_BYTES = 64L * 1024 * 1024
 
         fun spillFileName(id: String, field: CallTextField): String = "$id.${field.fileName}.txt"
     }
