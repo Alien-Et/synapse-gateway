@@ -152,8 +152,11 @@ data class Route(val providerId: String, val model: String, val region: String? 
  *
  * [loginUrl] 交给系统浏览器打开；[pollState] 非空表示该供应商靠轮询换取 token
  * （WorkBuddy），调用方需要在打开浏览器后启动轮询。
+ *
+ * [region] 是创建本次授权所用的区域（区域型供应商）：轮询必须用同一个区域，
+ * 否则会打到另一个站点、永远查不到这个 state。
  */
-data class BrowserLoginTicket(val loginUrl: String, val pollState: String = "")
+data class BrowserLoginTicket(val loginUrl: String, val pollState: String = "", val region: String = "")
 
 /** 模型探测结果：延迟（毫秒）与失败原因。 */
 data class ProbeResult(val latencyMs: Long, val error: String = "")
@@ -870,9 +873,12 @@ class GatewayEngine(
      * 用系统浏览器而不是内置 WebView，是为了绕开设备 WebView 的渲染异常；
      * 登录期间会临时占用一个本地端口，收到回调或超时后自动释放。
      */
-    fun beginBrowserLogin(providerId: String): BrowserLoginTicket {
+    fun beginBrowserLogin(providerId: String, region: String = ""): BrowserLoginTicket {
         stopCallbackServer()
         val provider = registry.get(providerId) ?: throw IllegalStateException("未知供应商：$providerId")
+        // 区域优先用调用方显式传入的：供应商设置是异步写入的，登录页与之后的轮询必须用同一区域，
+        // 否则会在 A 站点创建 state、却去 B 站点轮询
+        val loginRegion = region.ifEmpty { providerSettings(providerId).option("region", "") }
         return when {
             provider is WebLoginSupport && (providerId == TraeProvider.ID || providerId == RaccoonProvider.ID) -> {
                 val (port, path) = if (providerId == RaccoonProvider.ID) {
@@ -881,12 +887,12 @@ class GatewayEngine(
                     TRAE_CALLBACK_PORT to TRAE_CALLBACK_PATH
                 }
                 val callbackUrl = "http://127.0.0.1:$port$path"
-                val ticket = provider.beginWebLogin(callbackUrl, providerSettings(providerId).option("region", ""))
+                val ticket = provider.beginWebLogin(callbackUrl, loginRegion)
                 startCallbackServer(port, path) { url ->
                     val outcome = completeWebLogin(providerId, url)
                     resultPage(outcome.ok, outcome.nickname.ifEmpty { outcome.uid }, outcome.error)
                 }
-                BrowserLoginTicket(ticket.loginUrl)
+                BrowserLoginTicket(ticket.loginUrl, "", loginRegion)
             }
 
             provider is LoopbackOAuthSupport -> {
@@ -899,9 +905,8 @@ class GatewayEngine(
 
             provider is DeviceCodeSupport -> {
                 // 区域感知的登录端点（WorkBuddy：cn=copilot.tencent.com / global=workbuddy.ai）
-                val region = providerSettings(providerId).option("region", "")
-                val ticket = provider.startDeviceAuth(region)
-                BrowserLoginTicket(ticket.loginUrl, ticket.state)
+                val ticket = provider.startDeviceAuth(loginRegion)
+                BrowserLoginTicket(ticket.loginUrl, ticket.state, loginRegion)
             }
 
             else -> throw IllegalStateException("该供应商不支持浏览器登录")
@@ -1002,6 +1007,9 @@ class GatewayEngine(
         val poll = support.pollDeviceAuth(state, region)
         if (poll is DeviceAuthPoll.Success) {
             adopt(providerId, poll.account, "登录")
+        } else if (poll is DeviceAuthPoll.Failed) {
+            // 授权页那边成功了、这里却失败时，先看这条日志确认轮询打的是不是同一个区域
+            logWarn("设备授权轮询失败（$providerId，region=${region.ifEmpty { "默认" }}）：${poll.error}")
         }
         return poll
     }

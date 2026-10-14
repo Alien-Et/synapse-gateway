@@ -843,7 +843,7 @@ class AppViewModel(
                 engine.updateProviderSettings(providerId, settings.copy(options = settings.options + ("region" to region)))
             }
         }
-        beginBrowserLogin(providerId)
+        beginBrowserLogin(providerId, region)
     }
 
     fun providerOption(providerId: String, key: String, fallback: String = ""): String =
@@ -861,11 +861,11 @@ class AppViewModel(
      * 浏览器完成登录后由网关接住回调并落池；WorkBuddy 没有本地回调，
      * 返回轮询用的 state，由 [pollDeviceLogin] 换取 token。
      */
-    fun beginBrowserLogin(providerId: String) {
+    fun beginBrowserLogin(providerId: String, region: String = "") {
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = "正在准备登录")
             val result = withContext(Dispatchers.IO) {
-                runCatching { engine.beginBrowserLogin(providerId) }
+                runCatching { engine.beginBrowserLogin(providerId, region) }
             }
             _state.value = _state.value.copy(busy = "")
             result.fold(
@@ -876,7 +876,8 @@ class AppViewModel(
                     }
                     if (ticket.pollState.isNotEmpty()) {
                         deviceStates[providerId] = ticket.pollState
-                        pollDeviceLogin(providerId, ticket.pollState)
+                        // 用票据自带的区域轮询：授权页创建在哪个区域，就只能在该区域查这个 state
+                        pollDeviceLogin(providerId, ticket.pollState, ticket.region)
                     } else {
                         _state.value = _state.value.copy(notice = "已在浏览器打开登录页，完成后会自动添加账号")
                     }
