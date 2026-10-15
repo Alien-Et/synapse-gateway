@@ -181,7 +181,7 @@ class AntigravityProvider(
         }
         val streaming = isStreaming(openAiBody)
         val model = resolveModel(requestedModel(openAiBody))
-        val request = OpenAiGemini.toGeminiRequest(openAiBody)
+        val request = OpenAiGemini.toGeminiRequest(openAiBody, model)
         // 非 claude 模型删 maxOutputTokens（上游 gemini 系不接受该字段，会 400）
         val isClaude = model.contains("claude", ignoreCase = true)
         if (!isClaude) {
