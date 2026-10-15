@@ -1,6 +1,7 @@
 package dev.aigw.core.provider.codebuddy
 
 import com.google.gson.JsonParser
+import dev.aigw.core.provider.ErrorKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -13,6 +14,8 @@ import kotlin.test.assertTrue
  * `tool_choice` 在上游 Go struct 里是 string，传对象会 400（code=11101）。
  */
 class CodeBuddyPayloadTest {
+
+    private val provider = CodeBuddyProvider()
 
     private fun prepare(body: String) =
         JsonParser.parseString(prepareCodeBuddyBody(body)).asJsonObject
@@ -58,6 +61,18 @@ class CodeBuddyPayloadTest {
     fun `无法识别的 tool_choice 直接删掉`() {
         assertFalse(prepare("""{"tool_choice":{"type":"weird"}}""").has("tool_choice"))
         assertFalse(prepare("""{"tool_choice":[1,2]}""").has("tool_choice"))
+    }
+
+    @Test
+    fun `401 与 403 判为凭证失效`() {
+        // 落到 CLIENT 的话网关会当作客户端错误早返回：不禁用死账号、也不换供应商
+        assertEquals(ErrorKind.SESSION_DEAD, provider.classify(401, "").kind)
+        assertEquals(ErrorKind.SESSION_DEAD, provider.classify(403, "").kind)
+        // 其余分类不受影响
+        assertEquals(ErrorKind.QUOTA, provider.classify(402, "").kind)
+        assertEquals(ErrorKind.SOFT_RATE, provider.classify(429, "").kind)
+        assertEquals(ErrorKind.SERVER, provider.classify(500, "").kind)
+        assertEquals(ErrorKind.CLIENT, provider.classify(400, "").kind)
     }
 
     @Test

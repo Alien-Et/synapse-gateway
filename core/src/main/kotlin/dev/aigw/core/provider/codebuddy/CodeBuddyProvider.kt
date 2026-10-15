@@ -145,6 +145,10 @@ class CodeBuddyProvider(
     override fun classify(status: Int, body: String): UpstreamError {
         val message = extractMessage(body)
         val kind = when {
+            // 401/403 是凭证失效：必须判 SESSION_DEAD，网关才会禁用该账号并换家。
+            // 落到下面的 400..499 → CLIENT 的话会被当作客户端错误早返回，
+            // 死账号被反复选中、用户持续收到「请求被上游拒绝」。其余五家都这么映射。
+            status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA
             status == 429 -> ErrorKind.SOFT_RATE
             status == 404 -> ErrorKind.NOT_FOUND

@@ -849,11 +849,16 @@ class GatewayEngine(
         try {
             val futures = targets.mapIndexed { index, target ->
                 executor.submit(Runnable {
-                    results.set(index, task(target))
-                    onDone?.invoke(finished.incrementAndGet(), index)
+                    try {
+                        results.set(index, task(target))
+                    } finally {
+                        // 任务抛异常也要走完：否则进度少一拍、结果槽留 null，
+                        // 下游拿到的 List<R> 会含 null（类型上不可见，运行时 NPE）。
+                        onDone?.invoke(finished.incrementAndGet(), index)
+                    }
                 })
             }
-            // 等全部完成；个别任务抛出的异常已被 task 内部消化，这里只是兜底不让等任务卡住。
+            // 等全部完成；异常已被上面的 finally 消化（结果槽保持 null，下游需容忍）
             futures.forEach { runCatching { it.get() } }
         } finally {
             executor.shutdownNow()

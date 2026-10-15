@@ -158,8 +158,12 @@ class GatewayHttpServer(
 
         for (future in futures) {
             try {
-                providerArray.add(future.get())
-            } catch (_: Exception) {}
+                // 给每个上游加超时：各家读超时差异极大（Raccoon 300s），
+                // 无限等会让一个半挂的上游把本机请求线程拖住几分钟。
+                providerArray.add(future.get(CREDITS_FETCH_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+            } catch (_: Exception) {
+                future.cancel(true)
+            }
         }
 
         root.add("providers", providerArray)
@@ -1033,6 +1037,9 @@ class GatewayHttpServer(
     companion object {
         const val MAX_BODY_BYTES = 8 * 1024 * 1024
 
+        /** `/v1/credits` 并行拉取的单家预算；上游半挂时不能让请求线程无限等。 */
+        private const val CREDITS_FETCH_TIMEOUT_SECONDS = 20L
+
         /** `/authorize` 回调固定归 Trae（其它供应商的登录不经过网关端口）。 */
         const val TRAE_PROVIDER_ID = "trae"
     }
@@ -1156,7 +1163,6 @@ internal class SseResponse(
     private companion object {
         /** 静默多久后开始补心跳。 */
         const val HEARTBEAT_IDLE_SECONDS = 15L
-
         /** 心跳检查周期：最坏 keepalive 间隔 ≈ IDLE + CHECK = 20s。 */
         const val HEARTBEAT_CHECK_SECONDS = 5L
         val HEARTBEAT = ": keep-alive\n\n".toByteArray(StandardCharsets.US_ASCII)

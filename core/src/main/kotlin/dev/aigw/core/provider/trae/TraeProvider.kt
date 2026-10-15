@@ -68,7 +68,7 @@ class TraeProvider(
     private fun authClient(region: TraeRegion): TraeAuthClient = authClientSingleton
 
     private fun checkinClient(region: TraeRegion): TraeCheckinClient =
-        checkinClients.computeIfAbsent(region) { TraeCheckinClient(version(), region.ugHost) }
+        checkinClients.computeIfAbsent(region) { TraeCheckinClient(version(), region.ugHost, region) }
 
     private fun catalog(region: TraeRegion): TraeModelCatalog =
         catalogs.computeIfAbsent(region) { TraeModelCatalog(chatClient(region), nowMillis) }
