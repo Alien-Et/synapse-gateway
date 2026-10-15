@@ -1444,9 +1444,10 @@ class GatewayEngine(
         val account = pickAccount(providerId, region = region)
             ?: return ProbeResult(-1L, "没有可用账号")
         val resolvedModel = provider.resolveModel(modelId)
+        // 不指定 max_tokens：上游对 max_output_tokens 有下限（传 1 会被模型提供方
+        // 以 11133 integer_below_min_value 拒绝），而探测只需要建连与首字节时间。
         val probeBody = JsonObject().apply {
             addProperty("model", resolvedModel)
-            addProperty("max_tokens", 1)
             addProperty("stream", false)
             add("messages", com.google.gson.JsonArray().apply {
                 add(JsonObject().apply {
