@@ -10,13 +10,21 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -69,6 +77,57 @@ fun AccountTitleRow(
 }
 
 /**
+ * 账号优先级箭头（↑/↓）：绑 [ProviderUiActions.onMoveAccountPriority]。
+ *
+ * 排在前面的先用，同级仍按余额（见 AccountPool.pick）。优先级被抬过（> 0）的账号额外标一枚「优先」，
+ * 否则用户看不出哪些号是手动提上来的。
+ */
+@Composable
+fun AccountPriorityArrows(
+    account: AccountStatus,
+    providerId: String,
+    actions: ProviderUiActions,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        if (account.priority > 0) {
+            Box(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f))
+                    .padding(horizontal = 6.dp, vertical = 1.dp),
+            ) {
+                Text(
+                    text = "优先",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+        }
+        Icon(
+            Icons.Filled.KeyboardArrowUp,
+            contentDescription = "提高优先级",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { actions.onMoveAccountPriority(providerId, account.uid, true) }
+                .padding(2.dp)
+                .size(20.dp),
+        )
+        Icon(
+            Icons.Filled.KeyboardArrowDown,
+            contentDescription = "降低优先级",
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable { actions.onMoveAccountPriority(providerId, account.uid, false) }
+                .padding(2.dp)
+                .size(20.dp),
+        )
+    }
+}
+
+/**
  * 账号启用/停用开关：绑定 [ProviderUiActions.onToggleAccount]。
  */
 @Composable
@@ -93,11 +152,25 @@ fun AccountDeleteChipRow(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var confirm by remember { mutableStateOf(false) }
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        ChoiceChip(text = "删除账号", selected = false, onClick = onRemove)
+        ChoiceChip(
+            text = "删除账号",
+            selected = false,
+            // 删除不可恢复：这一步只开确认框，真正的删除在对话框的确认按钮里
+            onClick = { confirm = true },
+        )
+    }
+    if (confirm) {
+        ConfirmDestructiveDialog(
+            title = "删除这个账号？",
+            body = "本地保存的凭证会被清除，之后要重新登录才能再用。此操作不可撤销。",
+            onConfirm = onRemove,
+            onDismiss = { confirm = false },
+        )
     }
 }
 
@@ -129,11 +202,18 @@ fun AccountCardShell(
         AccountTitleRow(
             account = account,
             trailing = trailing ?: {
-                AccountEnableSwitch(
-                    account = account,
-                    providerId = providerId,
-                    actions = actions,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AccountPriorityArrows(
+                        account = account,
+                        providerId = providerId,
+                        actions = actions,
+                    )
+                    AccountEnableSwitch(
+                        account = account,
+                        providerId = providerId,
+                        actions = actions,
+                    )
+                }
             },
         )
         extra()

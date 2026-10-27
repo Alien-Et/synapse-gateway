@@ -26,6 +26,8 @@ data class AccountStatus(
     val disabled: Boolean,
     /** 用户手动软开关。 */
     val enabled: Boolean,
+    /** 使用优先级：数值越大越先用；同级仍按余额。默认 0。 */
+    val priority: Int = 0,
 ) {
     val usable: Boolean get() = !disabled && enabled
 }
@@ -48,6 +50,7 @@ private class Entry(var account: ProviderAccount) {
     var disabled: Boolean = false
     var enabled: Boolean = true
     var reason: String = ""
+    var priority: Int = 0
 
     fun healthy(): Boolean = !disabled && enabled
 }
@@ -147,7 +150,11 @@ class AccountPool(
     fun statuses(providerId: String? = null): List<AccountStatus> = lock.read {
         entries.entries
             .filter { providerId == null || it.value.account.providerId == providerId }
-            .sortedBy { it.key }
+            // 优先级高的排前面；同级保持 uid 字典序，上下移动后列表即时可见
+            .sortedWith(
+                compareByDescending<MutableMap.MutableEntry<String, Entry>> { it.value.priority }
+                    .thenBy { it.key },
+            )
             .map { statusOf(it.value) }
     }
 
@@ -237,14 +244,18 @@ class AccountPool(
 
     // ---------------------------------------------------------------- 选号
 
-    /** 取该 provider 可用账号中余额最高者；[exclude] 用于同一请求内的换号重试。 */
+    /** 取该 provider 可用账号中优先级最高者，同级取余额最高者；[exclude] 用于同一请求内的换号重试。 */
     fun pick(providerId: String, exclude: Set<String> = emptySet()): ProviderAccount? = lock.read {
         val group = byProvider[providerId] ?: return@read null
         var best: Entry? = null
         for (entry in group) {
             if (entry.account.uid in exclude) continue
             if (!entry.healthy()) continue
-            if (best == null || entry.credits > best.credits) best = entry
+            // 先比优先级（用户手动排序，最高优先），同级再比余额：
+            // 用户把某个号拖到最上面，就是希望它先被用，不该被余额更高的号盖掉。
+            val better = best == null || entry.priority > best.priority ||
+                (entry.priority == best.priority && entry.credits > best.credits)
+            if (better) best = entry
         }
         best?.account
     }
@@ -282,6 +293,49 @@ class AccountPool(
         )
     }
 
+    // ---------------------------------------------------------------- 排序
+
+    /**
+     * 调整账号优先级：上移/下移一位（与相邻账号交换；同级时抬一档）。
+     *
+     * 两个账号的优先级都要落盘，且按账号逐个写（[persistState] 是 per-uid 的）：
+     * 锁内只改内存，落盘在锁外，避免持写锁做整文件加密提交。
+     */
+    fun movePriority(providerId: String, uid: String, up: Boolean): Boolean {
+        val changed = lock.write {
+            val group = byProvider[providerId] ?: return@write emptyList<String>()
+            val sorted = group.sortedWith(compareByDescending<Entry> { it.priority }.thenBy { it.account.uid })
+            val idx = sorted.indexOfFirst { it.account.uid == uid }
+            if (idx < 0) return@write emptyList<String>()
+            val target = idx + (if (up) -1 else 1)
+            if (target !in sorted.indices) return@write emptyList<String>()
+            val a = sorted[idx]
+            val b = sorted[target]
+            if (a.priority == b.priority) {
+                a.priority = b.priority + (if (up) 1 else -1)
+            } else {
+                val tmp = a.priority
+                a.priority = b.priority
+                b.priority = tmp
+            }
+            listOf(a.account.uid, b.account.uid)
+        }
+        if (changed.isEmpty()) return false
+        changed.forEach { persistState(providerId, it) }
+        return true
+    }
+
+    /** 直接设置账号优先级（数值越大越先用）。 */
+    fun setPriority(providerId: String, uid: String, priority: Int): Boolean {
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            entry.priority = priority
+            true
+        }
+        if (found) persistState(providerId, uid)
+        return found
+    }
+
     // ---------------------------------------------------------------- 持久化
 
     private fun statusOf(entry: Entry): AccountStatus = AccountStatus(
@@ -294,6 +348,7 @@ class AccountPool(
         reason = entry.reason,
         disabled = entry.disabled,
         enabled = entry.enabled,
+        priority = entry.priority,
     )
 
     private fun keyOf(providerId: String, uid: String) = "$providerId/$uid"
@@ -330,6 +385,7 @@ class AccountPool(
         addProperty("disabled", entry.disabled)
         addProperty("enabled", entry.enabled)
         addProperty("reason", entry.reason)
+        addProperty("priority", entry.priority)
     }
 
     private fun load() {
@@ -344,6 +400,7 @@ class AccountPool(
                 entry.disabled = state.get("disabled")?.asBoolean ?: false
                 entry.enabled = state.get("enabled")?.asBoolean ?: true
                 entry.reason = state.get("reason")?.asString.orEmpty()
+                entry.priority = state.get("priority")?.asInt ?: 0
             }
             entries[keyOf(account.providerId, account.uid)] = entry
         }

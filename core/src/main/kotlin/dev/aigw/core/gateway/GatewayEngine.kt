@@ -685,6 +685,13 @@ class GatewayEngine(
         }
     }
 
+    /** 调整账号使用优先级（↑/↓）：排在前面的先用，同级仍按余额。 */
+    fun moveAccountPriority(providerId: String, uid: String, up: Boolean): Boolean {
+        val moved = pool.movePriority(providerId, uid, up)
+        if (moved) onLog("账号优先级调整：$providerId/$uid ${if (up) "上移" else "下移"}")
+        return moved
+    }
+
     /**
      * 修正历史遗留的账号标识（uid 口径变过时自愈）。启动后调用一次，幂等。
      *

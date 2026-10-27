@@ -1144,6 +1144,12 @@ class AppViewModel(
         "账号已删除"
     }
 
+    /** 调整账号使用优先级（↑/↓）：排在前面的先用，同级仍按余额。 */
+    fun moveAccountPriority(providerId: String, uid: String, up: Boolean) = action {
+        if (!engine.moveAccountPriority(providerId, uid, up)) throw IllegalStateException("已到列表尽头")
+        ""
+    }
+
     /**
      * 刷新额度；uid 为空表示刷新该供应商的全部账号。
      *

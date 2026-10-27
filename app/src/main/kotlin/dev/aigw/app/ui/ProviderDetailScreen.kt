@@ -13,8 +13,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -89,6 +92,7 @@ fun ProviderDetailScreen(
             onRegenerateDeviceId = { id, uid -> viewModel.regenerateDeviceId(id, uid) },
             onSetDeviceId = { id, uid, value -> viewModel.setDeviceId(id, uid, value) },
             onNotice = { viewModel.notice(it) },
+            onMoveAccountPriority = { id, uid, up -> viewModel.moveAccountPriority(id, uid, up) },
         )
     }
 
@@ -153,7 +157,16 @@ private fun AccountRow(
         extra = { ui.AccountExtra(account, actions) },
         footer = {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                LinkText("删除账号") { actions.onRemoveAccount(account.providerId, account.uid) }
+                var confirm by remember { mutableStateOf(false) }
+                LinkText("删除账号") { confirm = true }
+                if (confirm) {
+                    ConfirmDestructiveDialog(
+                        title = "删除这个账号？",
+                        body = "本地保存的凭证会被清除，之后要重新登录才能再用。此操作不可撤销。",
+                        onConfirm = { actions.onRemoveAccount(account.providerId, account.uid) },
+                        onDismiss = { confirm = false },
+                    )
+                }
             }
         },
     )
