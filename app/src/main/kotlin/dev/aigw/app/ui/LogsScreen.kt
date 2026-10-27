@@ -233,8 +233,22 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 } else {
                     items(calls, key = { it.id }) { record ->
+                        var confirmDelete by remember { mutableStateOf(false) }
                         SectionCard {
-                            CallRow(record, onClick = { detail = record }, onLongClick = { viewModel.deleteCall(record.id) })
+                            CallRow(
+                                record,
+                                onClick = { detail = record },
+                                // 长按只开确认框：删的是一条带完整原文的记录，误触代价太高
+                                onLongClick = { confirmDelete = true },
+                            )
+                        }
+                        if (confirmDelete) {
+                            ConfirmDestructiveDialog(
+                                title = "删除这条调用记录？",
+                                body = "${record.model} · ${statusLabel(record.status)}，删除后不可恢复。",
+                                onConfirm = { viewModel.deleteCall(record.id) },
+                                onDismiss = { confirmDelete = false },
+                            )
                         }
                     }
                 }
@@ -534,7 +548,17 @@ private fun CallLogSettings(state: AppUiState, viewModel: AppViewModel) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlineActionButton("清空调用记录") { viewModel.clearCalls() }
+            var confirmClear by remember { mutableStateOf(false) }
+            OutlineActionButton("清空调用记录") { confirmClear = true }
+            if (confirmClear) {
+                ConfirmDestructiveDialog(
+                    title = "清空全部调用记录？",
+                    body = "将删除本机保存的 ${state.storedCalls} 条调用记录（含完整原文），不可恢复。",
+                    confirmText = "清空",
+                    onConfirm = { viewModel.clearCalls() },
+                    onDismiss = { confirmClear = false },
+                )
+            }
         }
     }
 }
@@ -603,7 +627,17 @@ private fun RequestLogSettings(state: AppUiState, viewModel: AppViewModel) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlineActionButton("清空请求日志") { viewModel.clearLogs() }
+            var confirmClearLogs by remember { mutableStateOf(false) }
+            OutlineActionButton("清空请求日志") { confirmClearLogs = true }
+            if (confirmClearLogs) {
+                ConfirmDestructiveDialog(
+                    title = "清空全部请求日志？",
+                    body = "将删除当前所有请求日志（容量等设置不受影响），不可恢复。",
+                    confirmText = "清空",
+                    onConfirm = { viewModel.clearLogs() },
+                    onDismiss = { confirmClearLogs = false },
+                )
+            }
         }
     }
 }
