@@ -91,6 +91,23 @@ class AccountPoolTest {
     }
 
     @Test
+    fun `退回原顺序后优先标记不留在别的账号上`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        pool.upsert(account("b"))
+        // 初始按 uid 字典序：a 在前
+        assertTrue(pool.statuses(TRAE).none { it.raised }, "初始不该有优先标记")
+        // b 上移一位：b 被提上去，标「优先」
+        assertTrue(pool.movePriority(TRAE, "b", up = true))
+        assertEquals("b", pool.statuses(TRAE).first().uid)
+        assertTrue(pool.statuses(TRAE).first { it.uid == "b" }.raised, "b 上移后应标优先")
+        // b 再下移回原位：两个账号都回到默认顺序，谁都不该带标记
+        assertTrue(pool.movePriority(TRAE, "b", up = false))
+        assertEquals(listOf("a", "b"), pool.statuses(TRAE).map { it.uid })
+        assertTrue(pool.statuses(TRAE).none { it.raised }, "退回原顺序后不该再有优先标记")
+    }
+
+    @Test
     fun `可以排除已试过的账号`() {
         val pool = newPool()
         pool.upsert(account("a"))

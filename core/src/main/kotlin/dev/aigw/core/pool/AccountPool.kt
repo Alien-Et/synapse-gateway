@@ -28,6 +28,13 @@ data class AccountStatus(
     val enabled: Boolean,
     /** 使用优先级：数值越大越先用；同级仍按余额。默认 0。 */
     val priority: Int = 0,
+    /**
+     * 是否被手动移到了默认（uid 字典序）位置之上。
+     *
+     * 不能直接用 `priority > 0` 判定：↑/↓ 是交换两个账号的优先级，退回原顺序时高值会落到
+     * 另一个账号身上，「优先」标就会带着跑。这里比的是「实际位置 vs 默认位置」。
+     */
+    val raised: Boolean = false,
 ) {
     val usable: Boolean get() = !disabled && enabled
 }
@@ -53,6 +60,19 @@ private class Entry(var account: ProviderAccount) {
     var priority: Int = 0
 
     fun healthy(): Boolean = !disabled && enabled
+}
+
+/**
+ * 手动上移/下移后的位置是否真的高于默认位置。
+ *
+ * 拿它算「优先」标，而不是直接看 priority：↑/↓ 是交换两个账号的优先级，
+ * 退回原顺序时高值会跑到另一个账号身上，直接看 priority 会让标记带着跑。
+ */
+private fun raisedAboveDefault(providerId: String, uid: String, priority: Int, sorted: List<Entry>): Boolean {
+    if (priority <= 0) return false
+    val actual = sorted.indexOfFirst { it.account.uid == uid }
+    val defaultIndex = sorted.map { it.account.uid }.sorted().indexOf(uid)
+    return actual in 0 until defaultIndex
 }
 
 /**
@@ -148,14 +168,31 @@ class AccountPool(
     }
 
     fun statuses(providerId: String? = null): List<AccountStatus> = lock.read {
-        entries.entries
+        val matched = entries.entries
             .filter { providerId == null || it.value.account.providerId == providerId }
-            // 优先级高的排前面；同级保持 uid 字典序，上下移动后列表即时可见
+        // 每个 provider 内部的默认顺序（uid 字典序）与当前顺序，用来判断哪些号真的被提上去了
+        val byProvider = matched.groupBy { it.value.account.providerId }
+        matched
             .sortedWith(
                 compareByDescending<MutableMap.MutableEntry<String, Entry>> { it.value.priority }
                     .thenBy { it.key },
             )
-            .map { statusOf(it.value) }
+            .map { entry ->
+                val provider = entry.value.account.providerId
+                val group = byProvider[provider].orEmpty()
+                val status = statusOf(entry.value)
+                status.copy(
+                    raised = raisedAboveDefault(
+                        providerId = provider,
+                        uid = entry.value.account.uid,
+                        priority = entry.value.priority,
+                        sorted = group.sortedWith(
+                            compareByDescending<MutableMap.MutableEntry<String, Entry>> { it.value.priority }
+                                .thenBy { it.key },
+                        ).map { it.value },
+                    ),
+                )
+            }
     }
 
     fun status(providerId: String, uid: String): AccountStatus? =

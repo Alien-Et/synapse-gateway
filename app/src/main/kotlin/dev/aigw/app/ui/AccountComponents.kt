@@ -79,8 +79,11 @@ fun AccountTitleRow(
 /**
  * 账号优先级箭头（↑/↓）：绑 [ProviderUiActions.onMoveAccountPriority]。
  *
- * 排在前面的先用，同级仍按余额（见 AccountPool.pick）。优先级被抬过（> 0）的账号额外标一枚「优先」，
+ * 排在前面的先用，同级仍按余额（见 AccountPool.pick）。被手动提到默认位置之上的账号额外标一枚「优先」，
  * 否则用户看不出哪些号是手动提上来的。
+ *
+ * 判据用 [AccountStatus.raised] 而不是 priority：↑/↓ 是交换两个账号的优先级，
+ * 退回原顺序时高值会跑到另一个账号身上，直接看 priority 会让标记带着跑。
  */
 @Composable
 fun AccountPriorityArrows(
@@ -90,7 +93,7 @@ fun AccountPriorityArrows(
     modifier: Modifier = Modifier,
 ) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        if (account.priority > 0) {
+        if (account.raised) {
             Box(
                 modifier = Modifier
                     .clip(CircleShape)
