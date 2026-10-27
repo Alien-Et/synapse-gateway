@@ -51,7 +51,12 @@ fun ProviderListScreen(
     ) {
         if (state.providers.isEmpty()) {
             SectionCard {
-                EmptyHint("还没有供应商", "内置供应商会在启动时自动登记；自定义供应商可点右上角「+」添加。")
+                EmptyHint(
+                    title = "还没有供应商",
+                    message = "内置供应商会在启动时自动登记；自定义供应商可点右上角「+」添加。",
+                    actionLabel = "添加自定义供应商",
+                    onAction = onAddCustom,
+                )
             }
             return@PageScaffold
         }

@@ -232,7 +232,16 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 )
 
                 SubPage.Usage -> UsageScreen(state, viewModel) { subPage = null }
-                SubPage.TaskCenter -> TaskCenterScreen(state, viewModel) { subPage = null }
+                SubPage.TaskCenter -> TaskCenterScreen(
+                    state = state,
+                    viewModel = viewModel,
+                    onOpenProviders = {
+                        // 空态里的「去供应商页」：切回供应商 tab，并关掉这个二级页
+                        tab = Tab.Providers
+                        subPage = null
+                    },
+                    onBack = { subPage = null },
+                )
                 SubPage.CreditCenter -> CreditCenterScreen(
                     state = state,
                     onOpen = { subPage = SubPage.ProviderCredits(it) },

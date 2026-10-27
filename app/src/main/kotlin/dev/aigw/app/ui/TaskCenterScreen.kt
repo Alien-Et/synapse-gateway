@@ -20,7 +20,12 @@ import androidx.compose.ui.unit.dp
  * 额度刷新对所有供应商生效（自定义供应商没有额度接口，会返回「不支持」）。
  */
 @Composable
-fun TaskCenterScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) {
+fun TaskCenterScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    onOpenProviders: () -> Unit = {},
+    onBack: () -> Unit,
+) {
     BatchOutcomeHost(state.batchOutcome) { viewModel.dismissBatchOutcome() }
     PageScaffold(
         title = "任务中心",
@@ -64,7 +69,12 @@ fun TaskCenterScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
 
         if (state.providers.none { state.accountsOf(it.id).isNotEmpty() }) {
             SectionCard(enterIndex = 1) {
-                EmptyHint("还没有账号", "先去「供应商」页添加账号，再回来签到。")
+                EmptyHint(
+                    title = "还没有账号",
+                    message = "先去「供应商」页添加账号，再回来签到。",
+                    actionLabel = "去供应商页",
+                    onAction = onOpenProviders,
+                )
             }
             return@PageScaffold
         }

@@ -398,10 +398,26 @@ fun OutlineActionButton(
 }
 
 @Composable
-fun EmptyHint(title: String, message: String) {
+/**
+ * 空态 / 错误态提示：标题 + 说明 + 可选的下一步动作。
+ *
+ * 光说「没有数据」等于把用户晾在那儿；给出 [actionLabel] 时一并渲染按钮，
+ * 由调用方决定下一步是什么（去登录、重新拉取、重试）。
+ */
+fun EmptyHint(
+    title: String,
+    message: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Column(Modifier.fillMaxWidth().padding(vertical = 28.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
         Text(message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (actionLabel != null && onAction != null) {
+            Box(modifier = Modifier.padding(top = 2.dp)) {
+                OutlineActionButton(actionLabel, onClick = onAction)
+            }
+        }
     }
 }
 
