@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -16,6 +17,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import dev.aigw.core.pool.AccountImportResult
 import dev.aigw.core.provider.ProviderAccount
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -192,7 +195,7 @@ fun AccountTransferScreen(
         SectionCard(enterIndex = 1) {
             SectionLabel("导入 · IMPORT")
             Text(
-                text = "粘贴导出内容，或选择一个 .json 文件；解析后会列出账号，勾选哪些要导入。",
+                text = "粘贴导出内容，或选择一个 .json 文件；内容一贴进来就自动识别，列出账号后可勾选要导入哪些。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -200,40 +203,43 @@ fun AccountTransferScreen(
                 value = importText,
                 onValueChange = {
                     importText = it
-                    parsed = null
-                    importError = ""
                     result = null
                 },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 3,
                 label = { Text("粘贴导出内容") },
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlineActionButton(
-                    text = "从文件选择",
-                    onClick = { openLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
-                )
-                OutlineActionButton(
-                    text = "解析",
-                    onClick = {
-                        importError = ""
-                        result = null
-                        val text = importText.trim()
-                        if (text.isEmpty()) {
-                            importError = "先粘贴导出内容或选择一个文件"
-                            return@OutlineActionButton
+            OutlineActionButton(
+                text = "从文件选择 .json",
+                onClick = { openLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
+            )
+
+            // 粘贴即识别：不再要求先点一下「解析」。防抖 250ms，输入过程中不涋解析错误。
+            // 这里只读 importText，解析结果与错误都回到同一个状态，界面不因重复触发而闪跳。
+            LaunchedEffect(importText) {
+                val text = importText.trim()
+                if (text.isEmpty()) {
+                    parsed = null
+                    importError = ""
+                    return@LaunchedEffect
+                }
+                delay(250)
+                runCatching { viewModel.parseAccountTransfer(text) }
+                    .onSuccess { accounts ->
+                        parsed = accounts.map { it.toSelectable() }
+                        // 只保留仍然存在的勾选项，避免换一份文件后沿用上一份的选择
+                        val keys = accounts.map { it.toSelectable().key }.toSet()
+                        importSelection = if (importSelection.isEmpty() || !keys.containsAll(importSelection)) {
+                            keys
+                        } else {
+                            importSelection.intersect(keys)
                         }
-                        runCatching { viewModel.parseAccountTransfer(text) }
-                            .onSuccess { accounts ->
-                                parsed = accounts.map { it.toSelectable() }
-                                importSelection = accounts.map { it.toSelectable().key }.toSet()
-                            }
-                            .onFailure { importError = it.message ?: "解析失败" }
-                    },
-                )
+                        importError = ""
+                    }
+                    .onFailure { e ->
+                        parsed = null
+                        importError = e.message ?: "解析失败"
+                    }
             }
 
             if (importError.isNotEmpty()) {
@@ -241,6 +247,12 @@ fun AccountTransferScreen(
                     text = importError,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
+                )
+            } else if (importText.isNotBlank() && parsed == null) {
+                Text(
+                    text = "正在识别…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -254,12 +266,6 @@ fun AccountTransferScreen(
                 Text(
                     text = "文件里有 ${accounts.size} 个账号，已选 ${importSelection.size} 个",
                     style = MaterialTheme.typography.bodyMedium,
-                )
-                AccountTree(
-                    groups = grouped,
-                    displayName = { id -> state.providerOf(id)?.displayName ?: id },
-                    selected = importSelection,
-                    onSelectionChange = { importSelection = it },
                 )
                 if (unknown.isNotEmpty()) {
                     Text(
@@ -280,20 +286,27 @@ fun AccountTransferScreen(
                     }
                     Switch(checked = overwrite, onCheckedChange = { overwrite = it })
                 }
-                OutlineActionButton(
-                    text = "导入选中的 ${importSelection.size} 个账号",
+                // 主操作放列表之前：账号多时不用滚到底才能找到导入按钮
+                Button(
                     onClick = {
                         if (importSelection.isEmpty()) {
                             importError = "没有选中任何账号"
-                            return@OutlineActionButton
+                            return@Button
                         }
-                        viewModel.importAccountsJson(importText, importSelection, overwrite)
-                            .let { outcome ->
-                                result = outcome
-                                importError = ""
-                                viewModel.refresh()
-                            }
+                        result = viewModel.importAccountsJson(importText, importSelection, overwrite)
+                        importError = ""
+                        viewModel.refresh()
                     },
+                    enabled = importSelection.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("导入选中的 ${importSelection.size} 个账号")
+                }
+                AccountTree(
+                    groups = grouped,
+                    displayName = { id -> state.providerOf(id)?.displayName ?: id },
+                    selected = importSelection,
+                    onSelectionChange = { importSelection = it },
                 )
             }
 
