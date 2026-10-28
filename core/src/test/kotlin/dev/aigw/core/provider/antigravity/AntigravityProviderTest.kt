@@ -567,6 +567,71 @@ class AntigravityProviderTest {
     }
 
     @Test
+    fun `残缺的 200 不会被当成最终结果，会继续问下一个端点`() {
+        var quotaCalls = 0
+        withUpstream(
+            // 用 respond 按「第几次配额请求」分别应答：首次残缺（只剩 Claude/GPT 周窗口），
+        // 第二次才给完整的 Gemini 5h + weekly。模拟 daily 残缺、prod 完整的上游现状。
+        respond = { path, _, _ ->
+            if (!path.contains("retrieveUserQuotaSummary")) {
+                200 to """{"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}"""
+            } else {
+                quotaCalls++
+                // 首次残缺、之后完整：模拟上游「第一个 200 不给全」，验证我们不会停在残缺结果上
+                if (quotaCalls == 1) {
+                    200 to quotaBody(
+                        quotaGroupWithBuckets(
+                            "Claude and GPT models",
+                            bucket("3p-weekly", "1", displayName = "Weekly Limit Remaining"),
+                        ),
+                    )
+                } else {
+                    200 to quotaBody(
+                        quotaGroupWithBuckets(
+                            "Gemini Models",
+                            bucket("gemini-weekly", "0", displayName = "Weekly Limit Remaining"),
+                            bucket("gemini-5h", "1", displayName = "Five Hour Limit Remaining"),
+                        ),
+                        quotaGroupWithBuckets(
+                            "Claude and GPT models",
+                            bucket("3p-weekly", "1", displayName = "Weekly Limit Remaining"),
+                        ),
+                    )
+                }
+            }
+        },
+        ) { base, _ ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertTrue(info.detail.contains("Gemini Models"), "残缺响应里的 Gemini 组不能被丢掉：${info.detail}")
+            assertTrue(
+                info.detail.contains("Five Hour Limit"),
+                "5 小时窗口必须能拿到（这正是 issue 的核心）：${info.detail}",
+            )
+            assertTrue(quotaCalls >= 2, "残缺 200 应继续问下一个端点，实际请求次数：$quotaCalls")
+        }
+    }
+
+    @Test
+    fun `耗尽的桶即使缺少 remainingFraction 也不能消失`() = withUpstream(
+        mapOf(
+            CREDITS_PATH to (200 to """{"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}"""),
+            // proto3 JSON 省略零值：耗尽的桶可能不带 remainingFraction
+            QUOTA_PATH to (200 to quotaBody(
+                quotaGroupWithBuckets(
+                    "Gemini Models",
+                    """{"bucketId":"gemini-weekly","displayName":"Weekly Limit Remaining","resetTime":"2026-11-01T00:00:00Z"}""",
+                    bucket("gemini-5h", "1", displayName = "Five Hour Limit Remaining"),
+                ),
+            )),
+        ),
+    ) { base, _ ->
+        val packs = AntigravityProvider(apiBase = base, quotaBase = base).creditPacks(account())
+        assertEquals(2, packs.size, "缺字段的耗尽桶要按 0% 展示，而不是整个消失：$packs")
+        val weekly = packs.single { it.group.endsWith("Weekly Limit Remaining") }
+        assertEquals(0L, weekly.remain)
+    }
+
+    @Test
     fun `Gemini 4 Argon 独立配额单独成包并标注仅限 argon`() = withUpstream(
         mapOf(
             CREDITS_PATH to (200 to """{"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}"""),

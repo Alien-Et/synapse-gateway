@@ -1,5 +1,6 @@
 package dev.aigw.core.provider.antigravity
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.aigw.core.provider.AggregatedChatCall
@@ -697,13 +698,19 @@ class AntigravityProvider(
     /**
      * 模型组配额（桌面 App 展示的「Weekly Limit / Five Hour Limit」）。
      *
-     * 对接 CLIProxyAPI：base 固定 `daily-cloudcode-pa`，请求体带 `project`（拿不到就空体），
-     * 失败时按 剥 project → sandbox → prod 的顺序回退。
+     * ⚠️ **不能把第一个 200 当最终结果**（2026-10 上游变更，多个项目同踩）：
+     * `daily-cloudcode-pa` 会返回**残缺的 200**——groups 只剩部分组/窗口（典型是只剩
+     * `Claude and GPT models` 或只剩周窗口），而完整的 5h + weekly 只在 production
+     * `cloudcode-pa` 上才有。所以：
+     * 1. production 排第一位（见 [QUOTA_FALLBACK_BASES]）；
+     * 2. 拿到 200 后检查是否包含期望的共享池（bucketId 带 `gemini-` / `3p-`），缺就继续问下一个；
+     * 3. 多个端点的 groups 合并（按组名 + bucketId 去重，先到先得），避免残缺响应掩盖完整数据。
+     *
+     * 仍然只把 401 当登录失效，403/5xx 继续下一个端点。
      */
     private fun loadQuotaSummary(accessToken: String, projectId: String): Pair<Int, String> {
-        // 只有用默认域名时才回退到 sandbox/prod；显式传了 base（单测的假上游）就只打它
+        // 只有用默认域名时才走完整端点链；显式传了 base（单测的假上游）就只打它
         val bases = if (quotaBase == QUOTA_BASE) listOf(quotaBase) + QUOTA_FALLBACK_BASES else listOf(quotaBase)
-        var last: Pair<Int, String> = 0 to ""
         // 两种请求体都试：带 project 的完整形态，与空体（#3501 常见于 project 授权校验失败）
         val payloads = LinkedHashSet<String>().apply {
             if (projectId.isNotEmpty()) {
@@ -711,15 +718,75 @@ class AntigravityProvider(
             }
             add("{}")
         }
+        var last: Pair<Int, String> = 0 to ""
+        // 已收集到的 groups：组名 → buckets（同组同 bucketId 只保留第一份）
+        val merged = LinkedHashMap<String, MutableList<JsonObject>>()
+        var sawOk = false
         for (base in bases) {
             for (payload in payloads) {
                 val url = "$base/$API_VERSION:retrieveUserQuotaSummary"
                 val result = postJson(url, accessToken, payload, userAgent = userAgent())
-                if (result.first == 401 || result.first in 200..299) return result
-                last = result
+                if (result.first == 401) return result
+                if (result.first !in 200..299) {
+                    last = result
+                    continue
+                }
+                sawOk = true
+                val before = merged.values.sumOf { it.size }
+                collectQuotaGroups(result.second, merged)
+                // 这个端点没给出任何 bucket：不能当成功，否则会把「口径变了」掩盖成空结果
+                if (merged.values.sumOf { it.size } == before) {
+                    last = result
+                    continue
+                }
+                // 已拿到含共享池的响应就不再往下试（prod 正常一次就够）
+                if (hasSharedPool(merged)) return 200 to buildMergedQuotaBody(merged)
             }
         }
-        return last
+        // 全部端点都没给出完整结果：有多少用多少，一个都没有才回退到最后一次失败
+        return if (sawOk && merged.isNotEmpty()) 200 to buildMergedQuotaBody(merged) else last
+    }
+
+    /** 把一次响应的 groups 合进 [merged]；响应包在 `response` 里（OAuth 形态）也认。 */
+    private fun collectQuotaGroups(body: String, merged: LinkedHashMap<String, MutableList<JsonObject>>) {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return
+        val root = obj.objOrNull("response") ?: obj
+        val groups = root.get("groups")?.takeIf { it.isJsonArray }?.asJsonArray ?: return
+        for (element in groups.asJsonArray) {
+            val group = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val name = group.get("displayName")?.asString?.takeIf { it.isNotEmpty() } ?: "Models"
+            val buckets = group.get("buckets")?.takeIf { it.isJsonArray }?.asJsonArray ?: continue
+            val target = merged.getOrPut(name) { mutableListOf() }
+            val seen = target.mapNotNull { it.get("bucketId")?.asString }.toHashSet()
+            for (bucketElement in buckets.asJsonArray) {
+                val bucket = bucketElement.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                val id = bucket.get("bucketId")?.asString.orEmpty()
+                if (id.isNotEmpty() && !seen.add(id)) continue
+                target.add(bucket)
+            }
+        }
+    }
+
+    /**
+     * 合并结果是否已经可用：**Gemini 共享池**至少有一个窗口就算。
+     *
+     * 实测的残缺响应正是「只剩 Claude and GPT models」（Gemini 组整个消失），所以判据看 Gemini
+     * 组是否到位；不再要求 Claude+GPT 也到位——有些账号本来就没有第三方池，要求两组都有
+     * 会让这类账号白白多打两轮端点。
+     */
+    private fun hasSharedPool(merged: Map<String, List<JsonObject>>): Boolean =
+        merged.values.flatten().any { it.get("bucketId")?.asString.orEmpty().startsWith("gemini-") }
+
+    /** 把合并结果拼回 `{groups:[...]}`，供 [parseQuotaBuckets] 照旧解析。 */
+    private fun buildMergedQuotaBody(merged: Map<String, List<JsonObject>>): String {
+        val groups = JsonArray()
+        for ((name, buckets) in merged) {
+            groups.add(JsonObject().apply {
+                addProperty("displayName", name)
+                add("buckets", JsonArray().apply { buckets.forEach { add(it) } })
+            })
+        }
+        return JsonObject().apply { add("groups", groups) }.toString()
     }
 
     /** 无积分可显示时，账号卡片余额取最紧窗口的剩余百分比，detail 标注订阅层级。 */
@@ -882,10 +949,15 @@ class AntigravityProvider(
             val buckets = group.get("buckets")?.takeIf { it.isJsonArray }?.asJsonArray ?: continue
             for (bucketElement in buckets.asJsonArray) {
                 val bucket = bucketElement.takeIf { it.isJsonObject }?.asJsonObject ?: continue
-                // 只跳过「连 remainingFraction 都没有」的桶：那不是可用窗口，而是上游的占位条目
-                val fraction = runCatching { bucket.get("remainingFraction")?.asString?.trim()?.toDouble() }
-                    .getOrNull() ?: continue
+                // proto3 JSON 会**省略零值**：一个真正耗尽的桶（remainingFraction = 0）可能根本不带该字段。
+                // 所以不能「缺字段就当占位丢掉」——有 bucketId 或 resetTime 的桶一律收下，缺值按 0 处理；
+                // 真正该丢的只有「什么都没有」的空壳条目（否则耗尽的那组会整个消失）。
+                val rawFraction = runCatching { bucket.get("remainingFraction")?.asString?.trim()?.toDouble() }
+                    .getOrNull()
                 val bucketId = bucket.get("bucketId")?.asString.orEmpty()
+                val resetTime = bucket.get("resetTime")?.asString.orEmpty()
+                if (rawFraction == null && bucketId.isEmpty() && resetTime.isEmpty()) continue
+                val fraction = rawFraction ?: 0.0
                 val windowName = bucket.get("displayName")?.asString?.takeIf { it.isNotEmpty() }
                     ?: bucketId.takeIf { it.isNotEmpty() }
                     ?: "Limit"
@@ -960,18 +1032,22 @@ class AntigravityProvider(
         const val API_VERSION = "v1internal"
 
         /**
-         * daily- 域名：对话与配额查询都走它。prod（API_BASE）对消费级账号的对话请求
-         * 会回 429 RESOURCE_EXHAUSTED（与额度无关），只留作 loadCodeAssist 等账号类接口。
+         * 配额查询首选域名：production。
+         *
+         * 对话仍走 daily（`daily-cloudcode-pa`）——prod 对消费级账号的对话请求会回
+         * 429 RESOURCE_EXHAUSTED（与额度无关）；但配额查询相反，只有 prod 给完整数据。
          */
-        const val QUOTA_BASE = "https://daily-cloudcode-pa.googleapis.com"
+        const val QUOTA_BASE = "https://cloudcode-pa.googleapis.com"
 
         /**
-         * 配额查询的备用域名：sandbox 与 prod。daily 返回 403/429/5xx 时依次回退
-         * （Antigravity-Manager 的 QUOTA_SUMMARY_ENDPOINTS 同样按 daily → sandbox → prod）。
+         * 配额查询的备用域名（**顺序很重要**）：production 排第一。
+         *
+         * 2026-10 起 `daily-` 会返回残缺的 200（只剩部分组/窗口），完整的 5h + weekly 只在
+         * production 上；把 daily 放前面会让 5 小时窗口彻底消失（多个项目同踩此坑）。
          */
         val QUOTA_FALLBACK_BASES = listOf(
+            "https://daily-cloudcode-pa.googleapis.com",
             "https://daily-cloudcode-pa.sandbox.googleapis.com",
-            "https://cloudcode-pa.googleapis.com",
         )
 
         /** 上游保留的内部/实验模型，不对外暴露（清单与 CLIProxyAPI fetch_antigravity_models 一致）。 */
