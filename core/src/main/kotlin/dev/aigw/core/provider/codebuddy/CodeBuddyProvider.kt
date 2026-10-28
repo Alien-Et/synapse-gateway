@@ -29,6 +29,7 @@ import dev.aigw.core.provider.QuotaPack
 import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
+import dev.aigw.core.provider.ProviderHooks
 import dev.aigw.core.util.arrayOrNull
 import dev.aigw.core.util.bodySnippet
 import dev.aigw.core.protocol.FALLBACK_CONVERSATION_ID
@@ -37,6 +38,7 @@ import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.firstLong
 import dev.aigw.core.util.firstString
 import dev.aigw.core.util.jwtClaim
+import dev.aigw.core.util.jwtClaimLong
 import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.objOrNull
 import dev.aigw.core.util.str
@@ -56,6 +58,7 @@ import java.util.Locale
 class CodeBuddyProvider(
     private val region: () -> String = { REGION_CN },
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val hooks: ProviderHooks = ProviderHooks(),
 ) : Provider, DeviceCodeSupport, dev.aigw.core.provider.RegionAwareSupport {
 
     override val id: String = ID
@@ -109,6 +112,18 @@ class CodeBuddyProvider(
 
     override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall {
         val credential = parse(account) ?: return FailedChatCall(401, "凭证无法解析")
+        // 已确定过期、且刷新刚刚连续失败：如实报一个**可重试**的错误。
+        // 不能带着过期 token 打上游——那会拿到 401，被分类成 SESSION_DEAD 而把账号硬禁用，
+        // 一次瞬时刷新失败就变成了用户看到的「登录失效」。连续失败超过上限就不再护着，
+        // 让真正的死会话（refresh_token 已被吊销）照常暴露出来。
+        if (shouldShieldExpiredCredential(
+                expiresAt = credential.expiresAt,
+                streak = synchronized(refreshLock) { refreshFailureStreak[account.uid] ?: 0 },
+                nowSeconds = nowMillis() / 1000,
+            )
+        ) {
+            return FailedChatCall(503, "凭证已过期且刷新未成功，稍后会自动重试")
+        }
         val streaming = isStreamingBody(openAiBody)
         val model = resolveModel(requestedModelOf(openAiBody))
         val request = prepareCodeBuddyRequest(openAiBody)
@@ -788,6 +803,9 @@ class CodeBuddyProvider(
     @Volatile
     private var lastRefreshFailedAt: Map<String, Long> = emptyMap()
 
+    /** 连续刷新失败次数（按账号）：用于决定还要不要护着过期凭证，避免瞬时失败把账号弄成「失效」。 */
+    private var refreshFailureStreak: Map<String, Int> = emptyMap()
+
     override fun refreshAccount(account: ProviderAccount, skewSeconds: Long): ProviderAccount? {
         val credential = parse(account) ?: return null
         val nowSeconds = nowMillis() / 1000
@@ -811,30 +829,82 @@ class CodeBuddyProvider(
                     null,
                     refreshHeaders(credential),
                 )
-                if (status !in 200..299) return refreshFailed(uid, nowSeconds)
-                val data = envelopeData(text) ?: return refreshFailed(uid, nowSeconds)
-                val access = data.get("accessToken")?.asString.orEmpty()
-                if (access.isEmpty()) return refreshFailed(uid, nowSeconds)
-                val expiresIn = data.get("expiresIn")?.asLong ?: 0L
+                if (status !in 200..299) return refreshFailed(uid, nowSeconds, "HTTP $status" + describeBody(text))
+                val data = refreshEnvelopeData(text)
+                    ?: return refreshFailed(uid, nowSeconds, "响应不是预期信封" + describeBody(text))
+                // 走 credentialOf 而不是逐字段 get("accessToken")：上游两个站点用过 camelCase 与
+                // snake_case 两套命名，只认 camelCase 时国际版的刷新会被误判成失败 → 冷却期内
+                // 继续用旧 token → 上游 401 → 账号被硬禁用（用户看到的「登录失效」）。
+                val parsed = credentialOf(data)
+                if (parsed.accessToken.isEmpty()) {
+                    return refreshFailed(uid, nowSeconds, "响应里没有 accessToken" + describeBody(text))
+                }
                 val refreshed = credential.copy(
-                    accessToken = access,
-                    refreshToken = data.get("refreshToken")?.asString.orEmpty().ifEmpty { credential.refreshToken },
-                    domain = data.get("domain")?.asString.orEmpty().ifEmpty { credential.domain },
-                    expiresAt = if (expiresIn > 0) nowSeconds + expiresIn else credential.expiresAt,
+                    accessToken = parsed.accessToken,
+                    refreshToken = parsed.refreshToken.ifEmpty { credential.refreshToken },
+                    domain = parsed.domain.ifEmpty { credential.domain },
+                    expiresAt = resolveRefreshedExpiry(parsed.expiresAt, parsed.accessToken, nowSeconds),
                 )
                 lastRefreshed = lastRefreshed + (uid to refreshed)
                 if (lastRefreshFailedAt.containsKey(uid)) lastRefreshFailedAt = lastRefreshFailedAt - uid
+                if (refreshFailureStreak.containsKey(uid)) refreshFailureStreak = refreshFailureStreak - uid
+                hooks.onVerbose("刷新凭证", text)
                 toProviderAccount(refreshed)
-            } catch (_: Exception) {
-                refreshFailed(uid, nowSeconds)
+            } catch (e: Exception) {
+                refreshFailed(uid, nowSeconds, "异常：${e.message ?: e::class.simpleName}")
             }
         }
     }
 
     /** 记录一次刷新失败并返回 null（调用方据此沿用旧凭证/除障）。 */
-    private fun refreshFailed(uid: String, nowSeconds: Long): ProviderAccount? {
+    private fun refreshFailed(uid: String, nowSeconds: Long, detail: String): ProviderAccount? {
+        // 刷新失败从前是静默的（返回 null 而不抛异常），用户只看到「登录失效」却查不到原因；
+        // 这里把状态码与响应片段写进日志，排查时能直接看出是哪一侧的问题。
+        hooks.onLog("WorkBuddy 刷新凭证失败（$uid）：$detail")
         lastRefreshFailedAt = lastRefreshFailedAt + (uid to nowSeconds)
+        refreshFailureStreak = refreshFailureStreak + (uid to ((refreshFailureStreak[uid] ?: 0) + 1))
         return null
+    }
+
+    /**
+     * 是否应该拦住「带过期凭证去打上游」。
+     *
+     * 条件：凭证确实已过期 + 刷新刚失败过 + 连续失败次数还没超过上限。
+     * 上限存在的意义：真正被吊销的会话（refresh_token 失效）也得能走到 401 → 禁用 → 提醒重新登录，
+     * 不能被这个护盾永久堵住。
+     */
+    internal fun shouldShieldExpiredCredential(expiresAt: Long, streak: Int, nowSeconds: Long): Boolean {
+        if (expiresAt <= 0) return false
+        if (expiresAt > nowSeconds) return false
+        return streak in 1..MAX_SHIELD_STREAK
+    }
+
+    /**
+     * 刷新响应的 `data`：对 `code` 比对其它端点宽容。
+     *
+     * 其它端点的信封只有 `code == 0` 才算成功；刷新这条不行——有站点回 200 却不带 `code`
+     * （或把 token 平铺在顶层）。一律当失败会让刷新永远失败、账号被反复判成失效。
+     * 带了 `code` 且非 0 仍按失败处理（那确实是业务错误）。
+     */
+    internal fun refreshEnvelopeData(body: String): JsonObject? {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return null
+        val code = obj.get("code")
+        if (code != null && code.takeIf { it.isJsonPrimitive }?.asLong != 0L) return null
+        obj.objOrNull("data")?.let { return it }
+        // 没有 data 包装时，只有看起来像凭证的顶层才认，避免把 {"code":0} 这种空响应当成 token
+        val looksLikeCredential = obj.get("accessToken") != null || obj.get("access_token") != null
+        return obj.takeIf { looksLikeCredential }
+    }
+
+    /**
+     * 刷新后的绝对过期时间：响应里的绝对/相对时间 → 新 access_token 的 JWT `exp` → 保守兜底 TTL。
+     *
+     * 绝不能沿用旧值：能走到刷新这一步就说明旧凭证已经临期，沿用会让之后**每个请求**都再刷一次，
+     * 刷新频率等于请求频率——正是上游风控吊销 token、账号「登录失效」的触发条件。
+     */
+    internal fun resolveRefreshedExpiry(responseExpiresAt: Long, accessToken: String, nowSeconds: Long): Long = when {
+        responseExpiresAt > nowSeconds -> responseExpiresAt
+        else -> jwtClaimLong(accessToken, "exp") ?: (nowSeconds + REFRESH_FALLBACK_TTL_SECONDS)
     }
 
     /**
@@ -1290,6 +1360,9 @@ class CodeBuddyProvider(
         /** 刷新失败后的冷却秒数：期间不再重打上游刷新端点。 */
         const val REFRESH_COOLDOWN_SECONDS = 60L
 
+        /** 连续刷新失败几次之后不再拦过期凭证（把真正的死会话还给 401 路径去禁用+提醒重登）。 */
+        internal const val MAX_SHIELD_STREAK = 2
+
         /**
          * 一个区域对应的出站端点。
          *
@@ -1328,6 +1401,13 @@ class CodeBuddyProvider(
             if (region == REGION_GLOBAL) GLOBAL_ENDPOINT else CN_ENDPOINT
 
         const val CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
+
+        /**
+         * 刷新响应既没给过期时间、新 token 也不是 JWT 时的兜底有效期（秒）。
+         *
+         * 取 30 分钟：足够避开「每请求都刷」的频率放大，又不会短到把上游额度刷爆。
+         */
+        internal const val REFRESH_FALLBACK_TTL_SECONDS = 1800L
 
         const val PATH_AUTH_STATE = "/v2/plugin/auth/state"
         const val PATH_AUTH_TOKEN = "/v2/plugin/auth/token"
