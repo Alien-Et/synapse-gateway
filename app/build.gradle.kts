@@ -48,8 +48,8 @@ android {
         applicationId = "dev.aigw.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 185
-        versionName = "2.20.1"
+        versionCode = 186
+        versionName = "2.20.2"
     }
 
     buildFeatures {
