@@ -1,8 +1,10 @@
 package dev.aigw.core.gateway
 
 import com.google.gson.JsonObject
+import dev.aigw.core.pool.AccountImportResult
 import dev.aigw.core.pool.AccountPool
 import dev.aigw.core.pool.AccountStatus
+import dev.aigw.core.pool.AccountTransfer
 import dev.aigw.core.pool.PoolSummary
 import dev.aigw.core.provider.ACTION_CHECKIN
 import dev.aigw.core.provider.AuthKind
@@ -691,6 +693,69 @@ class GatewayEngine(
         if (moved) onLog("账号优先级调整：$providerId/$uid ${if (up) "上移" else "下移"}")
         return moved
     }
+
+    // ------------------------------------------------------------------ 账号导入导出
+
+    /**
+     * 导出账号（含明文凭证）。[selection] 是 `providerId/uid` 集合，空集合表示全部。
+     *
+     * 只取当前确实在池里的账号：勾选后又被删掉的不会凭空出现在导出内容里。
+     */
+    fun exportAccounts(selection: Set<String> = emptySet()): String {
+        val all = pool.accounts()
+        val picked = if (selection.isEmpty()) all else all.filter { "${it.providerId}/${it.uid}" in selection }
+        return AccountTransfer.encode(picked.sortedWith(compareBy({ it.providerId }, { it.uid })), nowMillis())
+    }
+
+    /**
+     * 导入账号。
+     *
+     * [overwrite] 为 true 时同 (providerId, uid) 的已有账号被覆盖（凭证与昵称），否则跳过。
+     * 未注册的 providerId 不落池，单独报出来——否则会存下一个永远选不了号的死账号。
+     * [selection] 是 `providerId/uid` 集合，空集合表示导入文件里的全部账号。
+     */
+    fun importAccounts(
+        json: String,
+        overwrite: Boolean,
+        selection: Set<String> = emptySet(),
+    ): AccountImportResult {
+        val envelope = AccountTransfer.decode(json)
+        val picked = if (selection.isEmpty()) {
+            envelope.accounts
+        } else {
+            envelope.accounts.filter { "${it.providerId}/${it.uid}" in selection }
+        }
+        val added = ArrayList<String>()
+        val updated = ArrayList<String>()
+        val skipped = ArrayList<String>()
+        val unknown = ArrayList<String>()
+        for (account in picked) {
+            val key = "${account.providerId}/${account.uid}"
+            if (registry.get(account.providerId) == null) {
+                unknown.add(key)
+                continue
+            }
+            val existing = pool.account(account.providerId, account.uid)
+            when {
+                existing == null -> {
+                    pool.upsert(account)
+                    added.add(key)
+                }
+                overwrite -> {
+                    pool.upsert(account)
+                    updated.add(key)
+                }
+                else -> skipped.add(key)
+            }
+        }
+        if (added.isNotEmpty() || updated.isNotEmpty()) {
+            onLog("账号导入：新增 ${added.size}、覆盖 ${updated.size}、跳过 ${skipped.size}")
+        }
+        return AccountImportResult(added = added, updated = updated, skipped = skipped, unknownProviders = unknown)
+    }
+
+    /** 解析导出内容（只读、不落池），供导入前预览与勾选。 */
+    fun parseAccountTransfer(json: String): List<ProviderAccount> = AccountTransfer.decode(json).accounts
 
     /**
      * 修正历史遗留的账号标识（uid 口径变过时自愈）。启动后调用一次，幂等。

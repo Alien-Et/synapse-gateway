@@ -148,7 +148,12 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 checked = state.liveNotification,
                 onCheckedChange = { viewModel.setLiveNotification(it) },
             )
-        }
+            EditorialRow(
+                "02.9",
+                "账号导入导出 · ACCOUNTS BACKUP",
+                "按供应商与账号备份、迁移凭证",
+                "${state.pool.total} 个账号",
+            ) { open(SubPage.AccountTransfer) }        }
 
         EditorialGroupHeader("03", "架构关于 · ABOUT THE ENGINE")
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

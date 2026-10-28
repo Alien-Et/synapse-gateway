@@ -75,6 +75,7 @@ import dev.aigw.app.ui.ProxyScreen
 import dev.aigw.app.ui.ResilienceScreen
 import dev.aigw.app.ui.SecurityProtectionScreen
 import dev.aigw.app.ui.SubPage
+import dev.aigw.app.ui.AccountTransferScreen
 import dev.aigw.app.ui.TaskCenterScreen
 import dev.aigw.app.ui.UsageScreen
 import dev.aigw.app.ui.formatBytes
@@ -259,6 +260,7 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 SubPage.SecurityProtection -> SecurityProtectionScreen(state, viewModel) { subPage = null }
                 SubPage.Resilience -> ResilienceScreen(state, viewModel) { subPage = null }
                 SubPage.AppearanceTheme -> AppearanceThemeScreen(state, viewModel) { subPage = null }
+                SubPage.AccountTransfer -> AccountTransferScreen(state, viewModel) { subPage = null }
                 null -> MainTabs(
                     viewModel = viewModel,
                     state = state,

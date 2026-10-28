@@ -1150,6 +1150,16 @@ class AppViewModel(
         ""
     }
 
+    /** 导出账号为 JSON 文本；[selection] 为 `providerId/uid` 集合，空集表示全部。 */
+    fun exportAccountsJson(selection: Set<String>): String = engine.exportAccounts(selection)
+
+    /** 解析导出内容（只读），供导入前预览；格式不对抛错，消息可直接展示。 */
+    fun parseAccountTransfer(json: String) = engine.parseAccountTransfer(json)
+
+    /** 导入勾选的账号；返回逐条结果。 */
+    fun importAccountsJson(json: String, selection: Set<String>, overwrite: Boolean) =
+        engine.importAccounts(json, overwrite, selection)
+
     /**
      * 刷新额度；uid 为空表示刷新该供应商的全部账号。
      *

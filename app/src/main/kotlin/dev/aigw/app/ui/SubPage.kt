@@ -35,4 +35,7 @@ sealed interface SubPage {
 
     /** 外观主题：明暗模式、配色方案与金色文字。 */
     data object AppearanceTheme : SubPage
+
+    /** 账号导入导出：备份与迁移（含明文凭证）。 */
+    data object AccountTransfer : SubPage
 }
