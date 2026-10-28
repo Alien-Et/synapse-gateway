@@ -1248,6 +1248,22 @@ class AppViewModel(
             .map { BatchTarget(it.providerId, it.uid) }
 
     /**
+     * 批量动作的可执行目标概览：有哪些供应商、各几个账号会被实际执行。
+     *
+     * 界面用它决定按钮是否可点、并列出「这次会动到谁」——避免用户点下去才看到
+     * 「还没有支持任务的账号」这种无意义报错。
+     */
+    fun batchTargetSummary(action: String, capability: ProviderCapability): List<Pair<String, Int>> =
+        engine.providers()
+            .filter { capability in it.capabilities }
+            .map { info ->
+                val count = engine.accounts(info.id)
+                    .count { engine.supportsAction(it.providerId, it.uid, action) }
+                info.displayName to count
+            }
+            .filter { it.second > 0 }
+
+    /**
      * 跑一批批量动作：后台 IO 执行、过程中把进度写回状态、结束后给结构化结果并刷新界面。
      *
      * [block] 在 IO 线程执行，[onProgress] 由引擎在后台线程回调（不保证顺序），

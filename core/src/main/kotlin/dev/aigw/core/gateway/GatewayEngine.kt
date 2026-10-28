@@ -871,7 +871,16 @@ class GatewayEngine(
             val outcome = runCatching { performActionRaw(target.providerId, target.uid, action, payload) }
             val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
             outcome.fold(
-                { BatchActionResult(target.providerId, target.uid, nickname, it.ok, it.message) },
+                { result ->
+                    // 「该供应商不支持」不是执行失败，而是选目标时就应该排掉的情况：
+                    // 计入失败面板会让用户看到一堆无意义的报错，所以单独标出来（ok = true），
+                    // 不计入失败数也不进补刷额度。
+                    if (result.unsupported) {
+                        BatchActionResult(target.providerId, target.uid, nickname, true, "")
+                    } else {
+                        BatchActionResult(target.providerId, target.uid, nickname, result.ok, result.message)
+                    }
+                },
                 { BatchActionResult(target.providerId, target.uid, nickname, false, it.message ?: "操作失败") },
             )
         }

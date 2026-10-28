@@ -25,6 +25,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.aigw.core.provider.ACTION_CHECKIN
+import dev.aigw.core.provider.ACTION_TASKS
+import dev.aigw.core.provider.ProviderCapability
+
+/** 把「供应商 → 账号数」概览拼成一句话；无目标时直接说明为什么不能点。 */
+private fun List<Pair<String, Int>>.describeTargets(emptyText: String): String =
+    if (isEmpty()) {
+        emptyText
+    } else {
+        joinToString("、") { (name, count) -> "$name $count 个账号" }
+    }
 
 /** 折叠时仍然展示的账号数：超过这个数才值得折叠，否则收起来反而多点一次。 */
 private const val COLLAPSE_THRESHOLD = 3
@@ -52,22 +63,51 @@ fun TaskCenterScreen(
     ) {
         BatchProgressHost(state.batchProgress)
 
+        // 批量目标概览：只在真有可执行账号时才把按钮点亮，并列出「这次会动到谁」。
+        // 从前只有签到/刷新额度两个按钮，任务中心的「批量任务」能力根本没接到界面上。
+        val checkinTargets = viewModel.batchTargetSummary(ACTION_CHECKIN, ProviderCapability.CHECKIN)
+        val taskTargets = viewModel.batchTargetSummary(ACTION_TASKS, ProviderCapability.TASKS)
+
         SectionCard(enterIndex = 0) {
             SectionLabel("批量操作")
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                OutlinedButton(onClick = { viewModel.checkinAll() }, modifier = Modifier.weight(1f)) {
+                OutlinedButton(
+                    onClick = { viewModel.checkinAll() },
+                    enabled = checkinTargets.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) {
                     Text("一键签到")
                 }
-                Button(onClick = { viewModel.refreshAllCredits() }, modifier = Modifier.weight(1f)) {
-                    Text("刷新全部额度")
+                OutlinedButton(
+                    onClick = { viewModel.runAllTasks() },
+                    enabled = taskTargets.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("批量任务")
                 }
             }
+            Button(onClick = { viewModel.refreshAllCredits() }, modifier = Modifier.fillMaxWidth()) {
+                Text("刷新全部额度")
+            }
+
+            // 把「哪些供应商会被执行」写清楚：没接口的供应商不会进流程，
+            // 用户也不会因为按钮点了没反应而困惑
             Text(
-                text = "签到作用于 Trae、WorkBuddy、小浣熊（国际版没有签到制度，自动跳过）；" +
-                    "任务作用于 Loomy 的新手任务；额度刷新作用于全部账号。",
+                text = "签到：" + checkinTargets.describeTargets("没有支持签到的账号"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "任务：" + taskTargets.describeTargets("没有支持批量任务的账号") +
+                    "（新手任务、成长中心）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "额度刷新作用于全部账号。区域型供应商的国际版、企业账号本就没有签到/成长中心，已自动跳过。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
