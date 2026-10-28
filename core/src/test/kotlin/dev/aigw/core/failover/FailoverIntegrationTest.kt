@@ -194,9 +194,9 @@ class FailoverIntegrationTest {
         try {
             val (status, resp) = post(server.listeningPort, "my-model")
             assertEquals(400, status, "客户端参数错必须向客户端返回 400")
-            // 错误码按真实分类给（不再是笼统的 upstream_rejected），上游原话要透出来
-            assertTrue(resp.contains("invalid_request"), resp)
-            assertTrue(resp.contains("max_tokens too large"), resp)
+            // 错误码按真实分类给（不再是笼统的 upstream_rejected），消息用供应商给的原话
+            assertTrue(resp.contains("\"code\":\"invalid_request\""), resp)
+            assertTrue(resp.contains("invalid_request_error"), resp)
             assertEquals(1, p1Calls)
             assertEquals(0, p2Calls, "客户端错误绝不能污染备选供应商")
         } finally {
