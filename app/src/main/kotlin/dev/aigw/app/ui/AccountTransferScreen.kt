@@ -2,8 +2,10 @@ package dev.aigw.app.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -37,6 +39,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** 超过这个字符数的粘贴内容就折叠（要求：超过 50 字自动折叠）。 */
+private const val COLLAPSE_CHARS = 50
+
+/** 折叠时显示的行数。 */
+private const val COLLAPSED_LINES = 4
 
 /** 勾选树里的一行账号；导出（AccountStatus）与导入（ProviderAccount）共用。 */
 private data class SelectableAccount(val providerId: String, val uid: String, val nickname: String) {
@@ -199,16 +207,44 @@ fun AccountTransferScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            OutlinedTextField(
-                value = importText,
-                onValueChange = {
-                    importText = it
-                    result = null
-                },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 3,
-                label = { Text("粘贴导出内容") },
-            )
+            // 粘贴框：内容超过 COLLAPSE_CHARS 就折叠成几行，右上角给一个展开/折叠按钮。
+            // 长 JSON 铺满整屏会把下面的「导入」按钮顶出视口，折叠后一屏能同时看到入口与按钮。
+            var pasteExpanded by remember { mutableStateOf(false) }
+            val collapsible = importText.length > COLLAPSE_CHARS
+            Box(modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = importText,
+                    onValueChange = {
+                        importText = it
+                        result = null
+                    },
+                    modifier = Modifier.fillMaxWidth().animateContentSize(),
+                    // 折叠时只占几行；展开时按实际内容铺开（内部仍可滚动）
+                    minLines = 3,
+                    maxLines = if (collapsible && !pasteExpanded) COLLAPSED_LINES else Int.MAX_VALUE,
+                    label = { Text("粘贴导出内容") },
+                )
+                if (collapsible) {
+                    Text(
+                        text = if (pasteExpanded) "折叠" else "展开",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 6.dp, end = 10.dp)
+                            .clip(MaterialTheme.shapes.small)
+                            .clickable { pasteExpanded = !pasteExpanded }
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            if (collapsible && !pasteExpanded) {
+                Text(
+                    text = "已折叠 ${importText.length} 字符，点右上角「展开」看全文",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             OutlineActionButton(
                 text = "从文件选择 .json",
                 onClick = { openLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
