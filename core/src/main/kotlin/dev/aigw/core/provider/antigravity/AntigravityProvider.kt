@@ -749,6 +749,9 @@ class AntigravityProvider(
         val accountLevel = buckets.filter { !it.modelOnly }
         val tightest = (accountLevel.ifEmpty { buckets }).minBy { it.remainingPct }
         val pct = tightest.remainingPct.roundToLong()
+        // 周额度 0% 但 5 小时池还有额度时，账号其实**能用**（实测：官方客户端里 5 小时额度正常生效）。
+        // 所以不能只报最紧窗口的 0%，否则界面与选号都会误以为账号已耗尽。
+        val stillUsable = accountLevel.any { it.remainingPct > 0.0 }
         val windows = buckets.joinToString(" · ") { bucket ->
             "${bucket.groupName} ${bucket.windowName} ${bucket.remainingPct.roundToLong()}%"
         }
@@ -762,6 +765,10 @@ class AntigravityProvider(
             known = true,
             detail = buildString {
                 append("$tierLabel · 组配额剩余 $pct%（最紧：${tightest.groupName} ${tightest.windowName}）")
+                if (stillUsable && pct == 0L) {
+                    // 最紧的窗口见底，但同一账号还有别的窗口有余量：明确说出来，避免被当成账号耗尽
+                    append("；仍有可用窗口")
+                }
                 if (modelOnly.isNotEmpty()) append("；独立配额：$modelOnly")
                 append("；全部窗口：$windows")
             },
@@ -856,8 +863,12 @@ class AntigravityProvider(
      * bucket（周/5 小时），`remainingFraction` 0-1（1 = 未用），`resetTime` ISO 时间。
      *
      * 两个易踩的上游行为：
-     * - 周配额耗尽时 Google 会把对应 5h 桶标 `disabled: true` 且 `remainingFraction: 1`，
-     *   照原样展示会多出一条「0% 使用」的假进度条，故直接跳过；
+     * - **`disabled` 不等于「没额度」**：实测（用户核对官方客户端）周额度耗尽时，上游会给
+     *   5 小时桶打上 `disabled: true`，但同时给 `remainingFraction: 1`——而客户端里 5 小时额度
+     *   **依然能正常使用**。也就是说这个 `disabled` 不表示「不可用」，`remainingFraction` 才是真实
+     *   剩余量。从前这里直接 `continue` 丢掉整个桶，用户就只看到周额度、看不到可用的 5 小时池
+     *   （issue：geminiplus 同样有 5 小时用量，网关里却只能看到周额度）。
+     *   现在按 `remainingFraction` 如实展示，`disabled` 只当作附注。
      * - Gemini 4 Argon 等新模型有**自己的**额外配额池（只有周窗口），它不是账号总额度，
      *   耗尽时不能把账号判成没额度，故单独标 [QuotaBucket.modelOnly]。
      */
@@ -871,7 +882,7 @@ class AntigravityProvider(
             val buckets = group.get("buckets")?.takeIf { it.isJsonArray }?.asJsonArray ?: continue
             for (bucketElement in buckets.asJsonArray) {
                 val bucket = bucketElement.takeIf { it.isJsonObject }?.asJsonObject ?: continue
-                if (bucket.get("disabled")?.takeIf { it.isJsonPrimitive }?.asBoolean == true) continue
+                // 只跳过「连 remainingFraction 都没有」的桶：那不是可用窗口，而是上游的占位条目
                 val fraction = runCatching { bucket.get("remainingFraction")?.asString?.trim()?.toDouble() }
                     .getOrNull() ?: continue
                 val bucketId = bucket.get("bucketId")?.asString.orEmpty()

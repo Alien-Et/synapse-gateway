@@ -543,14 +543,15 @@ class AntigravityProviderTest {
     // ------------------------------------------------------- Gemini 4 Argon 独立配额
 
     @Test
-    fun `周配额耗尽时被上游禁用的 5h 桶不出现在额度包里`() = withUpstream(
+    fun `周额度耗尽时 5 小时窗口仍然展示，因为它确实可用`() = withUpstream(
         mapOf(
             CREDITS_PATH to (200 to """{"paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}"""),
             QUOTA_PATH to (200 to quotaBody(
                 quotaGroupWithBuckets(
                     "Gemini Models",
-                    // 周配额耗尽时 Google 把 5h 桶标 disabled 且 remainingFraction 给 1，
-                    // 照原样展示会画出一条「0% 使用」的假进度条
+                    // 实测事实：周额度耗尽后上游给 5h 桶打 disabled 但 remainingFraction 仍为 1，
+                    // 而官方客户端里 5 小时额度**可以正常使用**。所以不能丢掉这个桶，
+                    // 否则用户只能看到周额度（issue：geminiplus 只能看周额度）。
                     bucket("gemini-weekly", "0.0", displayName = "Weekly Limit"),
                     bucket("gemini-5h", "1", displayName = "Five Hour Limit", disabled = true),
                 ),
@@ -558,9 +559,11 @@ class AntigravityProviderTest {
         ),
     ) { base, _ ->
         val packs = AntigravityProvider(apiBase = base, quotaBase = base).creditPacks(account())
-        assertEquals(1, packs.size, "被禁用的 5h 桶应跳过：$packs")
-        assertEquals("Weekly Limit", packs[0].group.substringAfter(" · "))
-        assertEquals(0L, packs[0].remain)
+        assertEquals(2, packs.size, "周窗口与可用的 5 小时窗口都要列出来：$packs")
+        val weekly = packs.single { it.group.endsWith("Weekly Limit") }
+        assertEquals(0L, weekly.remain)
+        val fiveHour = packs.single { it.group.endsWith("Five Hour Limit") }
+        assertEquals(100L, fiveHour.remain, "5 小时池是满的，不能因为 disabled 就藏起来")
     }
 
     @Test
