@@ -204,6 +204,9 @@ class GatewayHttpServer(
         var lastHttpStatus = 0
         // 是否真正向某个上游发起过请求（用于决定 503 要不要记一条调用记录）
         var attemptedUpstream = false
+        // 本次请求所有失败尝试的分类：最终按主因决定给客户端的状态码与错误码
+        // （从前一律 503 no_healthy_account，额度耗尽/凭证失效也报「没有可用账号」）
+        val failureKinds = ArrayList<dev.aigw.core.provider.ErrorKind>()
         val routeErrors = ArrayList<String>()
         val failoverCfg = engine.failoverSettings()
         if (engine.verboseLogging()) {
@@ -408,13 +411,16 @@ class GatewayHttpServer(
                         )
                         finishActiveRequest()
                         gateHandle.release()
-                        return errorResponse(400, "upstream_rejected", failure.message)
+                        // 客户端侧被拒：状态码与错误码按真实分类给（不再统一写成 upstream_rejected）
+                        val mapped = GatewayErrorMapping.map(listOf(failure.kind), attemptedUpstream = true)
+                        return errorResponse(mapped.status, mapped.code, failure.message)
                     }
                     if (failure.kind == ErrorKind.SESSION_DEAD) {
                         engine.pool.disable(currentRoute.providerId, account.uid, failure.message)
                         log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${failure.message}")
                         // 凭证失效是账号级问题，不代表供应商故障，不计入熔断
                         providerLastError = failure.message
+                        failureKinds.add(ErrorKind.SESSION_DEAD)
                         finishActiveRequest()
                         gateHandle.release()
                         break
@@ -427,6 +433,7 @@ class GatewayHttpServer(
                         log("模型级不可用，冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${failure.message}")
                         providerLastError = failure.message
                         lastHttpStatus = call.status
+                        failureKinds.add(ErrorKind.MODEL_LIMIT)
                         finishActiveRequest()
                         gateHandle.release()
                         break
@@ -435,6 +442,7 @@ class GatewayHttpServer(
                     cb.recordFailure()
                     pMetrics.record(false, elapsed, failure.kind.name)
                     providerLastError = failure.message
+                    failureKinds.add(failure.kind)
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", call.errorBody)
                     finishActiveRequest()
                     gateHandle.release()
@@ -449,6 +457,7 @@ class GatewayHttpServer(
                     cb.recordFailure()
                     pMetrics.record(false, elapsed, "network_status_0")
                     providerLastError = err
+                    failureKinds.add(ErrorKind.NETWORK)
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", err)
                     finishActiveRequest()
                     gateHandle.release()
@@ -483,7 +492,8 @@ class GatewayHttpServer(
                         )
                         finishActiveRequest()
                         gateHandle.release()
-                        return errorResponse(400, "upstream_rejected", error.message)
+                        val mappedAbort = GatewayErrorMapping.map(listOf(error.kind), attemptedUpstream = true)
+                        return errorResponse(mappedAbort.status, mappedAbort.code, error.message)
                     }
 
                     if (error.kind == ErrorKind.SESSION_DEAD || decision == dev.aigw.core.failover.FailoverDecision.SWITCH_NEXT_PROVIDER) {
@@ -492,6 +502,7 @@ class GatewayHttpServer(
                             log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${error.message}")
                         }
                         providerLastError = error.message
+                        failureKinds.add(error.kind)
                         // 不可恢复错误：直接退出当前供应商重试，迅速切换下一家候选
                         finishActiveRequest()
                         gateHandle.release()
@@ -506,6 +517,7 @@ class GatewayHttpServer(
                         log("模型级不可用，冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${error.message}")
                         providerLastError = error.message
                         lastHttpStatus = call.status
+                        failureKinds.add(ErrorKind.MODEL_LIMIT)
                         finishActiveRequest()
                         gateHandle.release()
                         break
@@ -516,6 +528,7 @@ class GatewayHttpServer(
                     pMetrics.record(false, elapsed, "http_${call.status}")
                     providerLastError = error.message
                     lastHttpStatus = call.status
+                    failureKinds.add(error.kind)
                     finishActiveRequest()
                     gateHandle.release()
                     continue
@@ -531,6 +544,7 @@ class GatewayHttpServer(
                     log("${currentRoute.providerId} 返回了零内容回复，已尝试其他账号或供应商")
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", aggregated)
                     providerLastError = "上游返回了空回复"
+                    failureKinds.add(ErrorKind.SERVER)
                     finishActiveRequest()
                     gateHandle.release()
                     continue
@@ -558,6 +572,7 @@ class GatewayHttpServer(
                         cb.recordFailure()
                         pMetrics.record(false, elapsed, "stream_null")
                         providerLastError = "上游未返回流"
+                        failureKinds.add(ErrorKind.SERVER)
                         finishActiveRequest()
                         gateHandle.release()
                         continue
@@ -590,6 +605,7 @@ class GatewayHttpServer(
 
                 call.close()
                 providerLastError = "上游返回的内容为空"
+                failureKinds.add(ErrorKind.SERVER)
                 finishActiveRequest()
                 gateHandle.release()
                 continue
@@ -620,12 +636,22 @@ class GatewayHttpServer(
         }
 
         val allErrors = routeErrors.joinToString("；")
-        val reason = "所有候选供应商均不可用：$allErrors"
+        val mappedFailure = GatewayErrorMapping.map(
+            kinds = failureKinds,
+            attemptedUpstream = attemptedUpstream,
+            poolSummary = runCatching {
+                val summary = engine.pool.summary(primaryRoute.providerId)
+                "总数 ${summary.total}，可用 ${summary.usable}，停用 ${summary.disabled}"
+            }.getOrDefault(""),
+        )
+        // 对客消息 = 「真实主因 + 逐家原因」：agent 端能直接看出是额度、凭证还是网络，
+        // 而不用去猜一句笼统的「没有可用账号」
+        val reason = if (allErrors.isEmpty()) mappedFailure.headline else "${mappedFailure.headline}；$allErrors"
         if (engine.verboseLogging()) {
-            log("全部尝试完毕返回 503：已试供应商 [${triedProviders.joinToString(", ")}]")
+            log("全部尝试完毕返回 ${mappedFailure.status}（${mappedFailure.code}）：已试供应商 [${triedProviders.joinToString(", ")}]")
             routeErrors.forEachIndexed { index, error -> log("  原因 ${index + 1}：$error") }
         } else {
-            log("全部供应商尝试完毕，返回 503：$reason")
+            log("全部供应商尝试完毕，返回 ${mappedFailure.status}（${mappedFailure.code}）：$reason")
         }
         // 全部候选耗尽：记一条失败记录，httpStatus 取最后一次上游状态（网络层失败为 0）。
         // 未真正发起过上游请求（如无可用账号）就不记，避免污染调用记录。
@@ -635,7 +661,7 @@ class GatewayHttpServer(
                 streaming, CallStatus.FAILED, lastHttpStatus, null, 0L, reason, "", body, startedAt,
             )
         }
-        return errorResponse(503, "no_healthy_account", reason)
+        return errorResponse(mappedFailure.status, mappedFailure.code, reason)
     }
 
     // ------------------------------------------------------------------ 响应

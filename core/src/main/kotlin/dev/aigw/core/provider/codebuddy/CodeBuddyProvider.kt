@@ -30,6 +30,7 @@ import dev.aigw.core.provider.StreamFailureChatCall
 import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.bodySnippet
 import dev.aigw.core.protocol.FALLBACK_CONVERSATION_ID
 import dev.aigw.core.protocol.stableConversationId
 import dev.aigw.core.util.HttpSupport
@@ -178,7 +179,7 @@ class CodeBuddyProvider(
             status in 400..499 -> ErrorKind.CLIENT
             else -> ErrorKind.CLIENT
         }
-        return UpstreamError(kind, message.ifEmpty { "上游 HTTP $status" })
+        return UpstreamError(kind, message.ifEmpty { "上游 HTTP $status" + bodySnippet(body) })
     }
 
     /** 取响应体里的业务码；取不到/非数字返回 null。 */

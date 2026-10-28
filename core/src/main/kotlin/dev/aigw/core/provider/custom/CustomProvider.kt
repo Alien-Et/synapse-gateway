@@ -20,6 +20,7 @@ import dev.aigw.core.provider.StreamingChatCall
 import dev.aigw.core.provider.UpstreamError
 import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.bodySnippet
 import dev.aigw.core.util.objOrNull
 import java.net.HttpURLConnection
 
@@ -137,7 +138,7 @@ class CustomProvider(
     }
 
     override fun classify(status: Int, body: String): UpstreamError {
-        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" }
+        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" + bodySnippet(body) }
         val kind = when {
             status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA

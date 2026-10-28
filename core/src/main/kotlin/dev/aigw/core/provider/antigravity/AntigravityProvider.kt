@@ -23,6 +23,7 @@ import dev.aigw.core.provider.queryParam
 import dev.aigw.core.protocol.OpenAiGemini
 import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.bodySnippet
 import dev.aigw.core.util.longOrNull
 import dev.aigw.core.util.newCompletionId
 import dev.aigw.core.util.objOrNull
@@ -238,7 +239,7 @@ class AntigravityProvider(
     }
 
     override fun classify(status: Int, body: String): UpstreamError {
-        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" }
+        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" + bodySnippet(body) }
         val lower = message.lowercase()
         val kind = when {
             // 与 0.1.39 语义一致：凭证失效明确报出需要重新登录，不隐藏。

@@ -33,6 +33,7 @@ import dev.aigw.core.provider.queryParam
 import dev.aigw.core.provider.requestedModelOf
 import dev.aigw.core.util.HttpSupport
 import dev.aigw.core.util.arrayOrNull
+import dev.aigw.core.util.bodySnippet
 import dev.aigw.core.util.boolOrNull
 import dev.aigw.core.util.firstLong
 import dev.aigw.core.util.firstString
@@ -257,7 +258,9 @@ class RaccoonProvider(
         val credential = parse(account) ?: return null
         return try {
             val (status, text) = getJson("$host$PATH_BALANCE", jsonHeaders(credential))
-            if (status !in 200..299) return CreditInfo(0, known = false, detail = "上游 HTTP $status")
+            if (status !in 200..299) {
+                return CreditInfo(0, known = false, detail = "上游 HTTP $status" + bodySnippet(text))
+            }
             val data = envelopeData(text) ?: return CreditInfo(0, known = false, detail = "响应缺少 data")
             // 不能走 firstLong：它把 0 当「未提供」，而积分真的是 0 与字段缺失必须区分——
             // 字段缺失要报 known=false（界面显示「—」），不能显示成「积分 0」。
@@ -270,7 +273,7 @@ class RaccoonProvider(
     }
 
     override fun classify(status: Int, body: String): UpstreamError {
-        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" }
+        val message = extractMessage(body).ifEmpty { "上游 HTTP $status" + bodySnippet(body) }
         val kind = when {
             status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA
