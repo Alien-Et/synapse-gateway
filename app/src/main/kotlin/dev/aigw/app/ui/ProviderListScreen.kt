@@ -68,7 +68,12 @@ fun ProviderListScreen(
         }
         for ((index, provider) in state.providers.withIndex()) {
             val ui = remember(provider.id) { ProviderUiRegistry.of(provider.id) }
-            SectionCard(modifier = Modifier.staggeredAppear(index).clickable { onOpen(provider.id) }) {
+            // enterIndex 交给 SectionCard 自己做错峰入场（不要叠两次 staggeredAppear，延迟会叠加）
+            SectionCard(
+                enterIndex = index,
+                pressable = true,
+                modifier = Modifier.clickable { onOpen(provider.id) },
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
