@@ -1258,8 +1258,13 @@ class GatewayEngine(
         val enabledProviders = registry.all().filter { providerSettings(it.id).enabled }
         if (enabledProviders.isEmpty()) return ModelsCatalog(emptyList())
 
-        // 刷新按钮要求忽略 TTL 缓存：在提交拉取任务前失效，保证任务里拿到的是新鲜上游结果
-        if (forceRefresh) enabledProviders.forEach { it.invalidateModelCache() }
+        // 刷新按钮要求忽略 TTL 缓存：在提交拉取任务前失效，保证任务里拿到的是新鲜上游结果。
+        // 路由归属缓存（resolveByModelOwnership 用的目录快照）也必须一起清：
+        // 否则刚登录的新账号/刚新增的模型要等 OWNERSHIP_CACHE_TTL_MILLIS 过期才参与路由判定。
+        if (forceRefresh) {
+            enabledProviders.forEach { it.invalidateModelCache() }
+            invalidateOwnershipCache()
+        }
 
         val futures = enabledProviders.map { provider ->
             provider.id to ioPool.submit<ProviderModelsChunk> {

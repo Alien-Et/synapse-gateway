@@ -32,17 +32,6 @@ data class ModelRate(
 
     /** 限时折扣标签，如 `0.39×`；没有折扣则为 null。 */
     fun discountLabel(): String? = discounted?.let { "${formatMultiplier(it)}×" }
-
-    /**
-     * 一行式倍率摘要，界面只展示这一处，避免同一模型出现两个倍率数字。
-     *
-     * 带折扣时写明「原价 → 现价」的关系，而不是把基准价与折后价分开两处展示。
-     */
-    fun summaryLabel(): String = when {
-        isFree -> "不消耗积分"
-        discounted != null -> "限时 ${discountLabel()}（${discountTag ?: "折扣"}，基准 ${baseLabel()}）"
-        else -> "基准 ${baseLabel()}"
-    }
 }
 
 /** 倍率数据来源，决定界面上的可信度标注。 */

@@ -118,13 +118,10 @@ class TraeProvider(
                     extra = buildMap {
                         if (upstreamRate != null) {
                             put("rate", formatUpstreamRate(upstreamRate) + "×")
-                            put("rateSource", "上游")
                         } else if (rate != null) {
                             put("rate", rate.baseLabel())
-                            put("rateSummary", rate.summaryLabel())
                             rate.discountLabel()?.let { put("rateDiscount", it) }
                             rate.discountTag?.let { put("rateDiscountTag", it) }
-                            put("rateNote", rate.note)
                         }
                     },
                 )

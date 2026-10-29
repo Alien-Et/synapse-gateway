@@ -328,7 +328,7 @@ class AntigravityProvider(
                     return CreditInfo(
                         0,
                         known = false,
-                        detail = "Google 上游拒绝了本次请求（403 VALIDATION_REQUIRED）",
+                        detail = "Google 要求验证该账号后才能查询额度",
                         actionHint = ACCOUNT_VERIFICATION_REQUIRED,
                     )
                 }
@@ -884,7 +884,20 @@ class AntigravityProvider(
             return CreditInfo(0, known = false, detail = "登录状态已失效，需要重新登录")
         }
         if (status !in 200..299) {
-            // 403 在额度端点是权限/订阅校验失败（#3501），不是凭证失效
+            // 403 在额度端点是权限/订阅校验失败（#3501），不是凭证失效。
+            // ⚠️ 这里必须同样按 details[].reason 区分 VALIDATION_REQUIRED：
+            // 实测 loadCodeAssist 可能返回 200，但真正取配额的 retrieveUserQuotaSummary
+            // 才报 403 VALIDATION_REQUIRED —— 只在上面那个分支判断是不够的。
+            val quotaReason = upstreamErrorReason(body)
+            if (status == 403 && quotaReason == "VALIDATION_REQUIRED") {
+                return CreditInfo(
+                    0,
+                    known = false,
+                    // detail 只留一句人话摘要，不写 reason 码——完整原因在 actionHint 里已经说清楚了
+                    detail = "$prefix$tierLabel · Google 要求验证该账号后才能查询配额",
+                    actionHint = ACCOUNT_VERIFICATION_REQUIRED,
+                )
+            }
             val hint = if (status == 403) "（非登录失效，是上游对客户端/账号的授权校验）" else ""
             return CreditInfo(
                 0,

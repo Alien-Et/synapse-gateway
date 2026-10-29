@@ -107,15 +107,25 @@ class ModelRateTest {
     }
 
     @Test
-    fun `一行式摘要把原价与折后价写在一处`() {
-        // 回归：徽标曾单独展示基准倍率、下方折扣行又展示折后价，
-        // 同一模型出现两个数字容易被误读成重复。
-        assertEquals("限时 0.08×（限时1折，基准 0.8×）", ModelRates.rateOf("Doubao-Seed-Evolving")!!.summaryLabel())
-        assertEquals("限时 0.39×（会员5折，基准 0.78×）", ModelRates.rateOf("glm-5.3")!!.summaryLabel())
-        // 无折扣的模型也必须看到具体数字，不能只剩来源行
-        assertEquals("基准 1.65×", ModelRates.rateOf("kimi-k3")!!.summaryLabel())
-        assertEquals("基准 0.7×", ModelRates.rateOf("glm-5")!!.summaryLabel())
-        assertEquals("不消耗积分", ModelRates.rateOf("custom_model_claude")!!.summaryLabel())
+    fun `基准价与折后价分别可取到`() {
+        // 界面只用 baseLabel + discountLabel 两个独立字段（rate / rateDiscount），
+        // 不再拼接一行式摘要——两个数字各有各的位置，不会被误读成重复。
+        val seed = ModelRates.rateOf("Doubao-Seed-Evolving")!!
+        assertEquals("0.8×", seed.baseLabel())
+        assertEquals("0.08×", seed.discountLabel())
+        assertEquals("限时1折", seed.discountTag)
+
+        val glm = ModelRates.rateOf("glm-5.3")!!
+        assertEquals("0.78×", glm.baseLabel())
+        assertEquals("0.39×", glm.discountLabel())
+
+        // 无折扣的模型：折扣标签为 null（界面就不画那一行）
+        val kimi = ModelRates.rateOf("kimi-k3")!!
+        assertEquals("1.65×", kimi.baseLabel())
+        assertEquals(null, kimi.discountLabel())
+
+        // 自定义模型不消耗积分
+        assertEquals("不消耗积分", ModelRates.rateOf("custom_model_claude")!!.baseLabel())
     }
 
     @Test

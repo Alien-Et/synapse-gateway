@@ -323,8 +323,30 @@ class AntigravityProviderTest {
         assertTrue(hint.contains("不需要在网关里重新登录"), hint)
         // 指引里不该出现 reason 码这类技术细节
         assertTrue(!hint.contains("VALIDATION_REQUIRED"), "指引不该暴露 reason 码：$hint")
-        // 技术细节留在 detail，便于排查
-        assertTrue(info.detail.contains("403"), info.detail)
+        // 技术细节留在 detail，但同样不暴露内部码
+        assertTrue(info.detail.isNotEmpty(), "detail 应有摘要")
+        assertTrue(!info.detail.contains("VALIDATION_REQUIRED"), "detail 不该暴露内部 reason：${info.detail}")
+    }
+
+    @Test
+    fun `配额接口返回 403 VALIDATION_REQUIRED 时也给可操作指引`() = withUpstream(
+        // 实测：loadCodeAssist 可能返回 200，真正取配额的 retrieveUserQuotaSummary 才 403
+        mapOf(
+            CREDITS_PATH to (200 to """{"currentTier":{"id":"free-tier"}}"""),
+            QUOTA_PATH to (403 to """
+                {"error":{"code":403,"message":"Verify your account to continue.",
+                  "status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+                  "reason":"VALIDATION_REQUIRED","domain":"cloudcode-pa.googleapis.com"}]}}
+            """.trimIndent()),
+        ),
+    ) { base, _ ->
+        val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+        assertTrue(!info.known)
+        assertTrue(info.actionHint.isNotEmpty(), "配额接口的 403 也必须给操作指引")
+        assertTrue(info.actionHint.contains("accounts.google.com"), info.actionHint)
+        // 不能把整段 JSON 塞进 detail
+        assertTrue(!info.detail.contains("@type"), "detail 不该贴整段 JSON：${info.detail}")
+        assertTrue(!info.detail.contains("VALIDATION_REQUIRED"), "detail 不该暴露内部 reason：${info.detail}")
     }
 
     @Test
