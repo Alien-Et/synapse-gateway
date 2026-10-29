@@ -470,15 +470,25 @@ private fun ModelRow(
                         )
                     }
                     if (discount != null) {
-                        // 文案优先级：上游给的 tag（如「会员5折」「限时免费」）> 默认「限时」；
-                        // 结束时间只有商汤会下发，有就带上。
+                        // 文案优先级：上游给的 tag（如「会员5折」「限时免费」）> 默认「限时」。
+                        //
+                        // ⚠️ tag 本身可能已经带日期（商汤的 `billing_discounts[].name`
+                        // 就叫「限免至10月31日」），这时再拼 rateDiscountUntil 会变成
+                        // 「限免至10月31日 0×（至 10月31日 23:59）」——同一日期出现两遍。
+                        // 所以 tag 里已经含日期就只用 tag，不再补时间；否则用「限时 X×（至 …）」。
                         val tag = extra["rateDiscountTag"]?.takeIf { it.isNotBlank() }
                         val until = extra["rateDiscountUntil"]?.takeIf { it.isNotBlank() }
-                        val prefix = tag ?: "限时"
+                        val tagHasDate = tag != null && DATE_IN_TEXT.containsMatchIn(tag)
                         Text(
-                            text = buildString {
-                                append("$prefix $discount")
-                                if (until != null) append("（至 $until）")
+                            text = when {
+                                // tag 已含日期：直接「限免至10月31日 0×」，最紧凑
+                                tagHasDate -> "$tag $discount"
+                                // 有独立截止时间：补到括号里
+                                until != null -> "${tag ?: "限时"} $discount（至 $until）"
+                                // 只有 tag
+                                tag != null -> "$tag $discount"
+                                // 什么都没有
+                                else -> "限时 $discount"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.tertiary,
@@ -620,3 +630,11 @@ private fun ModelSkeletonCard(
         }
     }
 }
+
+/**
+ * 判断一段文案里是否已经包含日期（如「限免至10月31日」「至 2026-10-31」）。
+ *
+ * 用于避免重复展示：商汤的折扣 tag 本身就带日期，若再拼一次 `rateDiscountUntil`
+ * 会变成「限免至10月31日 0×（至 10月31日 23:59）」，同一日期出现两遍。
+ */
+private val DATE_IN_TEXT = Regex("""\d{1,4}\s*[月/-]\s*\d{1,2}\s*[日号]?|\d{4}-\d{2}-\d{2}""")
