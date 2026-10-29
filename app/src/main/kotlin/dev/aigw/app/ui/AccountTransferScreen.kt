@@ -4,7 +4,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -162,34 +161,31 @@ fun AccountTransferScreen(
                     onSelectionChange = { exportSelection = it },
                 )
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlineActionButton(
-                    text = "复制到剪贴板",
-                    onClick = {
-                        if (exportCount == 0) {
-                            viewModel.notice("没有选中任何账号")
-                            return@OutlineActionButton
-                        }
-                        val json = currentExportJson()
-                        exportJson = json
-                        clipboard.setText(AnnotatedString(json))
-                        viewModel.notice("已复制 $exportCount 个账号到剪贴板")
-                    },
-                )
-                OutlineActionButton(
-                    text = "保存为文件",
-                    onClick = {
-                        if (exportCount == 0) {
-                            viewModel.notice("没有选中任何账号")
-                            return@OutlineActionButton
-                        }
-                        saveLauncher.launch("ai-gateway-accounts.json")
-                    },
-                )
-            }
+            // 两个出口竖排：上面复制到剪贴板，下面导出为 JSON 文件。
+            // 从前两个按钮挤在同一行，小屏下第二个容易被挤掉/看不全。
+            OutlineActionButton(
+                text = "复制到剪贴板",
+                onClick = {
+                    if (exportCount == 0) {
+                        viewModel.notice("没有选中任何账号")
+                        return@OutlineActionButton
+                    }
+                    val json = currentExportJson()
+                    exportJson = json
+                    clipboard.setText(AnnotatedString(json))
+                    viewModel.notice("已复制 $exportCount 个账号到剪贴板")
+                },
+            )
+            OutlineActionButton(
+                text = "导出为 JSON",
+                onClick = {
+                    if (exportCount == 0) {
+                        viewModel.notice("没有选中任何账号")
+                        return@OutlineActionButton
+                    }
+                    saveLauncher.launch("ai-gateway-accounts.json")
+                },
+            )
             if (exportJson.isNotEmpty()) {
                 // 让用户能核对到底导出了什么（凭证打码，只回显规模与账号名）
                 Text(
