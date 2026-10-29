@@ -1,12 +1,29 @@
 name: Android Release
 
-# 仅手动触发：只有在明确需要 release 包时才在云端构建并直接发版。
-# 本地开发一律走 debug 包（见 scripts/build.sh 与 app/build.gradle.kts 的 buildTypes.debug）。
+# 打标签即发版：push 一个 v* 标签 → 自动构建、跑测试、发布 Release、上传 APK，
+# 并把版本号递增后提交回 main（下次打标签直接用新版本号）。
+#
+# 版本号规则（打标签时自动校验）：
+#   - 标签必须是 v<主>.<次>.<修订>，例如 v2.23.0
+#   - 标签的版本必须与 app/build.gradle.kts 里当前 versionName 一致
+#     （若不一致会直接失败并提示，避免「标签写了 A、包里是 B」）
+#   - 发布成功后自动把 versionCode+1、versionName 的修订号+1 提交回 main，
+#     所以下一次打标签应该是 v2.23.1 → 再下一次 v2.23.2 ……
+#
+# 也支持手动触发（workflow_dispatch）：用当前 build.gradle.kts 里的版本号直接发版。
 on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  # 同一版本不并发跑两份，避免重复创建 Release 或重复递增版本号
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -14,8 +31,34 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # 生成 Release 说明需要上一个 tag 到本次的完整历史
+          # 生成 changelog 需要上一个 tag 到本次的完整历史；
+          # 递增版本号后要 push 回 main，需要完整分支信息
           fetch-depth: 0
+          # 用内置 token，后续 push 提交才有权限
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 校验标签与 build.gradle.kts 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+
+          # 只接受纯 主.次.修订 三段数字：v2.23.0 可以，v2.23.0-beta / v2.23 不行。
+          # 通配符 v[0-9]+.[0-9]+.[0-9]+ 会把 v2.23.0-beta 也带进来，所以这里再卡一次。
+          if ! echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::标签格式不对：$GITHUB_REF_NAME"
+            echo "::error::只接受 v<主>.<次>.<修订> 三段数字，例如 v2.23.0"
+            exit 1
+          fi
+
+          GRADLE_VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          echo "标签版本：$TAG"
+          echo "build.gradle.kts：$GRADLE_VERSION"
+          if [ "$TAG" != "$GRADLE_VERSION" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 与 build.gradle.kts 的 versionName $GRADLE_VERSION 不一致。"
+            echo "::error::请先把 app/build.gradle.kts 的 versionName 改成 $TAG（同时 versionCode +1），提交后再打标签。"
+            echo "::error::（上一版发布成功后，工作流已经把版本号递增到 $GRADLE_VERSION，直接用它打标签即可）"
+            exit 1
+          fi
 
       - uses: actions/setup-java@v5
         with:
@@ -58,8 +101,10 @@ jobs:
         id: version
         run: |
           VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          CODE=$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "本次版本：$VERSION"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "本次版本：$VERSION (versionCode $CODE)"
 
       - name: 生成更新日志（仅应用相关变化）
         id: changelog
@@ -90,3 +135,42 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           body: ${{ steps.changelog.outputs.body }}
           files: ai-gateway-${{ steps.version.outputs.version }}-release.apk
+
+      - name: 递增版本号并提交回 main
+        run: |
+          set -e
+          CUR_VERSION="${{ steps.version.outputs.version }}"
+          CUR_CODE="${{ steps.version.outputs.code }}"
+
+          # versionName 只递增修订号：2.23.0 → 2.23.1（主/次版本由人决定，不自动跳）
+          MAJOR=$(echo "$CUR_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$CUR_VERSION" | cut -d. -f2)
+          PATCH=$(echo "$CUR_VERSION" | cut -d. -f3)
+          NEXT_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          NEXT_CODE=$((CUR_CODE + 1))
+
+          echo "版本号：$CUR_VERSION ($CUR_CODE) → $NEXT_VERSION ($NEXT_CODE)"
+
+          # 用 sed 精确替换，避免误伤注释里的同类数字
+          sed -i -E "s/^(\s*versionCode = )$CUR_CODE\s*$/\1$NEXT_CODE/" app/build.gradle.kts
+          sed -i -E "s/^(\s*versionName = )\"$CUR_VERSION\"\s*$/\1\"$NEXT_VERSION\"/" app/build.gradle.kts
+
+          # 校验替换真的生效了，否则中断（宁可失败也不要悄悄提交错误版本号）
+          NEW_CODE=$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          NEW_NAME=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$NEW_CODE" != "$NEXT_CODE" ] || [ "$NEW_NAME" != "$NEXT_VERSION" ]; then
+            echo "::error::版本号替换失败（期望 $NEXT_VERSION/$NEXT_CODE，实际 $NEW_NAME/$NEW_CODE）"
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle.kts
+          # 多行提交信息用多个 -m 拼接（YAML 里直接写多行字符串会破坏缩进解析）
+          git commit \
+            -m "chore(release): 版本号 $NEXT_VERSION (versionCode $NEXT_CODE)" \
+            -m "由 Android Release 工作流在发布 v$CUR_VERSION 后自动递增。下次发版打标签 v$NEXT_VERSION 即可。"
+
+          # 标签触发时 HEAD 是游离头，必须显式推回 main 分支
+          git push origin HEAD:main
+

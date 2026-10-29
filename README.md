@@ -296,23 +296,60 @@ usage/...                         # 用量统计
 
 - 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app`，与 release 相同）。
 - 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
-- 本地**不产 release 包**：release 仅由云端 GitHub Actions 手动触发构建并发版，日常 push 不产生任何云端构建。
+- 本地**不产 release 包**：release 由云端 GitHub Actions 在**推送 `v*` 标签时**构建并发版。日常 push 分支不会触发任何云端构建。
 - 注意：debug 包用 AGP 默认 debug key 签名，与云端 release keystore 签名不同；在已装 release 版的设备上覆盖安装需 root（`pm install -r`）或卸载重装。
 
 ### GitHub Actions 工作流
 
-仓库里有 2 个工作流，都是手动触发（在 Actions 页面点按钮）：
+仓库里有 2 个工作流：
 
-| 工作流 | 作用 | 产物 |
+| 工作流 | 触发方式 | 作用 |
 |---|---|---|
-| `build-release.yml` | 跑测试 + 打 release 包，不创建 Release | artifact 上传，保留 14 天 |
-| `android-release.yml` | 跑测试 + 打 release 包 + 自动创建 Release + 打 tag | GitHub Release + APK 附件 |
+| `android-release.yml` | **push `v*` 标签** 或手动 | 跑测试 → 打 release 包 → 创建 Release + 上传 APK → **自动递增版本号并提交回 main** |
+| `build-release.yml` | 手动 | 只跑测试 + 打包，产物作为 artifact（不创建 Release），用于验证构建 |
+
+#### 发版流程：打标签即发版
+
+```sh
+# 1. 确认当前版本号（上一次发版后已自动递增好）
+grep -m1 'versionName' app/build.gradle.kts     # 例如 2.23.1
+
+# 2. 直接打标签并推送
+git tag -a v2.23.1 -m "v2.23.1"
+git push origin v2.23.1
+```
+
+推送标签后自动完成：
+1. 校验标签与 `build.gradle.kts` 的 `versionName` 一致
+2. 跑单元测试 → 打签名 release 包
+3. 创建 GitHub Release 并上传 APK
+4. **把 `versionCode` +1、`versionName` 的修订号 +1 提交回 main**
+
+所以下一次发版时，`build.gradle.kts` 里已经是新版本号了，直接打标签即可。
+
+#### 版本号规则
+
+| 场景 | 结果 |
+|---|---|
+| 当前 `2.23.0 (200)` 发布 `v2.23.0` | 自动提交 `2.23.1 (201)` |
+| 再发布 `v2.23.1` | 自动提交 `2.23.2 (202)` |
+| 想跳次版本（如 `2.24.0`） | 手动改 `build.gradle.kts` 后打 `v2.24.0` 标签 |
+
+> ⚠️ 标签必须是纯 `v<主>.<次>.<修订>` 三段数字。`v2.23.0-beta`、`v2.23` 会被拒绝。
+> ⚠️ 标签版本必须与 `build.gradle.kts` 一致，不一致会直接失败并提示当前版本号是多少。
+
+#### Secrets 配置
 
 两个工作流都需要在仓库 Settings → Secrets and variables → Actions 里配置 4 个 secrets：
 - `KEYSTORE_BASE64`：release keystore 的 base64 编码
 - `KEYSTORE_PASSWORD`：keystore 密码
 - `KEY_ALIAS`：key alias
 - `KEY_PASSWORD`：key 密码
+
+生成 base64：
+```sh
+base64 -w0 release.keystore > keystore.b64
+```
 
 > ⚠️ 工作流里安装的 build-tools 版本必须与 `app/build.gradle.kts` 的 `buildToolsVersion` 一致（当前都是 `36.0.0`），否则云端构建会失败。
 
