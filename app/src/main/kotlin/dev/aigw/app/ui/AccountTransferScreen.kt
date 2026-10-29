@@ -2,14 +2,13 @@ package dev.aigw.app.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
@@ -17,8 +16,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,23 +26,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.aigw.core.pool.AccountImportResult
 import dev.aigw.core.provider.ProviderAccount
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** 超过这个字符数的粘贴内容就折叠（要求：超过 50 字自动折叠）。 */
-private const val COLLAPSE_CHARS = 50
-
-/** 折叠时显示的行数。 */
-private const val COLLAPSED_LINES = 4
 
 /** 勾选树里的一行账号；导出（AccountStatus）与导入（ProviderAccount）共用。 */
 private data class SelectableAccount(val providerId: String, val uid: String, val nickname: String) {
@@ -55,10 +46,18 @@ private fun ProviderAccount.toSelectable() = SelectableAccount(providerId, uid, 
 /**
  * 账号导入导出。
  *
- * 粒度是「供应商 → 账号」两级：默认全部，也可以只导出某个供应商，或者只勾它下面的一两个账号；
- * 导入时同样先勾再导。
+ * ## 安全模型
  *
- * 凭证是明文：界面上明确写着含 token，别外传。导出不走网络，只经剪贴板或用户自己选的文件。
+ * 导出文件是**二进制 `.agw`**（魔数 AGW1），默认用用户口令 AES-256-GCM 加密。
+ * 口令可以为空——那样导出的就是头部带魔数的明文，方便临时自用，但界面上明确标了风险。
+ *
+ * **不再提供「粘贴 JSON」入口**：剪贴板是最容易泄漏 token 的地方
+ * （任何应用都能读，输入法也能看到），所以只走文件。
+ *
+ * ## 流程
+ *
+ * 导出：勾选账号 → 点「导出」→ 可选设口令 → 存成 .agw
+ * 导入：选 .agw → 需要口令就先输 → 预览勾选 → 导入
  */
 @Composable
 fun AccountTransferScreen(
@@ -67,23 +66,29 @@ fun AccountTransferScreen(
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
-    // 导出范围：全部 / 按勾选
+    // ---- 导出 ----
     var exportAll by remember { mutableStateOf(true) }
     var exportSelection by remember { mutableStateOf(emptySet<String>()) }
-    var exportJson by remember { mutableStateOf("") }
+    var showExportPassword by remember { mutableStateOf(false) }
+    var exportPassword by remember { mutableStateOf("") }
+    // 选完保存位置后暂存的 URI：重组件时不能丢，否则锁屏/旋转后导出就断了
+    var pendingExportUri by remember { mutableStateOf<android.net.Uri?>(null) }
 
-    // 导入
-    var importText by remember { mutableStateOf("") }
+    // ---- 导入 ----
+    // 选完文件后先暂存字节，等（如需）口令输入再解密。
+    var pendingBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var pendingNeedsPassword by remember { mutableStateOf(false) }
+    var showImportPassword by remember { mutableStateOf(false) }
+    var importPassword by remember { mutableStateOf("") }
     var parsed by remember { mutableStateOf<List<SelectableAccount>?>(null) }
+    var parsedJson by remember { mutableStateOf("") }
     var importSelection by remember { mutableStateOf(emptySet<String>()) }
     var overwrite by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<AccountImportResult?>(null) }
     var importError by remember { mutableStateOf("") }
 
-    // 导出账号（用于按钮文案里的数量）
     val exportGroups = state.providers
         .map { info ->
             info.id to state.accountsOf(info.id).map { SelectableAccount(it.providerId, it.uid, it.nickname) }
@@ -91,22 +96,71 @@ fun AccountTransferScreen(
         .filter { it.second.isNotEmpty() }
     val exportCount = if (exportAll) exportGroups.sumOf { it.second.size } else exportSelection.size
 
-    fun currentExportJson(): String =
-        viewModel.exportAccountsJson(if (exportAll) emptySet() else exportSelection)
-
-    val saveLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json"),
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    /** 真正写文件：加密与否取决于口令是否为空。 */
+    fun writeExport(password: String) {
         scope.launch {
-            val json = withContext(Dispatchers.IO) { currentExportJson() }
+            val payload = withContext(Dispatchers.IO) {
+                val json = viewModel.exportAccountsJson(if (exportAll) emptySet() else exportSelection)
+                dev.aigw.core.pool.AccountTransferCodec.encode(json, password)
+            }
+            val uri = pendingExportUri ?: return@launch
+            pendingExportUri = null
             val ok = withContext(Dispatchers.IO) {
                 runCatching {
-                    context.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) } != null
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(payload) } != null
                 }.getOrDefault(false)
             }
-            viewModel.notice(if (ok) "已导出 $exportCount 个账号" else "写入文件失败")
+            viewModel.notice(
+                when {
+                    !ok -> "写入文件失败"
+                    password.isEmpty() -> "已导出 $exportCount 个账号（未加密）"
+                    else -> "已导出 $exportCount 个账号（已加密）"
+                },
+            )
         }
+    }
+
+    /** 解密已选文件并把预览填好。 */
+    fun decodePending(password: String) {
+        val bytes = pendingBytes ?: return
+        scope.launch {
+            val decoded = withContext(Dispatchers.IO) {
+                runCatching { dev.aigw.core.pool.AccountTransferCodec.decode(bytes, password) }
+            }
+            decoded.fold(
+                onSuccess = { json ->
+                    runCatching { viewModel.parseAccountTransfer(json) }
+                        .onSuccess { accounts ->
+                            val list = accounts.map { it.toSelectable() }
+                            parsed = list
+                            parsedJson = json
+                            importSelection = list.map { it.key }.toSet()
+                            importError = ""
+                            result = null
+                            showImportPassword = false
+                            pendingBytes = null
+                        }
+                        .onFailure { e ->
+                            importError = e.message ?: "解析失败"
+                        }
+                },
+                onFailure = { e ->
+                    // 口令错时不要清掉 pendingBytes：用户可能只是打错，改一下再试
+                    importError = e.message ?: "无法读取文件"
+                },
+            )
+        }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri == null) {
+            showExportPassword = false
+            return@rememberLauncherForActivityResult
+        }
+        pendingExportUri = uri
+        writeExport(exportPassword)
     }
 
     val openLauncher = rememberLauncherForActivityResult(
@@ -114,19 +168,25 @@ fun AccountTransferScreen(
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val text = withContext(Dispatchers.IO) {
-                runCatching {
-                    context.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) }
-                }.getOrNull()
+            importError = ""
+            parsed = null
+            result = null
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } }.getOrNull()
             }
-            if (text.isNullOrBlank()) {
+            if (bytes == null || bytes.isEmpty()) {
                 importError = "读取文件失败或文件为空"
                 return@launch
             }
-            importText = text
-            parsed = null
-            importError = ""
-            result = null
+            pendingBytes = bytes
+            if (dev.aigw.core.pool.AccountTransferCodec.isEncrypted(bytes)) {
+                // 加密文件：先问口令，问完再解密
+                pendingNeedsPassword = true
+                showImportPassword = true
+                importPassword = ""
+            } else {
+                decodePending("")
+            }
         }
     }
 
@@ -135,10 +195,12 @@ fun AccountTransferScreen(
         subtitle = "备份与迁移",
         leading = { BackButton(onBack) },
     ) {
+        // ================= 导出 =================
         SectionCard(enterIndex = 0) {
             SectionLabel("导出 · EXPORT")
             Text(
-                text = "导出的内容含各账号的登录凭证（token），请勿外传。走剪贴板或你选定的文件，全程不联网。",
+                text = "导出文件是二进制 .agw，默认用你设的口令加密（AES-256-GCM）。" +
+                    "口令留空则导为明文——那样任何人都能读出里面的 token，只适合临时自用。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
@@ -161,117 +223,26 @@ fun AccountTransferScreen(
                     onSelectionChange = { exportSelection = it },
                 )
             }
-            // 两个出口竖排：上面复制到剪贴板，下面导出为 JSON 文件。
-            // 从前两个按钮挤在同一行，小屏下第二个容易被挤掉/看不全。
-            OutlineActionButton(
-                text = "复制到剪贴板",
-                onClick = {
-                    if (exportCount == 0) {
-                        viewModel.notice("没有选中任何账号")
-                        return@OutlineActionButton
-                    }
-                    val json = currentExportJson()
-                    exportJson = json
-                    clipboard.setText(AnnotatedString(json))
-                    viewModel.notice("已复制 $exportCount 个账号到剪贴板")
-                },
-            )
-            OutlineActionButton(
-                text = "导出为 JSON",
-                onClick = {
-                    if (exportCount == 0) {
-                        viewModel.notice("没有选中任何账号")
-                        return@OutlineActionButton
-                    }
-                    saveLauncher.launch("ai-gateway-accounts.json")
-                },
-            )
-            if (exportJson.isNotEmpty()) {
-                // 让用户能核对到底导出了什么（凭证打码，只回显规模与账号名）
-                Text(
-                    text = "最近一次导出：${exportJson.length} 字符",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            OutlineActionButton("导出为 .agw 文件") {
+                if (exportCount == 0) {
+                    viewModel.notice("没有选中任何账号")
+                    return@OutlineActionButton
+                }
+                exportPassword = ""
+                showExportPassword = true
             }
         }
 
+        // ================= 导入 =================
         SectionCard(enterIndex = 1) {
             SectionLabel("导入 · IMPORT")
             Text(
-                text = "粘贴导出内容，或选择一个 .json 文件；内容一贴进来就自动识别，列出账号后可勾选要导入哪些。",
+                text = "选择一个 .agw 文件。加密文件会先问口令，然后列出账号供你勾选。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            // 粘贴框：内容超过 COLLAPSE_CHARS 就折叠成几行，右上角给一个展开/折叠按钮。
-            // 长 JSON 铺满整屏会把下面的「导入」按钮顶出视口，折叠后一屏能同时看到入口与按钮。
-            var pasteExpanded by remember { mutableStateOf(false) }
-            val collapsible = importText.length > COLLAPSE_CHARS
-            Box(modifier = Modifier.fillMaxWidth()) {
-                OutlinedTextField(
-                    value = importText,
-                    onValueChange = {
-                        importText = it
-                        result = null
-                    },
-                    modifier = Modifier.fillMaxWidth().animateContentSize(),
-                    // 折叠时只占几行；展开时按实际内容铺开（内部仍可滚动）
-                    minLines = 3,
-                    maxLines = if (collapsible && !pasteExpanded) COLLAPSED_LINES else Int.MAX_VALUE,
-                    label = { Text("粘贴导出内容") },
-                )
-                if (collapsible) {
-                    Text(
-                        text = if (pasteExpanded) "折叠" else "展开",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(top = 6.dp, end = 10.dp)
-                            .clip(MaterialTheme.shapes.small)
-                            .clickable { pasteExpanded = !pasteExpanded }
-                            .padding(horizontal = 6.dp, vertical = 2.dp),
-                    )
-                }
-            }
-            if (collapsible && !pasteExpanded) {
-                Text(
-                    text = "已折叠 ${importText.length} 字符，点右上角「展开」看全文",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            OutlineActionButton(
-                text = "从文件选择 .json",
-                onClick = { openLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
-            )
-
-            // 粘贴即识别：不再要求先点一下「解析」。防抖 250ms，输入过程中不涋解析错误。
-            // 这里只读 importText，解析结果与错误都回到同一个状态，界面不因重复触发而闪跳。
-            LaunchedEffect(importText) {
-                val text = importText.trim()
-                if (text.isEmpty()) {
-                    parsed = null
-                    importError = ""
-                    return@LaunchedEffect
-                }
-                delay(250)
-                runCatching { viewModel.parseAccountTransfer(text) }
-                    .onSuccess { accounts ->
-                        parsed = accounts.map { it.toSelectable() }
-                        // 只保留仍然存在的勾选项，避免换一份文件后沿用上一份的选择
-                        val keys = accounts.map { it.toSelectable().key }.toSet()
-                        importSelection = if (importSelection.isEmpty() || !keys.containsAll(importSelection)) {
-                            keys
-                        } else {
-                            importSelection.intersect(keys)
-                        }
-                        importError = ""
-                    }
-                    .onFailure { e ->
-                        parsed = null
-                        importError = e.message ?: "解析失败"
-                    }
+            OutlineActionButton("选择 .agw 文件") {
+                openLauncher.launch(arrayOf("application/octet-stream", "application/*", "*/*"))
             }
 
             if (importError.isNotEmpty()) {
@@ -279,12 +250,6 @@ fun AccountTransferScreen(
                     text = importError,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
-                )
-            } else if (importText.isNotBlank() && parsed == null) {
-                Text(
-                    text = "正在识别…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -318,14 +283,13 @@ fun AccountTransferScreen(
                     }
                     Switch(checked = overwrite, onCheckedChange = { overwrite = it })
                 }
-                // 主操作放列表之前：账号多时不用滚到底才能找到导入按钮
                 Button(
                     onClick = {
                         if (importSelection.isEmpty()) {
                             importError = "没有选中任何账号"
                             return@Button
                         }
-                        result = viewModel.importAccountsJson(importText, importSelection, overwrite)
+                        result = viewModel.importAccountsJson(parsedJson, importSelection, overwrite)
                         importError = ""
                         viewModel.refresh()
                     },
@@ -368,6 +332,81 @@ fun AccountTransferScreen(
             }
         }
     }
+
+    // ---------------- 导出口令 ----------------
+    if (showExportPassword) {
+        PasswordDialog(
+            title = "设置导出口令",
+            description = "口令用于加密这个文件。留空则不加密（明文，能直接读到 token）。",
+            confirmText = if (exportPassword.isEmpty()) "不加密导出" else "加密导出",
+            password = exportPassword,
+            onPasswordChange = { exportPassword = it },
+            onConfirm = {
+                showExportPassword = false
+                saveLauncher.launch("ai-gateway-accounts.agw")
+            },
+            onDismiss = { showExportPassword = false },
+        )
+    }
+
+    // ---------------- 导入口令 ----------------
+    if (showImportPassword) {
+        PasswordDialog(
+            title = "输入导出口令",
+            description = if (importError.isEmpty()) {
+                "这个文件是加密的，请输入导出时设置的口令。"
+            } else {
+                importError
+            },
+            confirmText = "解密",
+            password = importPassword,
+            onPasswordChange = { importPassword = it },
+            onConfirm = {
+                decodePending(importPassword)
+            },
+            onDismiss = {
+                showImportPassword = false
+                pendingBytes = null
+                pendingNeedsPassword = false
+            },
+            confirmEnabled = importPassword.isNotEmpty(),
+        )
+    }
+}
+
+/** 口令输入弹窗（导出/导入共用）。 */
+@Composable
+private fun PasswordDialog(
+    title: String,
+    description: String,
+    confirmText: String,
+    password: String,
+    onPasswordChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    confirmEnabled: Boolean = true,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(description, style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = onPasswordChange,
+                    label = { Text("口令") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = confirmEnabled) { Text(confirmText) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 /**
@@ -402,9 +441,7 @@ private fun AccountTree(
             Checkbox(
                 checked = allSelected,
                 onCheckedChange = { on ->
-                    onSelectionChange(
-                        if (on) selected + keys else selected - keys.toSet(),
-                    )
+                    onSelectionChange(if (on) selected + keys else selected - keys.toSet())
                 },
                 modifier = Modifier.size(24.dp),
             )
