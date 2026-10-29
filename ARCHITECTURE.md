@@ -211,6 +211,18 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
     > 历史弯路（不要再重复）：曾试过 `antigravity/cli/<ver>`、带 `(aidev_client; cl=..)` 段的完整 hub 形态、`ideType` 在 `ANTIGRAVITY`/`IDE_UNSPECIFIED` 间探测、给 metadata 补齐 `platform`/`pluginType`——这些都没能解决 #3501，且客户端形态已被官方论坛证伪（同一账号官方 IDE 正常、直连 API 仍 403）。
   - `resolveModel` 先查「模型目录里真有的 id」再做子串路由：`gemini-4-argon` 含 `pro`，否则会被改写成 `gemini-pro-agent`。
   - **额度查询路径的 403 不等于登录失效**：403 常见于权限/订阅分流（free-tier 访问部分 RPC 返回 `SUBSCRIPTION_REQUIRED`），此时应降级继续查配额并把真实状态码写进 detail；只有 401 才是重新登录。对话路径的 `classify` 仍保持 401/403 → `SESSION_DEAD`（见第 5 节铁律，勿改）。
+  - ⚠️ **403 要按 `details[].reason` 分类**，否则用户拿着一坨 JSON 不知道怎么办：
+    ```json
+    {"error":{"code":403,"status":"PERMISSION_DENIED",
+      "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+                  "reason":"VALIDATION_REQUIRED","domain":"cloudcode-pa.googleapis.com"}]}}
+    ```
+    | reason | 含义 | 处理 |
+    |---|---|---|
+    | `VALIDATION_REQUIRED` | **账号本身需要完成人机验证** | 直接返回可操作提示（去 `accounts.google.com` 验证），**不再拿同一 token 去查配额**（必然也 403），并明说「不是登录失效、无需重登网关」 |
+    | `SUBSCRIPTION_REQUIRED` | 免费账号访问会员 RPC | 正常，降级继续查配额 |
+    | 无 reason | 客户端形态被拒（#3501） | 按未知 403 处理 |
+  - 提示里用 `error.message`（如 "Verify your account to continue."）而不是整段 JSON。
 
 ### 腾讯（CodeBuddy）
 - 上游**拒绝非流式**：必须强制 `stream:true`，网关侧聚合。

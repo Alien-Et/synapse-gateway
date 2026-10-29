@@ -319,12 +319,20 @@ class AntigravityProvider(
             // 会让用户白白重登一遍；只有 401 才是凭证真的无效。
             paidStatus == 401 ->
                 return CreditInfo(0, known = false, detail = "登录状态已失效，需要重新登录")
-            paidStatus !in 200..299 ->
+            paidStatus !in 200..299 -> {
+                // 403 要按上游给的 reason 分类，不然用户拿着一坨 JSON 不知道该怎么办。
+                // VALIDATION_REQUIRED 是**账号本身需要人机验证**，跟网关和登录态都无关；
+                // 这种情况下再拿同一个 token 去查配额也会 403，直接返回不再多打一次上游。
+                val reason = upstreamErrorReason(paidBody)
+                if (paidStatus == 403 && reason == "VALIDATION_REQUIRED") {
+                    return CreditInfo(0, known = false, detail = ACCOUNT_VERIFICATION_REQUIRED)
+                }
                 return quotaCreditInfo(
                     credential,
                     "订阅未知",
-                    prefix = "查询积分失败（HTTP $paidStatus）：${paidBody.take(120)}；",
+                    prefix = "查询积分失败（HTTP $paidStatus）：${upstreamErrorMessage(paidBody).take(160)}；",
                 )
+            }
         }
         val assist = parsePaidAssist(paidBody)
         if (assist?.credits != null) {
@@ -607,6 +615,34 @@ class AntigravityProvider(
             payload,
             userAgent = userAgent(),
         )
+    }
+
+    /**
+     * 从上游错误响应里取 `error.details[].reason`。
+     *
+     * Google 的 403 会把具体原因放在 `details[]` 的 `google.rpc.ErrorInfo` 里：
+     * ```json
+     * {"error":{"code":403,"status":"PERMISSION_DENIED",
+     *   "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+     *               "reason":"VALIDATION_REQUIRED",
+     *               "domain":"cloudcode-pa.googleapis.com"}]}}
+     * ```
+     * 解析不出来返回空串（按未知 403 处理）。
+     */
+    private fun upstreamErrorReason(body: String): String {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return ""
+        val details = obj.objOrNull("error")?.arrayOrNull("details") ?: return ""
+        for (element in details) {
+            val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            item.stringOrNull("reason")?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        return ""
+    }
+
+    /** 从上游错误响应里取 `error.message`（比整段 JSON 精简，便于放进一行提示）。 */
+    private fun upstreamErrorMessage(body: String): String {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return body
+        return obj.objOrNull("error")?.stringOrNull("message")?.takeIf { it.isNotEmpty() } ?: body
     }
 
     private fun open(url: String, accessToken: String, body: String?): HttpURLConnection {
@@ -1052,6 +1088,18 @@ class AntigravityProvider(
 
     companion object {
         const val ID = "antigravity"
+
+        /**
+         * 上游 403 `VALIDATION_REQUIRED` 的提示。
+         *
+         * 这**不是**登录失效、也不是网关的问题：Google 判定该账号需要完成一次人机验证，
+         * 没验证完之前 `cloudcode-pa.googleapis.com` 一律拒绝（对话与额度查询都会 403）。
+         * 提示必须直接给出解决办法，否则用户只会看到一坨 JSON 不知道点哪里。
+         */
+        const val ACCOUNT_VERIFICATION_REQUIRED =
+            "Google 账号需要完成人机验证（上游返回 403 VALIDATION_REQUIRED），" +
+                "不是登录失效。请用浏览器打开 https://accounts.google.com 登录该账号并按提示完成验证，" +
+                "验证通过后回到这里点「刷新额度」即可，无需重新登录网关。"
 
         const val CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
         // 这是 Google 为「已安装应用」（installed-app）OAuth 客户端下发的公开 client_secret：

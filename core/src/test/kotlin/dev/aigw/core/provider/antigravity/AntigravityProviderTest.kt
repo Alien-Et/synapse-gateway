@@ -300,6 +300,42 @@ class AntigravityProviderTest {
     }
 
     @Test
+    fun `creditInfo 在 403 VALIDATION_REQUIRED 时给出可操作的验证提示`() = withUpstream(
+        // 真实上游响应（2026-10 实测）：账号需要人机验证
+        both(
+            403,
+            """
+            {"error":{"code":403,"message":"Verify your account to continue.",
+              "status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+              "reason":"VALIDATION_REQUIRED","domain":"cloudcode-pa.googleapis.com"}]}}
+            """.trimIndent(),
+        ),
+    ) { base, _ ->
+        val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+        assertTrue(!info.known, "403 时额度未知")
+        // 不能报成「登录失效」——那会让用户白白重登一遍
+        assertTrue(!info.detail.contains("登录状态已失效"), info.detail)
+        assertTrue(info.detail.contains("人机验证"), info.detail)
+        assertTrue(info.detail.contains("accounts.google.com"), "要给出验证入口：${info.detail}")
+        // 明确告诉用户不用重登网关
+        assertTrue(info.detail.contains("无需重新登录"), info.detail)
+    }
+
+    @Test
+    fun `creditInfo 在其他 403 时保留上游 message 而不贴整段 JSON`() = withUpstream(
+        both(
+            403,
+            """{"error":{"code":403,"message":"Subscription required.","status":"PERMISSION_DENIED"}}""",
+        ),
+    ) { base, _ ->
+        val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+        assertTrue(!info.known)
+        assertTrue(info.detail.contains("Subscription required"), "应带上游 message：${info.detail}")
+        // 不再把 details 整段 JSON 塞进提示
+        assertTrue(!info.detail.contains("@type"), "不该贴整段 JSON：${info.detail}")
+    }
+
+    @Test
     fun `creditInfo 在其他非 2xx 时带状态码与上游原文`() = withUpstream(
         both(500, """{"error":{"message":"boom"}}"""),
     ) { base, _ ->
