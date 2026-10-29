@@ -29,7 +29,7 @@ class ModelCooldownRoutingTest {
     /** 每次调用都回「该模型已超限」；记录被调用次数。 */
     private inner class ModelLimitProvider : Provider {
         var calls = 0
-        override val id = "ml"
+        override val id = "codebuddy"
         override val displayName = "模型限额桩"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) =
@@ -48,7 +48,7 @@ class ModelCooldownRoutingTest {
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.outputStream.write(
-            """{"model":"ml/hot","messages":[{"role":"user","content":"hi"}]}""".toByteArray(Charsets.UTF_8),
+            """{"model":"腾讯国内/hot","messages":[{"role":"user","content":"hi"}]}""".toByteArray(Charsets.UTF_8),
         )
         val code = conn.responseCode
         val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
@@ -57,7 +57,7 @@ class ModelCooldownRoutingTest {
     }
 
     @Test
-    fun `模型级限额不换号、不计熔断，并在冷却期内直接跳过`() {
+    fun `模型级限额先换号，试完才冷却且不计熔断`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         val provider = ModelLimitProvider()
         engine.registry.register(provider)
@@ -69,7 +69,9 @@ class ModelCooldownRoutingTest {
         try {
             val (code1, _) = post(server.listeningPort)
             assertTrue(code1 >= 400, "该模型不可用时应明确失败，实际 $code1")
-            assertEquals(1, provider.calls, "模型级错误不得换号重试（只应打一次上游）")
+            // 主人要求：先换号，而不是一上来就打断用户。
+            // 两个账号都会各试一次，都撞同一道墙才算真失败。
+            assertEquals(2, provider.calls, "模型级错误应先换同家其它账号各试一次")
 
             // 熔断阈值默认 5：若模型级错误被计入，连续几次就会把整个供应商熔断
             assertEquals(
@@ -77,9 +79,12 @@ class ModelCooldownRoutingTest {
                 engine.circuitBreakerOf(provider.id).currentState(),
                 "模型级限额不代表供应商故障，不得计入熔断",
             )
+            // 首次请求已经把该模型打入冷却（两个号都撞了同一道墙），
+            // 之后的请求必须直接跳过，不再打上游。
+            val callsBeforeCooldown = provider.calls
             repeat(6) { post(server.listeningPort) }
             assertEquals(BreakerState.CLOSED, engine.circuitBreakerOf(provider.id).currentState())
-            assertEquals(1, provider.calls, "冷却期内必须直接跳过，不再打上游")
+            assertEquals(callsBeforeCooldown, provider.calls, "冷却期内必须直接跳过，不再打上游")
 
             val (_, body) = post(server.listeningPort)
             assertTrue(body.contains("冷却"), "应给出「冷却中」的原因，实际：$body")

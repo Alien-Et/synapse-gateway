@@ -53,7 +53,7 @@ class SseStreamTerminationTest {
     }
 
     private inner class FramingProvider(private val body: String) : Provider {
-        override val id = "framing"
+        override val id = "codebuddy"
         override val displayName = "收尾桩上游"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(emptyList(), true, "")
@@ -66,7 +66,7 @@ class SseStreamTerminationTest {
     private fun withServer(body: String, block: (port: Int) -> Unit) {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(FramingProvider(body))
-        engine.pool.upsert(ProviderAccount("framing", "u1", "桩账号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "桩账号", "{}"))
         val server = GatewayHttpServer(engine, "127.0.0.1", 0)
         server.start(0, true)
         try {
@@ -78,7 +78,7 @@ class SseStreamTerminationTest {
 
     /** 发一个流式请求，返回客户端解分块后拿到的完整 SSE 文本。 */
     private fun streamBody(port: Int): String {
-        val body = """{"model":"framing/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
+        val body = """{"model":"腾讯国内/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
         val conn = java.net.URL("http://127.0.0.1:$port/v1/chat/completions")
             .openConnection() as java.net.HttpURLConnection
         conn.requestMethod = "POST"

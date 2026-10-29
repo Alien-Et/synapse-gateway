@@ -66,6 +66,8 @@ class SmartRoutingTest {
     fun `带别名前缀能正确路由且不区分大小写`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(DummyProvider("antigravity"))
+        // 新规则：标签必须指向一个「已启用且有账号」的供应商，否则标签作废。
+        engine.pool.upsert(ProviderAccount("antigravity", "u1", "谷歌账号", "{}"))
 
         assertEquals("antigravity", engine.resolveRoute("谷歌/gemini-2.5-flash")?.providerId)
         assertEquals("gemini-2.5-flash", engine.resolveRoute("谷歌/gemini-2.5-flash")?.model)
@@ -85,6 +87,10 @@ class SmartRoutingTest {
         // 内置 CodeBuddyProvider 已实现 RegionAwareSupport；这里用替身覆盖同名 id，
         // 因为模型目录只在登录后拉取，无内置快照后单测里拿不到真实目录。
         engine.registry.register(RegionStubProvider("codebuddy", listOf("cn", "global")))
+        // 账号必须先加：新的标签规则要求标签指向的供应商「已启用且有账号」，
+        // 否则标签会被判无效、直接返回 null。
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u-global", "国外号", "{}"))
 
         val routeCn = engine.resolveRoute("腾讯国内/deepseek-v3")
         assertEquals("codebuddy", routeCn?.providerId)
@@ -96,12 +102,15 @@ class SmartRoutingTest {
         assertEquals("claude-3-5-sonnet", routeGlobal?.model)
         assertEquals("global", routeGlobal?.region)
 
-        // 裸中文品牌名不带区域约束（不限制区域，所有账号都能用）
-        assertEquals(null, engine.resolveRoute("腾讯/deepseek-v3")?.region)
+        // 裸中文品牌名（腾讯 / 字节）不再识别：区域型供应商只认带区域的写法，
+        // 所以「腾讯/deepseek-v3」会整串当模型名处理，不应该解析出 codebuddy 前缀
+        val bare = engine.resolveRoute("腾讯/deepseek-v3")
+        assertTrue(
+            bare == null || bare.model != "deepseek-v3" || bare.providerId != "codebuddy",
+            "裸品牌前缀不应再被识别：$bare",
+        )
 
         // 模型列表里针对区域型供应商拆出两个独立前缀组（每个区域各用本区域账号拉一次）
-        engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
-        engine.pool.upsert(ProviderAccount("codebuddy", "u-global", "国外号", "{}"))
         val models = engine.models().filter { it.providerId == "codebuddy" }
         val prefixes = models.map { it.routePrefix }.distinct()
         assertTrue(prefixes.contains("腾讯国内"), "应包含国内组前缀：$prefixes")
@@ -141,23 +150,22 @@ class SmartRoutingTest {
     }
 
     @Test
-    fun `无前缀时按模型所在区域自动选站`() {
+    fun `没标签时一律不路由`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(SplitRegionProvider("codebuddy"))
         engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
         engine.pool.upsert(ProviderAccount("codebuddy", "u-global", "国外号", "{}"))
 
-        // 只在国外站的模型 → 必须带上 global 区域约束，不能发给国内账号
-        val globalRoute = engine.resolveRoute("global-only-model")
-        assertNotNull(globalRoute)
-        assertEquals("codebuddy", globalRoute.providerId)
-        assertEquals("global", globalRoute.region, "只在国外的模型应该路由到国外账号")
+        // 新规则：不存在「无标签」这回事。哪怕目录里真能查到，也不给路由。
+        assertTrue(engine.resolveRoute("global-only-model") == null, "无标签不得路由")
+        assertTrue(engine.resolveRoute("cn-only-model") == null, "无标签不得路由")
 
-        // 只在国内站的模型 → cn
-        val cnRoute = engine.resolveRoute("cn-only-model")
-        assertNotNull(cnRoute)
-        assertEquals("codebuddy", cnRoute.providerId)
-        assertEquals("cn", cnRoute.region, "只在国内的模型应该路由到国内账号")
+        // 写了标签才走，且区域由标签决定
+        val viaGlobal = engine.resolveRoute("腾讯国外/global-only-model")
+        assertEquals("codebuddy", viaGlobal?.providerId)
+        assertEquals("global", viaGlobal?.region)
+        val viaCn = engine.resolveRoute("腾讯国内/cn-only-model")
+        assertEquals("cn", viaCn?.region)
     }
 
     @Test
@@ -181,14 +189,46 @@ class SmartRoutingTest {
         engine.registry.register(DummyProvider("antigravity"))
         engine.registry.register(DummyProvider("loomy"))
         engine.registry.register(DummyProvider("raccoon"))
+        // 每个供应商都要有账号，否则标签会被判无效（未登录的标签直接作废）
+        listOf("codebuddy", "trae", "antigravity", "loomy", "raccoon").forEach {
+            engine.pool.upsert(ProviderAccount(it, "u-$it", "$it 号", "{}"))
+        }
 
-        // 中文前缀
-        assertEquals("codebuddy", engine.resolveRoute("腾讯/glm-5.2")?.providerId)
-        assertEquals("trae", engine.resolveRoute("字节/qwen-max")?.providerId)
+        // 中文前缀：区域型供应商必须带区域后缀
+        assertEquals("codebuddy", engine.resolveRoute("腾讯国内/glm-5.2")?.providerId)
+        assertEquals("codebuddy", engine.resolveRoute("腾讯国外/glm-5.2")?.providerId)
+        assertEquals("trae", engine.resolveRoute("字节国内/qwen-max")?.providerId)
+        assertEquals("trae", engine.resolveRoute("字节国外/qwen-max")?.providerId)
         assertEquals("antigravity", engine.resolveRoute("谷歌/gemini-3.8")?.providerId)
         assertEquals("loomy", engine.resolveRoute("讯飞/spark-4")?.providerId)
         assertEquals("raccoon", engine.resolveRoute("商汤/raccoon-chat")?.providerId)
-        assertEquals("glm-5.2", engine.resolveRoute("腾讯/glm-5.2")?.model)
+        assertEquals("glm-5.2", engine.resolveRoute("腾讯国内/glm-5.2")?.model)
+
+        // 裸品牌前缀（腾讯 / 字节）已删除：区域标签本身就带国内/国外，裸品牌无意义
+        listOf("腾讯/glm-5.2", "字节/qwen-max").forEach { bare ->
+            val r = engine.resolveRoute(bare)
+            assertTrue(
+                r == null || r.model != bare.substringAfter('/'),
+                "裸品牌前缀不应再被识别：$bare -> $r",
+            )
+        }
+
+        // 小浣熊已全面改名为商汤，旧前缀不再识别
+        val oldRaccoon = engine.resolveRoute("小浣熊/raccoon-chat")
+        assertTrue(
+            oldRaccoon == null || oldRaccoon.model != "raccoon-chat" || oldRaccoon.providerId != "raccoon",
+            "小浣熊前缀应已删除：$oldRaccoon",
+        )
+
+        // 区域型供应商只保留「国内 / 国外」两种写法，『中国 / 国际』别名已删除。
+        // 简单的问题不复杂化：两套同义写法只会让人以为有区别。
+        listOf("腾讯中国/glm-5.2", "腾讯国际/glm-5.2", "字节中国/qwen-max", "字节国际/qwen-max").forEach { alias ->
+            val r = engine.resolveRoute(alias)
+            assertTrue(
+                r == null || r.model != alias.substringAfter('/'),
+                "中国/国际 别名应已删除：$alias -> $r",
+            )
+        }
 
         // 英文前缀不再被当作供应商前缀：整串会按"无前缀"处理，
         // 前缀部分不会被剥掉（避免出现「英文也偷偷能用」的两套写法）。
@@ -202,43 +242,93 @@ class SmartRoutingTest {
 
 
     @Test
-    fun `无前缀时按模型真实归属路由而非谁先注册`() {
+    fun `选了哪家就只去哪家不再根据目录归属跨家`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
-        // 腾讯（codebuddy）只有 deepseek / glm；字节（trae）才有 qwen 与 seed。
-        // 两家都有账号 —— 正是原先「谁先注册用谁」会出错的前提。
         engine.registry.register(CatalogProvider("codebuddy", listOf("deepseek-v3", "glm-5.2")))
         engine.registry.register(CatalogProvider("trae", listOf("qwen-max", "seed-1.6")))
         engine.pool.upsert(ProviderAccount("codebuddy", "u1", "腾讯号", "{}"))
         engine.pool.upsert(ProviderAccount("trae", "t1", "字节号", "{}"))
 
-        // 用腾讯的模型就路由到腾讯
-        assertEquals("codebuddy", engine.resolveRoute("deepseek-v3")?.providerId)
-        assertEquals("codebuddy", engine.resolveRoute("glm-5.2")?.providerId)
-        // 用字节的模型就路由到字节（原先 glm/qwen 会一律先落到 codebuddy）
-        assertEquals("trae", engine.resolveRoute("qwen-max")?.providerId)
-        assertEquals("trae", engine.resolveRoute("seed-1.6")?.providerId)
-
-        // 大小写与下划线/空格写法归一后仍能命中真实归属
-        assertEquals("trae", engine.resolveRoute("QWEN-MAX")?.providerId)
-        assertEquals("codebuddy", engine.resolveRoute("deepseek_v3")?.providerId)
+        // 写了腾讯标签，就一定去腾讯——哪怕这个模型其实在字节目录里
+        assertEquals("codebuddy", engine.resolveRoute("腾讯国内/qwen-max")?.providerId)
+        // 反之亦然
+        assertEquals("trae", engine.resolveRoute("字节国内/glm-5.2")?.providerId)
+        // 无标签则一律不路由
+        assertTrue(engine.resolveRoute("qwen-max") == null, "无标签不得路由")
+        assertTrue(engine.resolveRoute("deepseek-v3") == null, "无标签不得路由")
     }
 
     @Test
-    fun `目录里查不到时不瞎猜品牌归属`() {
+    fun `部分账号停用时自动用同供应商其它账号`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
-        // 两家都启用且有账号，但目录里都没有 kimi-k2
-        engine.registry.register(CatalogProvider("codebuddy", listOf("deepseek-v3")))
-        engine.registry.register(CatalogProvider("trae", listOf("qwen-max")))
-        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "腾讯号", "{}"))
-        engine.pool.upsert(ProviderAccount("trae", "t1", "字节号", "{}"))
+        engine.registry.register(DummyProvider("codebuddy"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "号1", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u2", "号2", "{}"))
 
-        // 不能因为品牌列表里先写了 codebuddy 就硬塞给腾讯：交给兜底（有账号的一家）
-        val route = engine.resolveRoute("kimi-k2")
-        assertNotNull(route)
-        assertTrue(
-            route.providerId == "codebuddy" || route.providerId == "trae",
-            "应落到有账号的供应商：${route.providerId}",
-        )
+        // 停用其中一个：选号必须落到另一个，而不是返回 null
+        engine.pool.setEnabled("codebuddy", "u1", false, "手动停用")
+        val picked = engine.pickAccount("codebuddy")
+        assertNotNull(picked)
+        assertEquals("u2", picked.uid)
+
+        // 可用性快照要能区分「手动停用」
+        val avail = engine.accountAvailability("codebuddy", null)
+        assertEquals(2, avail.total)
+        assertEquals(1, avail.usable)
+        assertEquals(1, avail.offByUser)
+        assertEquals(0, avail.deadCredential)
+        assertTrue(!avail.allDisabled)
+    }
+
+    @Test
+    fun `同供应商账号全部停用时选不出账号`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(DummyProvider("codebuddy"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "号1", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u2", "号2", "{}"))
+        engine.pool.setEnabled("codebuddy", "u1", false, "手动停用")
+        engine.pool.setEnabled("codebuddy", "u2", false, "手动停用")
+
+        assertTrue(engine.pickAccount("codebuddy") == null, "全停用时不应选出账号")
+
+        // 全停用 → allDisabled，转发层据此发横幅
+        val avail = engine.accountAvailability("codebuddy", null)
+        assertTrue(avail.allDisabled, "应判定为全部不可用")
+        assertEquals(2, avail.offByUser)
+        assertEquals(0, avail.deadCredential)
+
+        // 路由本身仍然成立（标签有效、账号条目还在），只是发不出去——
+        // 所以“通知”是必要的，否则用户只看到一条 503。
+        assertNotNull(engine.resolveRoute("腾讯国内/glm-5.2"))
+    }
+
+    @Test
+    fun `凭证失效与手动停用要分开统计`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(DummyProvider("codebuddy"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "dead", "失效号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "off", "停用号", "{}"))
+        engine.pool.disable("codebuddy", "dead", "凭证已失效")
+        engine.pool.setEnabled("codebuddy", "off", false, "手动停用")
+
+        val avail = engine.accountAvailability("codebuddy", null)
+        assertEquals(1, avail.deadCredential, "应识别出 1 个凭证失效")
+        assertEquals(1, avail.offByUser, "应识别出 1 个手动停用")
+        assertEquals(0, avail.usable)
+        assertTrue(avail.allDisabled)
+    }
+
+    @Test
+    fun `标签指向的供应商没登录或不存在时直接作废`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(CatalogProvider("codebuddy", listOf("deepseek-v3")))
+        // 注意：故意不给 codebuddy 加账号
+
+        // 有标签但供应商没登录 → 作废（不失效到别家）
+        assertTrue(engine.resolveRoute("腾讯国内/deepseek-v3") == null, "没登录的标签应作废")
+
+        // 标签压根不存在 → 作废
+        assertTrue(engine.resolveRoute("火星/deepseek-v3") == null, "不存在的标签应作废")
     }
 
     @Test
@@ -249,31 +339,39 @@ class SmartRoutingTest {
         engine.pool.upsert(ProviderAccount("codebuddy", "u1", "腾讯号", "{}"))
         engine.pool.upsert(ProviderAccount("trae", "t1", "字节号", "{}"))
 
-        // 两家目录都有 deepseek-v3，写了前缀就必须按前缀走
-        assertEquals("trae", engine.resolveRoute("字节/deepseek-v3")?.providerId)
-        assertEquals("codebuddy", engine.resolveRoute("腾讯/deepseek-v3")?.providerId)
+        // 两家都有 deepseek-v3，写了标签就必须按标签走
+        assertEquals("trae", engine.resolveRoute("字节国内/deepseek-v3")?.providerId)
+        assertEquals("codebuddy", engine.resolveRoute("腾讯国内/deepseek-v3")?.providerId)
+        assertEquals("trae", engine.resolveRoute("字节国外/deepseek-v3")?.providerId)
+        assertEquals("codebuddy", engine.resolveRoute("腾讯国外/deepseek-v3")?.providerId)
     }
 
     @Test
-    fun `无前缀时根据模型特征智能路由到 antigravity`() {
+    fun `无标签时不再根据模型名猜供应商`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(DummyProvider("trae"))
         engine.registry.register(DummyProvider("antigravity"))
         // 反重力有账号，trae 没有
         engine.pool.upsert(ProviderAccount("antigravity", "u1", "谷歌账号", "{}"))
 
-        val route1 = engine.resolveRoute("gemini-3.8-flash-high")
-        assertNotNull(route1)
-        assertEquals("antigravity", route1.providerId)
-        assertEquals("gemini-3.8-flash-high", route1.model)
+        // 名称特征兜底已彻底删除（主人要求「选了哪家就路由到哪家」）。
+        // gemini / claude 这种看上去“一眼就能认出属于谷歌”的模型，
+        // 只要没写标签、且目录里查不到，就不应该被猜着路由。
+        assertTrue(
+            engine.resolveRoute("gemini-3.8-flash-high") == null,
+            "无标签时不得按模型名猜供应商",
+        )
+        assertTrue(
+            engine.resolveRoute("claude-opus-4-6-thinking") == null,
+            "无标签时不得按模型名猜供应商",
+        )
 
-        val route2 = engine.resolveRoute("claude-opus-4-6-thinking")
-        assertNotNull(route2)
-        assertEquals("antigravity", route2.providerId)
+        // 写了标签才路由
+        assertEquals("antigravity", engine.resolveRoute("谷歌/gemini-3.8-flash-high")?.providerId)
     }
 
     @Test
-    fun `用户仅配置反重力一个供应商时所有无前缀请求由反重力接管`() {
+    fun `无归属的模型名不再被单供应商或默认供应商兜底`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(DummyProvider("trae"))
         engine.registry.register(DummyProvider("antigravity"))
@@ -281,29 +379,26 @@ class SmartRoutingTest {
         // 只有 antigravity 有账号
         engine.pool.upsert(ProviderAccount("antigravity", "u1", "唯一账号", "{}"))
 
-        // 即使用户请求 auto 或随意模型名，也直接由反重力接管，而不是退回到 trae 报 503
-        val route = engine.resolveRoute("auto")
-        assertNotNull(route)
-        assertEquals("antigravity", route.providerId)
+        // 旧的「单供应商接管」兜底已删除：auto / 随意模型名 不得被硬塞给任何一家。
+        // 注意 gemini/claude 这类有专属品牌特征的模型仍然会路由（那是名称特征，不是兜底）。
+        assertTrue(engine.resolveRoute("auto") == null, "不得再单供应商接管")
+        assertTrue(engine.resolveRoute("some-random-model") == null, "不得再兜底猜供应商")
     }
 
     @Test
-    fun `关闭故障转移后不再产生跨供应商候选`() {
+    fun `标签只绑定自己的供应商不再自动跨家找同款模型`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
-        // 两家都提供同名模型且都有账号 —— 满足启发式回退产生候选的条件
+        // 两家都提供同名模型且都有账号 —— 正是原先「自动跨家找同款」会产生候选的条件
         engine.registry.register(CatalogProvider("trae", listOf("gemini-2.5-flash")))
         engine.registry.register(CatalogProvider("antigravity", listOf("gemini-2.5-flash")))
         engine.pool.upsert(ProviderAccount("trae", "t1", "trae 账号", "{}"))
         engine.pool.upsert(ProviderAccount("antigravity", "a1", "反重力账号", "{}"))
 
-        val candidates = engine.resolveCandidateRoutes("字节/gemini-2.5-flash")
-        assertTrue(candidates.size > 1, "开关开启时应能产生跨供应商候选：$candidates")
-
-        // 关闭后只允许首选路由：此前 enabled 只在「显式路由表」分支生效，
-        // 启发式回退照跑，表现为「界面关了故障转移、实际仍在自动换供应商」
-        engine.updateFailoverSettings(engine.failoverSettings().copy(enabled = false))
-        val disabled = engine.resolveCandidateRoutes("字节/gemini-2.5-flash")
-        assertEquals(1, disabled.size, "关闭后不得有跨供应商候选：$disabled")
-        assertEquals("trae", disabled.single().providerId)
+        // 写了「字节国内」标签，就永远只可能去字节——
+        // 即便谷歌目录里也有同名模型，也不得自动改发谷歌。
+        val candidates = engine.resolveCandidateRoutes("字节国内/gemini-2.5-flash")
+        assertEquals(1, candidates.size, "标签不得产生跨供应商候选：$candidates")
+        assertEquals("trae", candidates.single().providerId)
+        assertEquals("cn", candidates.single().region, "区域约束应保留")
     }
 }

@@ -32,7 +32,7 @@ class SsePassthroughFramingTest {
     }
 
     private inner class PassthroughProvider : Provider {
-        override val id = "pass"
+        override val id = "codebuddy"
         override val displayName = "直通上游"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(emptyList(), true, "")
@@ -45,7 +45,7 @@ class SsePassthroughFramingTest {
     private fun withServer(block: (port: Int) -> Unit) {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(PassthroughProvider())
-        engine.pool.upsert(ProviderAccount("pass", "u1", "直通账号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "直通账号", "{}"))
         val server = GatewayHttpServer(engine, "127.0.0.1", 0)
         server.start(0, true)
         try {
@@ -58,7 +58,7 @@ class SsePassthroughFramingTest {
     @Test
     fun `客户端能从直通流里解析出完整事件`() {
         withServer { port ->
-            val body = """{"model":"pass/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
+            val body = """{"model":"腾讯国内/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
             val conn = java.net.URL("http://127.0.0.1:$port/v1/chat/completions")
                 .openConnection() as java.net.HttpURLConnection
             conn.requestMethod = "POST"

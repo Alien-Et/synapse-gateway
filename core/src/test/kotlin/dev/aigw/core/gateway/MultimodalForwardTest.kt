@@ -24,7 +24,7 @@ class MultimodalForwardTest {
     /** 记录收到的请求体；回一个合法 completion（网关会拒绝零内容回复）。 */
     private inner class EchoProvider : Provider {
         var lastBody: String = ""
-        override val id = "echo"
+        override val id = "antigravity"
         override val displayName = "回显上游"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(emptyList(), true, "")
@@ -44,7 +44,7 @@ class MultimodalForwardTest {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         val provider = EchoProvider()
         engine.registry.register(provider)
-        engine.pool.upsert(ProviderAccount("echo", "u1", "回显账号", "{}"))
+        engine.pool.upsert(ProviderAccount("antigravity", "u1", "回显账号", "{}"))
         val server = GatewayHttpServer(engine, "127.0.0.1", 0)
         server.start(0, true)
         try {
@@ -56,7 +56,7 @@ class MultimodalForwardTest {
 
     private val visionBody = """
         {
-          "model": "echo/vision",
+          "model": "谷歌/vision",
           "messages": [
             {
               "role": "user",

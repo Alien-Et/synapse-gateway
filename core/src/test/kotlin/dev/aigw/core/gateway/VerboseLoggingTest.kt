@@ -25,7 +25,7 @@ class VerboseLoggingTest {
     private inner class FlakyProvider : Provider {
         var calls = 0
 
-        override val id = "flaky"
+        override val id = "codebuddy"
         override val displayName = "易错上游"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(
@@ -56,7 +56,7 @@ class VerboseLoggingTest {
         engine.updateSettings(engine.settings().copy(verboseLogging = verbose))
         val provider = FlakyProvider()
         engine.registry.register(provider)
-        engine.pool.upsert(ProviderAccount("flaky", "u1", "唯一账号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "唯一账号", "{}"))
         val server = GatewayHttpServer(engine, "127.0.0.1", 0)
         server.start(0, true)
         try {
@@ -68,7 +68,7 @@ class VerboseLoggingTest {
 
     private fun postChat(port: Int): Pair<Int, String> = Socket("127.0.0.1", port).use { socket ->
         socket.soTimeout = 15_000
-        val body = """{"model":"flaky/m","messages":[{"role":"user","content":"hi"}]}"""
+        val body = """{"model":"腾讯国内/m","messages":[{"role":"user","content":"hi"}]}"""
         socket.getOutputStream().write(
             (
                 "POST /v1/chat/completions HTTP/1.1\r\n" +
@@ -94,7 +94,7 @@ class VerboseLoggingTest {
             assertEquals(2, provider.calls, "经历 1 次失败 + 1 次重试成功")
 
             // 无冷却：账号依然可用
-            val accStatus = engine.pool.status("flaky", "u1")!!
+            val accStatus = engine.pool.status("codebuddy", "u1")!!
             assertTrue(accStatus.usable, "瞬态 500 不应禁用账号")
         }
     }
@@ -118,7 +118,7 @@ class VerboseLoggingTest {
             assertTrue(response.contains("recovered"), "重试后应成功")
 
             val logs = engine.requestLog.lines().map { it.text }
-            assertTrue(logs.any { it.contains("收到请求") && it.contains("flaky/m") }, "应记录请求入口：$logs")
+            assertTrue(logs.any { it.contains("收到请求") && it.contains("腾讯国内/m") }, "应记录请求入口：$logs")
             assertTrue(logs.any { it.contains("[请求原文]") && it.contains("hi") }, "应记录请求原文：$logs")
             assertTrue(logs.any { it.contains("第 1 次选号") }, "应记录第1次选号：$logs")
             assertTrue(logs.any { it.contains("上游返回 HTTP 500") && it.contains("upstream boom") }, "应记录上游错误：$logs")

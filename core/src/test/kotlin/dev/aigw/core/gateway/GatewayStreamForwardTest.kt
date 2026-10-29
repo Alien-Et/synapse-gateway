@@ -35,7 +35,7 @@ class GatewayStreamForwardTest {
     }
 
     private inner class FakeProvider : Provider {
-        override val id = "fake"
+        override val id = "codebuddy"
         override val displayName = "假上游"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(emptyList(), true, "")
@@ -48,7 +48,7 @@ class GatewayStreamForwardTest {
     private fun withServer(block: (port: Int) -> Unit) {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(FakeProvider())
-        engine.pool.upsert(ProviderAccount("fake", "u1", "假账号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "假账号", "{}"))
         val server = GatewayHttpServer(engine, "127.0.0.1", 0)
         server.start(0, true)
         try {
@@ -61,7 +61,7 @@ class GatewayStreamForwardTest {
     @Test
     fun `上游 chunk 带 usage null 时流仍被完整转发`() {
         withServer { port ->
-            val body = """{"model":"fake/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
+            val body = """{"model":"腾讯国内/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
             val response = Socket("127.0.0.1", port).use { socket ->
                 socket.soTimeout = 15_000
                 socket.getOutputStream().write(

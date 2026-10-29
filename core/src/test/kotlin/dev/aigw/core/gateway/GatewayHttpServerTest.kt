@@ -1,6 +1,13 @@
 package dev.aigw.core.gateway
 
 import dev.aigw.core.InMemoryKeyValueStore
+import dev.aigw.core.provider.AuthKind
+import dev.aigw.core.provider.ChatCall
+import dev.aigw.core.provider.ErrorKind
+import dev.aigw.core.provider.Provider
+import dev.aigw.core.provider.ProviderAccount
+import dev.aigw.core.provider.ProviderModelCatalogView
+import dev.aigw.core.provider.UpstreamError
 import java.io.ByteArrayOutputStream
 import java.net.Socket
 import kotlin.test.Test
@@ -25,6 +32,24 @@ class GatewayHttpServerTest {
         }
     }
 
+    /**
+     * 一个「存在但没账号」的供应商：
+     * 声明「腾讯国内」标签，但测试里故意不往池子里放账号。
+     *
+     * 这样 `腾讯国内/xxx` 能通过标签解析（供应商已注册、已启用），
+     * 然后在选号阶段没账号可用 → 走 503 no_healthy_account 那条路。
+     */
+    private class NoAccountProvider : Provider {
+        override val id = "codebuddy"
+        override val displayName = "腾讯"
+        override val authKind = AuthKind.NONE
+        override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(emptyList(), true, "")
+        override fun resolveModel(requested: String) = requested
+        override fun classify(status: Int, body: String) = UpstreamError(ErrorKind.CLIENT, body)
+        override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall =
+            throw UnsupportedOperationException()
+    }
+
     private fun send(port: Int, request: String): String = Socket("127.0.0.1", port).use { socket ->
         socket.soTimeout = 15_000
         socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
@@ -43,18 +68,49 @@ class GatewayHttpServerTest {
     )
 
     @Test
-    fun `没有可用账号时返回 OpenAI 结构的 503`() {
-        withServer { port ->
-            val response = post(port, """{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}""")
+    fun `标签指向的供应商没有账号时直接报标签无效`() {
+        // 新的标签规则：标签必须指向一个「存在 + 已启用 + 有账号」的供应商。
+        // 一个账号都没有 → 标签作废（400），不会跑到「无可用账号 503」那一步。
+        withServer(configure = { engine ->
+            engine.registry.register(NoAccountProvider())
+        }) { port ->
+            val response = post(port, """{"model":"腾讯国内/glm-5.2","messages":[{"role":"user","content":"hi"}]}""")
+            assertTrue(response.startsWith("HTTP/1.1 400"), response.lineSequence().first())
+            assertTrue(response.contains("model_not_routable"))
+        }
+    }
+
+    @Test
+    fun `账号全部停用时返回 503 no_healthy_account`() {
+        // 账号存在但被停用：标签有效（size>0），选号时挑不出人 → 503。
+        withServer(configure = { engine ->
+            engine.registry.register(NoAccountProvider())
+            engine.pool.upsert(ProviderAccount("codebuddy", "u1", "停用号", "{}"))
+            engine.pool.setEnabled("codebuddy", "u1", false, "手动停用")
+        }) { port ->
+            val response = post(port, """{"model":"腾讯国内/glm-5.2","messages":[{"role":"user","content":"hi"}]}""")
             assertTrue(response.startsWith("HTTP/1.1 503"), response.lineSequence().first())
             assertTrue(response.contains("no_healthy_account"))
         }
     }
 
     @Test
-    fun `分块请求体被正确解析而不是挂住`() {
+    fun `不写标签时返回 400 model_not_routable`() {
         withServer { port ->
-            val body = """{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}"""
+            val response = post(port, """{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}""")
+            assertTrue(response.startsWith("HTTP/1.1 400"), response.lineSequence().first())
+            assertTrue(response.contains("model_not_routable"))
+        }
+    }
+
+    @Test
+    fun `分块请求体被正确解析而不是挂住`() {
+        withServer(configure = { engine ->
+            engine.registry.register(NoAccountProvider())
+            engine.pool.upsert(ProviderAccount("codebuddy", "u1", "停用号", "{}"))
+            engine.pool.setEnabled("codebuddy", "u1", false, "手动停用")
+        }) { port ->
+            val body = """{"model":"腾讯国内/glm-5.2","messages":[{"role":"user","content":"hi"}]}"""
             // 故意拆成两个分块，模拟流式发送请求体的客户端
             val first = body.substring(0, 20)
             val second = body.substring(20)

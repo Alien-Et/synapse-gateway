@@ -87,12 +87,8 @@ class FailoverPolicyTest {
             enabled = true,
             retry = RetryConfig(maxAttempts = 3, initialBackoffMs = 400L, maxBackoffMs = 3000L),
             circuitBreaker = CircuitBreakerConfig(failureThreshold = 4, openDurationMs = 45_000L),
-            routes = mapOf(
-                "glm-5.3-flash" to listOf(
-                    FailoverCandidate("trae", "glm-5.3-flash", priority = 100),
-                    FailoverCandidate("codebuddy", "glm-5.3-flash-20250101", priority = 80),
-                ),
-            ),
+            concurrency = ConcurrencyConfig(maxPerAccount = 2, maxGlobal = 8, queueTimeoutMs = 30_000L),
+            modelCooldown = ModelCooldownConfig(cooldownMs = 120_000L, maxCooldownMs = 600_000L),
         )
 
         val json = original.toJson().toString()
@@ -103,12 +99,15 @@ class FailoverPolicyTest {
         assertEquals(400L, parsed.retry.initialBackoffMs)
         assertEquals(4, parsed.circuitBreaker.failureThreshold)
         assertEquals(45_000L, parsed.circuitBreaker.openDurationMs)
+        assertEquals(2, parsed.concurrency.maxPerAccount)
+        assertEquals(8, parsed.concurrency.maxGlobal)
+        assertEquals(120_000L, parsed.modelCooldown.cooldownMs)
 
-        val candidates = parsed.routes["glm-5.3-flash"]
-        assertEquals(2, candidates?.size)
-        assertEquals("trae", candidates?.get(0)?.providerId)
-        assertEquals(100, candidates?.get(0)?.priority)
-        assertEquals("codebuddy", candidates?.get(1)?.providerId)
-        assertEquals(80, candidates?.get(1)?.priority)
+        // 跨供应商 routes 字段已删除：带 routes 的历史 JSON 仍要能正常解析，
+        // 只是忽略它（不报错、不丢其它字段）—— 升级不能让老配置直接失效。
+        val legacy = """{"enabled":true,"retry":{"maxAttempts":5},"routes":{"m":[{"providerId":"trae","upstreamModel":"x"}]}}"""
+        val fromLegacy = ModelFailoverSettings.fromJson(legacy)
+        assertEquals(true, fromLegacy.enabled)
+        assertEquals(5, fromLegacy.retry.maxAttempts)
     }
 }

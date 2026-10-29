@@ -40,13 +40,20 @@ class CustomProviderSyncTest {
     }
 
     @Test
-    fun `移除的 key 会从账号池删掉`() {
+    fun `同步只增不删，不会误删既有账号`() {
         val engine = engine()
         engine.syncCustomAccounts(config(listOf("sk-1", "sk-2")))
+        // 再同步一份只含 sk-2 的配置：sk-1 不得被删。
+        // 新表单编辑时本来就只带得上「原有摘要 + 新增 Key」，
+        // 若在这里对账，用户没动过的账号会被误删。
         engine.syncCustomAccounts(config(listOf("sk-2")))
 
-        val accounts = engine.accounts("custom:site")
-        assertEquals(listOf(CustomProvider.uidOf("sk-2")), accounts.map { it.uid })
+        val uids = engine.accounts("custom:site").map { it.uid }.toSet()
+        assertEquals(setOf(CustomProvider.uidOf("sk-1"), CustomProvider.uidOf("sk-2")), uids)
+
+        // 追加一个新 key
+        engine.syncCustomAccounts(config(listOf("sk-2", "sk-3")))
+        assertEquals(3, engine.accounts("custom:site").size)
     }
 
     @Test

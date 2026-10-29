@@ -29,7 +29,7 @@ class StreamRequestedJsonReturnedTest {
     """.trimIndent()
 
     private inner class JsonOnlyProvider : Provider {
-        override val id = "jsononly"
+        override val id = "codebuddy"
         override val displayName = "只回 JSON 的上游"
         override val authKind = AuthKind.NONE
         override fun listModels(account: ProviderAccount?) = ProviderModelCatalogView(emptyList(), true, "")
@@ -42,7 +42,7 @@ class StreamRequestedJsonReturnedTest {
     private fun withServer(block: (port: Int) -> Unit) {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(JsonOnlyProvider())
-        engine.pool.upsert(ProviderAccount("jsononly", "u1", "账号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "u1", "账号", "{}"))
         val server = GatewayHttpServer(engine, "127.0.0.1", 0)
         server.start(0, true)
         try {
@@ -55,7 +55,7 @@ class StreamRequestedJsonReturnedTest {
     @Test
     fun `流式请求收到 JSON 响应时客户端仍能拿到内容`() {
         withServer { port ->
-            val body = """{"model":"jsononly/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
+            val body = """{"model":"腾讯国内/m","stream":true,"messages":[{"role":"user","content":"hi"}]}"""
             val conn = java.net.URL("http://127.0.0.1:$port/v1/chat/completions")
                 .openConnection() as java.net.HttpURLConnection
             conn.requestMethod = "POST"
