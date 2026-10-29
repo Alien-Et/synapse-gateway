@@ -1,43 +1,8 @@
 package dev.aigw.core.failover
 
-import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import kotlin.random.Random
-
-/** 单个供应商候选目标 */
-data class FailoverCandidate(
-    val providerId: String,          // 供应商 id（如 "trae"、"codebuddy"、"custom:zhipu"）
-    val upstreamModel: String,        // 该供应商处实际对应的模型名（如 "glm-5.3-flash-20250101"）
-    val priority: Int = 100,          // 优先级（数值越大越优先）
-    /** 同优先级下的权重。⚠️ 未生效：当前调度只按 priority 排序，权重无消费方；保留字段仅为配置兼容。 */
-    val weight: Int = 1,
-    /** 该候选专用超时。⚠️ 未生效：上游超时由各 Provider 自己的 READ_TIMEOUT 决定，此字段无消费方；保留仅为配置兼容。 */
-    val timeoutMs: Long = 30_000L,
-) {
-    fun toJson(): JsonObject = JsonObject().apply {
-        addProperty("providerId", providerId)
-        addProperty("upstreamModel", upstreamModel)
-        addProperty("priority", priority)
-        addProperty("weight", weight)
-        addProperty("timeoutMs", timeoutMs)
-    }
-
-    companion object {
-        fun fromJson(obj: JsonObject): FailoverCandidate? {
-            val providerId = obj.get("providerId")?.asString?.trim() ?: return null
-            val upstreamModel = obj.get("upstreamModel")?.asString?.trim() ?: return null
-            if (providerId.isEmpty() || upstreamModel.isEmpty()) return null
-            return FailoverCandidate(
-                providerId = providerId,
-                upstreamModel = upstreamModel,
-                priority = obj.get("priority")?.asInt ?: 100,
-                weight = obj.get("weight")?.asInt ?: 1,
-                timeoutMs = obj.get("timeoutMs")?.asLong ?: 30_000L,
-            )
-        }
-    }
-}
 
 /** 单供应商内部的退避重试参数 */
 data class RetryConfig(
@@ -140,8 +105,6 @@ data class ModelFailoverSettings(
     val concurrency: ConcurrencyConfig = ConcurrencyConfig(),
     /** 模型级冷却（针对该模型不可用类错误）。 */
     val modelCooldown: ModelCooldownConfig = ModelCooldownConfig(),
-    // 逻辑模型名 -> 候选供应商列表
-    val routes: Map<String, List<FailoverCandidate>> = emptyMap(),
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("enabled", enabled)
@@ -149,13 +112,6 @@ data class ModelFailoverSettings(
         add("circuitBreaker", circuitBreaker.toJson())
         add("concurrency", concurrency.toJson())
         add("modelCooldown", modelCooldown.toJson())
-        val routesObj = JsonObject()
-        for ((model, candidates) in routes) {
-            val arr = JsonArray()
-            for (c in candidates) arr.add(c.toJson())
-            routesObj.add(model, arr)
-        }
-        add("routes", routesObj)
     }
 
     companion object {
@@ -165,22 +121,12 @@ data class ModelFailoverSettings(
             if (raw.isNullOrBlank()) return ModelFailoverSettings()
             val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull()
                 ?: return ModelFailoverSettings()
-            val routes = LinkedHashMap<String, List<FailoverCandidate>>()
-            obj.getAsJsonObject("routes")?.entrySet()?.forEach { (model, arrElem) ->
-                if (arrElem.isJsonArray) {
-                    val list = arrElem.asJsonArray.mapNotNull { item ->
-                        if (item.isJsonObject) FailoverCandidate.fromJson(item.asJsonObject) else null
-                    }
-                    if (list.isNotEmpty()) routes[model] = list
-                }
-            }
             return ModelFailoverSettings(
                 enabled = obj.get("enabled")?.asBoolean ?: true,
                 retry = RetryConfig.fromJson(obj.getAsJsonObject("retry")),
                 circuitBreaker = CircuitBreakerConfig.fromJson(obj.getAsJsonObject("circuitBreaker")),
                 concurrency = ConcurrencyConfig.fromJson(obj.getAsJsonObject("concurrency")),
                 modelCooldown = ModelCooldownConfig.fromJson(obj.getAsJsonObject("modelCooldown")),
-                routes = routes,
             )
         }
     }

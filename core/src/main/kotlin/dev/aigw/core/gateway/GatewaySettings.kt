@@ -37,8 +37,6 @@ data class GatewaySettings(
     val callLoggingEnabled: Boolean = true,
     /** 请求日志环形缓冲容量（条）。 */
     val requestLogCapacity: Int = DEFAULT_REQUEST_LOG_CAPACITY,
-    /** 模型名不带 provider 前缀时落到哪个供应商。 */
-    val defaultProvider: String = "trae",
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("port", port)
@@ -52,7 +50,6 @@ data class GatewaySettings(
         addProperty("logRetentionDays", logRetentionDays)
         addProperty("callLoggingEnabled", callLoggingEnabled)
         addProperty("requestLogCapacity", requestLogCapacity)
-        addProperty("defaultProvider", defaultProvider)
     }
 
     companion object {
@@ -93,7 +90,6 @@ data class GatewaySettings(
                 verboseLogging = obj.boolOr("verboseLogging", defaults.verboseLogging),
                 callLoggingEnabled = obj.boolOr("callLoggingEnabled", defaults.callLoggingEnabled),
                 requestLogCapacity = clampRequestLogCapacity(obj.intOr("requestLogCapacity", defaults.requestLogCapacity)),
-                defaultProvider = obj.strOr("defaultProvider", defaults.defaultProvider),
                 logRetentionDays = clampRetentionDays(obj.intOr("logRetentionDays", defaults.logRetentionDays)),
             )
         }

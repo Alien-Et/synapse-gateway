@@ -23,7 +23,8 @@ data class AccountTransferEnvelope(
  * 只做「一段 JSON ↔ 一批账号」的纯转换，不认识账号池，也不碰存储；
  * 粒度（导出/导入哪些账号）由调用方先选好再传进来。
  *
- * 凭证是明文：格式里不做加密，靠界面明确警告「含 token，勿外传」。
+ * ⚠️ 这一层处理的是**明文**。写入文件/读出文件请用 [AccountTransferCodec]，
+ * 它负责把这段 JSON 包成二进制并按需加密（AES-256-GCM）。
  */
 object AccountTransfer {
 

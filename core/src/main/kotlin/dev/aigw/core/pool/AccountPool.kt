@@ -238,6 +238,31 @@ class AccountPool(
         if (found) persistState(providerId, uid)
     }
 
+    /**
+     * 对话成功：把「上次被判定为额度耗尽」留下的 0 标记摘掉。
+     *
+     * 为什么需要：额度为 0 的号会在选号时被跳过（[pick] 的 skipEmptyCredits）。
+     * 如果一次误判（或上游额度已重置）把它标成了 0，而后续的 [refreshCredits] 又恰好
+     * 失败（网络问题：供应商本轮刷新端点挂了），这个号就会一直停在 0、一直不被选中。
+     *
+     * 「刚刚用它成功了」本身就是一条硬证据：它的额度不可能是 0。
+     * 这里把 known 置回 false（值未知）而不是写一个假数字——未知不会被跳过，
+     * 也不会在界面上冒充真实余额，随后那次 refreshCredits 会把它修正成真正的数字。
+     *
+     * @return true 表示确实���掉了标记（原来就是「已知且为 0」）。
+     */
+    fun clearExhaustedMark(providerId: String, uid: String): Boolean {
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            if (!entry.creditsKnown || entry.credits > 0L) return@write false
+            entry.creditsKnown = false
+            entry.credits = 0L
+            true
+        }
+        if (found) persistState(providerId, uid)
+        return found
+    }
+
     /** 更新额度。 */
     fun updateCredits(
         providerId: String,
@@ -291,20 +316,99 @@ class AccountPool(
 
     // ---------------------------------------------------------------- 选号
 
-    /** 取该 provider 可用账号中优先级最高者，同级取余额最高者；[exclude] 用于同一请求内的换号重试。 */
-    fun pick(providerId: String, exclude: Set<String> = emptySet()): ProviderAccount? = lock.read {
+    /**
+     * 取该 provider 可用账号中优先级最高者，同级取余额最高者。
+     *
+     * [exclude] 用于同一请求内的换号重试。
+     *
+     * [skipEmptyCredits]（默认 false）：跳过「已知额度为 0」的账号。
+     *
+     * 为什么默认关、由调用方控制：池里的额度是**上次刷新时的快照**，不是实时值。
+     * 如果无条件按它过滤，一个早上就充值/重置了的账号会被永久跳过，看上去就是
+     * 「明明有额度却总是不用它」。因此选定的规则是：
+     * - 同一请求的**第一轮选号**开启跳过，避免明知为空还白打一次上游；
+     * - 第一轮全部跳过/失败后的**补位轮关闭跳过**，让「余额记录过时」有机会被真的纠正——
+     *   真没额度的话，上游会报 QUOTA，那一刻我们才真正知道它空。
+     */
+    fun pick(
+        providerId: String,
+        exclude: Set<String> = emptySet(),
+        skipEmptyCredits: Boolean = false,
+    ): ProviderAccount? = lock.read {
         val group = byProvider[providerId] ?: return@read null
-        var best: Entry? = null
-        for (entry in group) {
-            if (entry.account.uid in exclude) continue
-            if (!entry.healthy()) continue
-            // 先比优先级（用户手动排序，最高优先），同级再比余额：
-            // 用户把某个号拖到最上面，就是希望它先被用，不该被余额更高的号盖掉。
-            val better = best == null || entry.priority > best.priority ||
-                (entry.priority == best.priority && entry.credits > best.credits)
-            if (better) best = entry
+
+        fun pickBest(ignoreCreditFilter: Boolean): Entry? {
+            var best: Entry? = null
+            for (entry in group) {
+                if (entry.account.uid in exclude) continue
+                if (!entry.healthy()) continue
+                // 已知余额为 0：跳过（仅在 [skipEmptyCredits] 生效且本轮不忽略过滤时）
+                if (skipEmptyCredits && !ignoreCreditFilter &&
+                    entry.creditsKnown && entry.credits <= 0L
+                ) {
+                    continue
+                }
+                // 先比优先级（用户手动排序，最高优先），同级再比余额：
+                // 用户把某个号拖到最上面，就是希望它先被用，不该被余额更高的号盖掉。
+                val better = best == null || entry.priority > best.priority ||
+                    (entry.priority == best.priority && entry.credits > best.credits)
+                if (better) best = entry
+            }
+            return best
         }
-        best?.account
+
+        val filtered = pickBest(ignoreCreditFilter = false)
+        if (filtered != null || !skipEmptyCredits) return@read filtered?.account
+        // 全部都被「余额为 0」过滤掉了：退回不过滤的一轮。
+        // 不能直接返回 null——上次刷新得到的 0 可能已经过时（刚充值、或今日刚重置）。
+        // 让它真发一次请求、让上游告诉我们真相，比本地抱着一个旧数字干等更靠得住。
+        pickBest(ignoreCreditFilter = true)?.account
+    }
+
+    /**
+     * 一个区域（null = 不限区域）内的可用性快照。
+     *
+     * 用于「账号全被停用」的告警文案：需要告诉用户到底是
+     * 「你手动关的」（去打开即可）还是「凭证失效」（要重新登录）。
+     */
+    data class Availability(
+        val total: Int,
+        val usable: Int,
+        /** 用户手动停用数。 */
+        val offByUser: Int,
+        /** 凭证失效硬禁用数。 */
+        val deadCredential: Int,
+    ) {
+        /** 一个可用账号都没有。 */
+        val allDisabled: Boolean get() = usable == 0 && total > 0
+    }
+
+    /**
+     * 统计某供应商在指定区域的可用性；[region] 非空时只统计该区域的账号。
+     *
+     * 区域判定需要 provider 的 `RegionAwareSupport`，所以由调用方传入 regionOf 函数
+     * （核心池不依赖具体供应商实现）。
+     */
+    fun availability(
+        providerId: String,
+        region: String?,
+        regionOf: ((ProviderAccount) -> String?)? = null,
+    ): Availability = lock.read {
+        val group = byProvider[providerId].orEmpty()
+        var total = 0
+        var usable = 0
+        var offByUser = 0
+        var dead = 0
+        for (entry in group) {
+            if (region != null && regionOf != null && regionOf(entry.account) != region) continue
+            total++
+            when {
+                entry.disabled -> dead++
+                !entry.enabled -> offByUser++
+                else -> usable++
+            }
+        }
+        Availability(total, usable, offByUser, dead)
     }
 
     /** 供界面展示的摘要；[providerId] 为空时统计全部。 */

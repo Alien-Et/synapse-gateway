@@ -41,6 +41,30 @@ class RequestLog(
     /** 日志行序号：同一实例内单调递增，供 LazyColumn 稳定 key 使用。 */
     private var nextSeq = 0L
 
+    /**
+     * 新日志监听器（事件驱动，取代界面轮询）。
+     *
+     * 为什么不在界面侧轮询：日志是「写一条就应当立刻看见」的东西，
+     * 5 秒一轮的延迟在排障时非常难受。这里追加时直接回调，界面立即刷新。
+     *
+     * 监听器可能在任意线程被回调，实现方需自行切线程；
+     * 监听器抛异常不能影响日志写入，所以逐个 runCatching。
+     */
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addListener(listener: () -> Unit) {
+        listeners.add(listener)
+    }
+
+    fun removeListener(listener: () -> Unit) {
+        listeners.remove(listener)
+    }
+
+    private fun notifyAppended() {
+        if (listeners.isEmpty()) return
+        for (listener in listeners) runCatching { listener() }
+    }
+
     init {
         load()
     }
@@ -79,6 +103,8 @@ class RequestLog(
         lines.addFirst(LogLine(nextSeq++, now, level, text))
         while (lines.size > capacity) lines.removeLast()
         if (now - lastPersistAt >= persistIntervalMillis) persist()
+        // 追加完再通知：回调里读 snapshot() 能拿到刚写入的这条
+        notifyAppended()
     }
 
     private fun persist() {

@@ -2,6 +2,7 @@ package dev.aigw.core.gateway
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.aigw.core.pool.AccountPool
 import dev.aigw.core.provider.ChatCall
 import dev.aigw.core.provider.ErrorKind
 import dev.aigw.core.provider.OpenAiSseAggregator
@@ -195,8 +196,18 @@ class GatewayHttpServer(
         val streaming = peek.get("stream")?.asBoolean ?: false
         val requestedModel = peek.get("model")?.asString.orEmpty()
 
+        // 路由结果 null 只有两种情况，分开报错才看得出该干什么：
+        // ① 真没传 model；② 传了但网关没有任何供应商能认出这个模型。
+        if (requestedModel.isBlank()) {
+            return errorResponse(400, "invalid_request", "缺少 model 参数")
+        }
         val primaryRoute = engine.resolveRoute(requestedModel)
-            ?: return errorResponse(400, "invalid_request", "缺少 model 参数")
+            ?: return errorResponse(
+                400,
+                "model_not_routable",
+                "模型「$requestedModel」无法路由。请写成「标签/模型名」，例如 腾讯国内/glm-5.2、" +
+                    "字节国外/doubao-pro。若标签已经写了，请到「供应商」页确认该供应商已登录且已启用。",
+            )
 
         val startedAt = System.currentTimeMillis()
         // 最后一次上游响应的 HTTP 状态：成功/上游失败填 call.status，网络层失败填 0，
@@ -214,15 +225,12 @@ class GatewayHttpServer(
             engine.logVerbose("请求原文", body)
         }
 
-        // 首选路由优先；失败后做同款模型 Failover
+        // 路由一确定就不再变：**没有跨供应商 Failover**。
+        // 失败只会在同一个供应商内换号重试（下面的 while 循环）。
+        //
+        // triedProviders 现在只用于日志（报告请求最终落在了哪家），不再参与选择。
         val triedProviders = LinkedHashSet<String>()
         var currentRoute = primaryRoute
-
-        // 候选路由惰性解析并缓存：仅当首选失败需要换家时才计算，且只算一次。
-        // 内部会 flush 各供应商的模型目录（网络调用），放在 failover 循环里反复解析会让每次换家都多打一轮上游。
-        var cachedCandidates: List<Route>? = null
-        fun candidateRoutes(): List<Route> =
-            cachedCandidates ?: engine.resolveCandidateRoutes(requestedModel).also { cachedCandidates = it }
 
         // 循环级许可兜底：异常沿着存盘/日志等调用逃逸出循环时（如加密存储写失败），
         // 各分支的显式 release 来不及执行；Handle.release 幂等，这里重复释放无副作用。
@@ -250,14 +258,9 @@ class GatewayHttpServer(
                 log("供应商 [$providerId] 处于熔断隔离状态，跳过此候选...")
                 routeErrors.add(skipReason)
 
-                // 寻找下一个候选供应商
-                val next = candidateRoutes()
-                    .firstOrNull { it.providerId !in triedProviders && engine.pool.pick(it.providerId) != null }
-                if (next != null) {
-                    log("自动故障转移至下一候选供应商 [${next.providerId}]...")
-                    currentRoute = next
-                    continue
-                }
+                // ★ 不再跳去其它供应商：路由到哪家就是哪家。
+                // 熔断只影响「这家暂时不接活」，而不是「改发给别家」——
+                // 换家会直接破坏标签语义（写了字节国内却发到谷歌）。
                 break
             }
 
@@ -270,12 +273,7 @@ class GatewayHttpServer(
                 val skipReason = "$providerId/$resolvedModel(模型级冷却中，直接跳过)"
                 log("模型 [$resolvedModel] 在 [$providerId] 处于模型级冷却中，跳过此候选...")
                 routeErrors.add(skipReason)
-                val next = candidateRoutes()
-                    .firstOrNull { it.providerId !in triedProviders && engine.pool.pick(it.providerId) != null }
-                if (next != null) {
-                    currentRoute = next
-                    continue
-                }
+                // 同理：模型级冷却也只是「这家暂时不行」，不跨家
                 break
             }
 
@@ -293,15 +291,40 @@ class GatewayHttpServer(
                 attempt++
                 // 兜底：上一笔上游尝试若在 continue 路径未显式收尾，这里先结束掉
                 finishActiveRequest()
-                var picked = engine.pickAccount(currentRoute.providerId, tried, currentRoute.region)
+                // 选号：首选跳过「已知额度为 0」的账号（免得明知为空还白打一次上游）。
+                // 注意 skipEmptyCredits 内部有自愈：若同区域全被挡掉，它会自己退回不过滤的一轮，
+                // 所以这里不会因为一份过时的 0 而完全选不出人。
+                var picked = engine.pickAccount(
+                    currentRoute.providerId, tried, currentRoute.region, skipEmptyCredits = true,
+                )
                 if (picked == null) {
-                    // 若池中有可用账号（如单账号或全部账号已轮过一轮），清空已试列表允许继续完成剩余重试配额
+                    // 若池中有可用账号（如单账号或全部账号已轮过一轮），清空已试列表允许继续完成剩余重试配额。
+                    // 这一轮**不再跳过空额度账号**：能走到这里说明额度正常的号已经试过或被排除，
+                    // 剩下的就是「记录里是 0，但可能已充值/已重置」的号——让上游给出真实答案。
                     if (engine.pickAccount(currentRoute.providerId, emptySet(), currentRoute.region) != null) {
                         tried.clear()
                         picked = engine.pickAccount(currentRoute.providerId, tried, currentRoute.region)
                     }
                 }
-                if (picked == null) break
+                if (picked == null) {
+                    // 真的一个人都选不出来：先看看是不是账号全被停掉了。
+                    //
+                    // 仅当「本次一次上游请求都没发过」才告警：如果已经试过号、只是重试次数用完，
+                    // 那是另一回事（报错里已有上游原因），不应误报成「账号被停用」。
+                    if (!attemptedUpstream) {
+                        val providerName = routeLabelOf(currentRoute.providerId, currentRoute.region)
+                        val avail = engine.accountAvailability(currentRoute.providerId, currentRoute.region)
+                        if (avail.allDisabled) {
+                            val reason = describeDisabledAccounts(avail)
+                            engine.quotaAlerts.emit(
+                                QuotaAlert(providerName, "全部账号", requestedModel, reason),
+                                QuotaAlert.Level.ALL_ACCOUNTS_DISABLED,
+                            )
+                            log("[$providerName] 账号全部不可用（$reason）：无法发出请求")
+                        }
+                    }
+                    break
+                }
                 tried += picked.uid
 
                 // 上游并发闸门：在发起上游调用前取许可，会话结束后释放；取不到时本次换号重试不再尝试该账号
@@ -425,12 +448,41 @@ class GatewayHttpServer(
                         gateHandle.release()
                         break
                     }
-                    // 模型级不可用：只冷却该模型，不换号、不计熔断（换号撞同一道墙，
-                    // 且它不代表供应商故障）。直接跳出账号循环转下一候选供应商。
+                    // 模型级不可用（如 CodeBuddy 429/6004「usage exceeds frequency limit」、
+                    // Trae 1005 套餐权益拒绝）：
+                    //
+                    // **先换号，而不是直接打断用户**。上游的「频率限制」实际是按账号计的，
+                    // 同一个模型换另一个号往往立刻能用。所以：
+                    // 1. 同家还有没试过的号 → 继续换号（不冷却、不告警）；
+                    // 2. 同家都试完了 → 才冷却该模型 + 告警告知用户。
                     if (failure.kind == ErrorKind.MODEL_LIMIT) {
+                        val hasUntried = engine
+                            .pickAccount(currentRoute.providerId, tried, currentRoute.region) != null
+                        if (hasUntried) {
+                            log(
+                                "模型级限流（${currentRoute.providerId}/${account.nickname.ifEmpty { account.uid }}），" +
+                                    "先换同家其它账号重试：${failure.message}",
+                            )
+                            providerLastError = failure.message
+                            lastHttpStatus = call.status
+                            failureKinds.add(ErrorKind.MODEL_LIMIT)
+                            finishActiveRequest()
+                            gateHandle.release()
+                            continue
+                        }
+                        // 同家每个号都撞了同一道墙：这才是真的「该模型不可用」
                         val cooldownMs = failoverCfg.modelCooldown.cooldownMs
                         engine.modelCooldownOf().markCooling(currentRoute.providerId, resolvedModel, cooldownMs)
-                        log("模型级不可用，冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${failure.message}")
+                        log("模型级不可用（已试完同家账号），冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${failure.message}")
+                        engine.quotaAlerts.emit(
+                            QuotaAlert(
+                                provider.displayName,
+                                account.nickname.ifEmpty { account.uid },
+                                requestedModel,
+                                failure.message,
+                            ),
+                            QuotaAlert.Level.MODEL_UNAVAILABLE,
+                        )
                         providerLastError = failure.message
                         lastHttpStatus = call.status
                         failureKinds.add(ErrorKind.MODEL_LIMIT)
@@ -509,21 +561,89 @@ class GatewayHttpServer(
                         break
                     }
 
-                    // 模型级不可用（如 CodeBuddy 429/6004、Trae 1005）：只冷却该模型，
-                    // 不换号、不计熔断，直接转下一候选供应商。
+                    // 模型级不可用：同上面的处理——**先换号，全试完才冷却+告警**。
                     if (error.kind == ErrorKind.MODEL_LIMIT) {
+                        val hasUntried = engine
+                            .pickAccount(currentRoute.providerId, tried, currentRoute.region) != null
+                        if (hasUntried) {
+                            log(
+                                "模型级限流（${currentRoute.providerId}/${account.nickname.ifEmpty { account.uid }}），" +
+                                    "先换同家其它账号重试：${error.message}",
+                            )
+                            providerLastError = error.message
+                            lastHttpStatus = call.status
+                            failureKinds.add(error.kind)
+                            finishActiveRequest()
+                            gateHandle.release()
+                            continue
+                        }
                         val cooldownMs = failoverCfg.modelCooldown.cooldownMs
                         engine.modelCooldownOf().markCooling(currentRoute.providerId, resolvedModel, cooldownMs)
-                        log("模型级不可用，冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${error.message}")
+                        log("模型级不可用（已试完同家账号），冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${error.message}")
+                        engine.quotaAlerts.emit(
+                            QuotaAlert(
+                                provider.displayName,
+                                account.nickname.ifEmpty { account.uid },
+                                requestedModel,
+                                error.message,
+                            ),
+                            QuotaAlert.Level.MODEL_UNAVAILABLE,
+                        )
                         providerLastError = error.message
                         lastHttpStatus = call.status
-                        failureKinds.add(ErrorKind.MODEL_LIMIT)
+                        failureKinds.add(error.kind)
                         finishActiveRequest()
                         gateHandle.release()
                         break
                     }
 
-                    // 剩余为上游侧可重试错误（5xx/429/网络/额度/404）：计入熔断与健康指标
+                    // 额度/积分耗尽：先告警（震动+通知），并在同一个供应商内继续换号。
+                    // 这是主人要的优先级：账号没额度不是「这一家不行」，先跑完同家其它账号，
+                    // 真的全都没额度了才升级为「供应商没额度」的强提醒。
+                    if (error.kind == ErrorKind.QUOTA) {
+                        val providerName = provider.displayName
+                        val accountName = account.nickname.ifEmpty { account.uid }
+
+                        // 这个号确实空了：立刻把本地记录改成 0，后续选号就不会再白试它。
+                        // （池里的额度本来只是旧快照，这次上游亲口说空了，是最权威的一次更新）
+                        engine.pool.updateCredits(
+                            currentRoute.providerId, account.uid, 0L, known = true,
+                            detail = "上游报额度耗尽：${error.message}",
+                        )
+
+                        // 判断是否还有「额度已知 > 0」的账号可接：
+                        // 注意这里带的 skipEmptyCredits=true —— 刚才已经把这个号置 0，
+                        // 如果同家只剩一堆 0，就应该直接升级为「整家没额度」，
+                        // 而不是反复换号再错一遍。
+                        val hasCreditAccount = engine.pickAccount(
+                            currentRoute.providerId, tried, currentRoute.region, skipEmptyCredits = true,
+                        ) != null
+                        // 还有别的号没试过（即使额度也是 0，但没试过）→ 还能再试一把
+                        val hasUntriedAccount = engine
+                            .pickAccount(currentRoute.providerId, tried, currentRoute.region) != null
+
+                        val continuesInProvider = hasCreditAccount || hasUntriedAccount
+                        engine.quotaAlerts.emit(
+                            QuotaAlert(providerName, accountName, requestedModel, error.message),
+                            if (continuesInProvider) QuotaAlert.Level.ACCOUNT_EXHAUSTED
+                            else QuotaAlert.Level.PROVIDER_EXHAUSTED,
+                        )
+                        log(
+                            "[$providerName/$accountName] 额度耗尽（${error.message}）：" +
+                                if (continuesInProvider) "自动切到同供应商其它账号继续" else "该供应商已无可用账号",
+                        )
+                        // 不计熔断：额度不足是账号级问题，换号后同家仍可正常服务
+                        providerLastError = error.message
+                        lastHttpStatus = call.status
+                        failureKinds.add(error.kind)
+                        finishActiveRequest()
+                        gateHandle.release()
+                        if (continuesInProvider) continue
+                        // 没有别的额度可用账号了：退出本供应商，交给下一家候选（若有）
+                        break
+                    }
+
+                    // 剩余为上游侧可重试错误（5xx/429/网络/404）：计入熔断与健康指标
                     cb.recordFailure()
                     pMetrics.record(false, elapsed, "http_${call.status}")
                     providerLastError = error.message
@@ -619,14 +739,8 @@ class GatewayHttpServer(
             }
             routeErrors.add("${currentRoute.providerId}($errDetail)")
 
-            // 同款模型跨供应商 Failover：按优先级选下一个尚未尝试且有可用账号的供应商
-            val next = candidateRoutes()
-                .firstOrNull { it.providerId !in triedProviders && engine.pool.pick(it.providerId) != null }
-            if (next != null) {
-                log("[故障转移] 供应商 [${currentRoute.providerId}] 调用未成功（$errDetail），自动切换至备选供应商 [${next.providerId}]（对应模型: ${next.model}）...")
-                currentRoute = next
-                continue
-            }
+            // ★ 跨供应商 Failover 已删除：这家没跑成就直接结束，不换家。
+            // 换家会让「标签只绑定对应供应商」形同虚设，也会让报错看不出到底是哪家不行。
             break
         }
         } finally {
@@ -817,6 +931,10 @@ class GatewayHttpServer(
                 call.close()
                 runCatching { onFinished() }
                 if (status == CallStatus.SUCCESS) {
+                    // 成功了就说明这个号额度不可能是 0（可能之前被误标、或额度已重置）。
+                    // 先摘掉「额度耗尽」标记，再做常规补刷；否则万一补刷失败，
+                    // 这个号会一直停在 0、一直被选号跳过。
+                    engine.pool.clearExhaustedMark(providerId, uid)
                     engine.refreshCreditsSoon(providerId, uid)
                 }
                 if (engine.verboseLogging()) {
@@ -873,6 +991,8 @@ class GatewayHttpServer(
             newCompletionId(), providerId, model, uid, nickname, false,
             CallStatus.SUCCESS, httpStatus, usage, pointsConsumedOf(payload ?: JsonObject(), usage), "", content, requestBody, startedAt, normalized,
         )
+        // 同上：对话成功即证明有额度，先摘掉可能残留的「额度耗尽」标记
+        engine.pool.clearExhaustedMark(providerId, uid)
         engine.refreshCreditsSoon(providerId, uid)
         return json(200, normalized)
     }
@@ -1131,6 +1251,25 @@ class GatewayHttpServer(
         500 -> "Internal Server Error"
         503 -> "Service Unavailable"
         else -> "Status"
+    }
+
+    /**
+     * 供应商的对外标签名（带区域后缀），用于告警文案。
+     *
+     * 直接复用路由层那套生成逻辑，保证横幅里看到的名字和客户端里写的标签一致：
+     * 「腾讯国内」「字节国外」「谷歌」「mysite」……
+     */
+    private fun routeLabelOf(providerId: String, region: String?): String =
+        runCatching { engine.routeLabel(providerId, region) }.getOrDefault(providerId)
+
+    /** 把「账号全停用」的成因翻译成一句人话。 */
+    private fun describeDisabledAccounts(avail: AccountPool.Availability): String = when {
+        avail.deadCredential > 0 && avail.offByUser > 0 ->
+            "共 ${avail.total} 个账号：${avail.deadCredential} 个凭证失效（需重新登录），${avail.offByUser} 个被手动停用（去启用）"
+        avail.deadCredential > 0 ->
+            "共 ${avail.total} 个账号，凭证均已失效，需要重新登录"
+        else ->
+            "共 ${avail.total} 个账号，全部被手动停用，去「供应商」页启用即可恢复"
     }
 
     private fun recordCall(

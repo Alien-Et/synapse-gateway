@@ -1303,7 +1303,14 @@ class CodeBuddyProvider(
                 .ifEmpty { jwtClaim(accessToken, "user_id", "userId", "uid", "sub") },
             enterpriseId = obj.firstString("enterpriseId", "enterprise_id", "entId", "tenantId", "tenant_id")
                 .ifEmpty { jwtClaim(accessToken, "tenant_id", "tenantId", "enterprise_id", "enterpriseId") },
-            nickname = obj.firstString("nickname", "nickName", "name"),
+            // 用户名：优先上游显式返回，其次从 JWT 里解（Google/GitHub 等第三方登录的
+            // 邮箱或用户名往往就在这里），最后才回退到 uid。
+            // 之前只看 nickname/nickName/name，而设备授权返回里根本没这几个字段，
+            // 于是账号卡片上只看得到一串 UUID。
+            nickname = obj.firstString("nickname", "nickName", "name", "email", "preferred_username")
+                .ifEmpty { jwtClaim(accessToken, "email") }
+                .ifEmpty { jwtClaim(accessToken, "preferred_username") }
+                .ifEmpty { jwtClaim(accessToken, "name") },
         )
     }
 
@@ -1320,7 +1327,12 @@ class CodeBuddyProvider(
         val uid = credential.uid.ifEmpty {
             "codebuddy-" + credential.accessToken.hashCode().toUInt().toString(16)
         }
-        return ProviderAccount(id, uid, credential.nickname, secret)
+        // 昵称拿不到时不要留空：账号列表会显示一片空白，没法区分是谁。
+        // 退化成 uid 前几位，至少能区分账号，也方便对着上游控制台自查。
+        val nickname = credential.nickname.ifEmpty {
+            if (uid.length > 12) uid.take(8) + "…" else uid
+        }
+        return ProviderAccount(id, uid, nickname, secret)
     }
 
     private fun envelopeData(body: String): JsonObject? {
