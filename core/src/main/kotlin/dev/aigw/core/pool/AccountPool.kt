@@ -20,6 +20,13 @@ data class AccountStatus(
     val creditsKnown: Boolean,
     /** provider 给出的额度补充说明（如「来源=团队，当日剩余=…」）。 */
     val detail: String,
+    /**
+     * 需要用户动手时的可操作指引（如 Google 账号要去官网做人机验证）。
+     *
+     * 与 [detail] 分工：detail 给排查看（含状态码/上游原文），这条给普通用户看，
+     * 界面单独高亮展示。空串表示没有额外建议。
+     */
+    val actionHint: String = "",
     /** 上次失败原因（凭证失效或手动停用的说明）；空串表示一切正常。 */
     val reason: String,
     /** 凭证失效导致的硬禁用，需要重新登录。 */
@@ -54,6 +61,7 @@ private class Entry(var account: ProviderAccount) {
     var credits: Long = 0
     var creditsKnown: Boolean = false
     var detail: String = ""
+    var actionHint: String = ""
     var disabled: Boolean = false
     var enabled: Boolean = true
     var reason: String = ""
@@ -237,12 +245,14 @@ class AccountPool(
         credits: Long,
         known: Boolean = true,
         detail: String = "",
+        actionHint: String = "",
     ) {
         val found = lock.write {
             val entry = entries[keyOf(providerId, uid)] ?: return@write false
             entry.credits = credits
             entry.creditsKnown = known
             entry.detail = detail
+            entry.actionHint = actionHint
             true
         }
         if (found) persistState(providerId, uid)
@@ -382,6 +392,7 @@ class AccountPool(
         credits = entry.credits,
         creditsKnown = entry.creditsKnown,
         detail = entry.detail,
+        actionHint = entry.actionHint,
         reason = entry.reason,
         disabled = entry.disabled,
         enabled = entry.enabled,
@@ -419,6 +430,7 @@ class AccountPool(
         addProperty("credits", entry.credits)
         addProperty("creditsKnown", entry.creditsKnown)
         addProperty("detail", entry.detail)
+        addProperty("actionHint", entry.actionHint)
         addProperty("disabled", entry.disabled)
         addProperty("enabled", entry.enabled)
         addProperty("reason", entry.reason)
@@ -434,6 +446,7 @@ class AccountPool(
                 entry.credits = state.get("credits")?.asLong ?: 0L
                 entry.creditsKnown = state.get("creditsKnown")?.asBoolean ?: false
                 entry.detail = state.get("detail")?.asString.orEmpty()
+                entry.actionHint = state.get("actionHint")?.asString.orEmpty()
                 entry.disabled = state.get("disabled")?.asBoolean ?: false
                 entry.enabled = state.get("enabled")?.asBoolean ?: true
                 entry.reason = state.get("reason")?.asString.orEmpty()

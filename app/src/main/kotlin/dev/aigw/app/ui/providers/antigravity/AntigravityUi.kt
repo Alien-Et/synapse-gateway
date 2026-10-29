@@ -4,11 +4,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -59,9 +61,35 @@ object AntigravityUi : ProviderUi {
                 actions.onLoadCreditPacks(id, status.uid)
             }
         }
-        if (packs.isEmpty()) return
-
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // 需要用户动手时（如账号要人机验证）把指引放最上面并高亮，
+            // 不然用户只看到「没有额度包」完全不知道该干什么。
+            if (status.actionHint.isNotEmpty()) {
+                val accent = MaterialTheme.colorScheme.error
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = accent.copy(alpha = 0.10f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        text = status.actionHint,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = accent,
+                        modifier = Modifier.padding(12.dp),
+                    )
+                }
+            }
+            if (packs.isEmpty()) {
+                // 没有额度包时也说明一下原因（之前这里直接 return，错误信息完全看不到）
+                if (status.detail.isNotEmpty()) {
+                    Text(
+                        text = status.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                return@Column
+            }
             for (pack in packs) {
                 QuotaPackBar(pack)
             }

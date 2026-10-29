@@ -664,7 +664,7 @@ class GatewayEngine(
             pool.updateCredits(providerId, uid, 0, false, reason)
             return CreditRefreshResult(providerId, uid, account.nickname, 0, false, reason)
         }
-        pool.updateCredits(providerId, uid, info.balance, info.known, info.detail)
+        pool.updateCredits(providerId, uid, info.balance, info.known, info.detail, info.actionHint)
         if (info.known) {
             log("额度刷新 $providerId/${account.nickname.ifEmpty { uid }}：${info.balance}（${info.detail}）")
         } else {
@@ -672,7 +672,13 @@ class GatewayEngine(
         }
         return CreditRefreshResult(
             providerId, uid, account.nickname, info.balance, info.known,
-            if (info.known) "" else info.detail,
+            // 失败时优先给可操作指引：技术描述（含状态码/上游原文）对普通用户没用，
+            // 他们需要的是「接下来做什么」。两者都放，指引在前、细节在后。
+            when {
+                info.known -> ""
+                info.actionHint.isNotEmpty() -> info.actionHint
+                else -> info.detail
+            },
         )
     }
 

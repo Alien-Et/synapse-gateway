@@ -313,12 +313,18 @@ class AntigravityProviderTest {
     ) { base, _ ->
         val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
         assertTrue(!info.known, "403 时额度未知")
+        // 操作指引走 actionHint（给普通用户看），detail 只留技术描述
+        val hint = info.actionHint
+        assertTrue(hint.isNotEmpty(), "VALIDATION_REQUIRED 必须给操作指引")
         // 不能报成「登录失效」——那会让用户白白重登一遍
-        assertTrue(!info.detail.contains("登录状态已失效"), info.detail)
-        assertTrue(info.detail.contains("人机验证"), info.detail)
-        assertTrue(info.detail.contains("accounts.google.com"), "要给出验证入口：${info.detail}")
-        // 明确告诉用户不用重登网关
-        assertTrue(info.detail.contains("无需重新登录"), info.detail)
+        assertTrue(!hint.contains("登录状态已失效"), hint)
+        assertTrue(hint.contains("验证"), hint)
+        assertTrue(hint.contains("accounts.google.com"), "要给出验证入口：$hint")
+        assertTrue(hint.contains("不需要在网关里重新登录"), hint)
+        // 指引里不该出现 reason 码这类技术细节
+        assertTrue(!hint.contains("VALIDATION_REQUIRED"), "指引不该暴露 reason 码：$hint")
+        // 技术细节留在 detail，便于排查
+        assertTrue(info.detail.contains("403"), info.detail)
     }
 
     @Test

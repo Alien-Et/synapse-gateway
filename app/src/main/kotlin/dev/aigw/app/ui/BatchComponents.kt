@@ -103,16 +103,19 @@ fun BatchOutcomeDialog(outcome: BatchOutcome, onDismiss: () -> Unit) {
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         outcome.items.forEach { item ->
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(
                                     text = item.account,
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
+                                // 失败原因可能是多行的操作指引（如「去 Google 验证账号」三步），
+                                // 用 bodySmall + 行距让步骤读起来不挤。
                                 Text(
                                     text = item.message,
                                     style = MaterialTheme.typography.bodySmall,
+                                    lineHeight = MaterialTheme.typography.bodySmall.fontSize * 1.5,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }

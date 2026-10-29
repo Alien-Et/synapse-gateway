@@ -321,11 +321,16 @@ class AntigravityProvider(
                 return CreditInfo(0, known = false, detail = "登录状态已失效，需要重新登录")
             paidStatus !in 200..299 -> {
                 // 403 要按上游给的 reason 分类，不然用户拿着一坨 JSON 不知道该怎么办。
-                // VALIDATION_REQUIRED 是**账号本身需要人机验证**，跟网关和登录态都无关；
-                // 这种情况下再拿同一个 token 去查配额也会 403，直接返回不再多打一次上游。
                 val reason = upstreamErrorReason(paidBody)
                 if (paidStatus == 403 && reason == "VALIDATION_REQUIRED") {
-                    return CreditInfo(0, known = false, detail = ACCOUNT_VERIFICATION_REQUIRED)
+                    // 账号需要人机验证：这是唯一值得用户动手的情况，直接给操作步骤，
+                    // 不再拿同一个 token 去查配额（必然也 403）。
+                    return CreditInfo(
+                        0,
+                        known = false,
+                        detail = "Google 上游拒绝了本次请求（403 VALIDATION_REQUIRED）",
+                        actionHint = ACCOUNT_VERIFICATION_REQUIRED,
+                    )
                 }
                 return quotaCreditInfo(
                     credential,
@@ -1090,16 +1095,20 @@ class AntigravityProvider(
         const val ID = "antigravity"
 
         /**
-         * 上游 403 `VALIDATION_REQUIRED` 的提示。
+         * 上游 403 `VALIDATION_REQUIRED` 的操作指引。
          *
          * 这**不是**登录失效、也不是网关的问题：Google 判定该账号需要完成一次人机验证，
          * 没验证完之前 `cloudcode-pa.googleapis.com` 一律拒绝（对话与额度查询都会 403）。
-         * 提示必须直接给出解决办法，否则用户只会看到一坨 JSON 不知道点哪里。
+         *
+         * 面向普通用户，只说「做什么」，不出现 reason 码、状态码、JSON 这些技术细节——
+         * 那些放 detail 里给排查用。
          */
         const val ACCOUNT_VERIFICATION_REQUIRED =
-            "Google 账号需要完成人机验证（上游返回 403 VALIDATION_REQUIRED），" +
-                "不是登录失效。请用浏览器打开 https://accounts.google.com 登录该账号并按提示完成验证，" +
-                "验证通过后回到这里点「刷新额度」即可，无需重新登录网关。"
+            "需要先在 Google 官网验证这个账号：\n" +
+                "1. 用浏览器打开 accounts.google.com 并登录该账号\n" +
+                "2. 按页面提示完成验证（可能需要手机号或辅助邮箱）\n" +
+                "3. 验证通过后回到这里点「刷新额度」\n" +
+                "账号密码没问题，不需要在网关里重新登录。"
 
         const val CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
         // 这是 Google 为「已安装应用」（installed-app）OAuth 客户端下发的公开 client_secret：

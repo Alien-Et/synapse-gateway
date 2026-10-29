@@ -22,6 +22,17 @@ data class CreditInfo(
     /** false 表示上游未返回可解析的额度字段，界面显示「—」而不是 0。 */
     val known: Boolean = true,
     val detail: String = "",
+    /**
+     * 需要用户动手时的**可操作指引**（不含技术细节，直接告诉用户点哪里、做什么）。
+     *
+     * 与 [detail] 分工：detail 是给排查用的技术描述（含状态码、上游原文摘要），
+     * actionHint 是给普通用户看的「下一步怎么做」。界面把它单独排在前面并高亮，
+     * 避免用户被一坨 JSON 劝退——典型场景是 Google 403 `VALIDATION_REQUIRED`
+     * （账号要人机验证），这时唯一有用的话就是「打开哪个网址、验证完回来刷新」。
+     *
+     * 为空表示没有额外操作建议。
+     */
+    val actionHint: String = "",
 )
 
 /** provider 专属动作的结果。 */
