@@ -40,7 +40,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -85,12 +87,44 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     var detail by remember { mutableStateOf<CallRecord?>(null) }
     var showLogSettings by remember { mutableStateOf(false) }
 
-    // 停留在本页时自动刷新（只刷记录，不动低频数据）
+    // 进入本页先拉一次（历史数据）；之后靠 RequestLog 的推送实时刷新，
+    // 不再做 5 秒轮询——日志写入时 ViewModel 会主动推 state。
     LaunchedEffect(tab) {
-        while (true) {
-            delay(5_000)
-            viewModel.refreshRecords()
+        viewModel.refreshRecords()
+    }
+
+    val listState = rememberLazyListState()
+
+    // ---------------- 自动滚屏 ----------------
+    // 规则（主人要求）：
+    // - 用户没往上翻 → 新日志来了自动跟到底部；
+    // - 用户上滑查看历史 → 停在他看的位置，上方继续追加但不抢滚动；
+    // - 用户往下滑回底部 → 自动恢复跟屏。
+    //
+    // 用「是否已回到底部」作为唯一信号，不用固定像素阈值：
+    // 日志条目高度差很大（折叠/展开），固定阈值不可靠。
+    //
+    // ⚠️ 方向很重要：RequestLog 用 addFirst，**最新一条在 index 0（顶部）**。
+    // 所以「跟最新」= 停在顶部，而不是滚到底部。
+    // 之前写成「滚到最后一项」，结果每次进来都跳去最旧那条，和直觉完全相反。
+    var userScrolledAway by remember(tab) { mutableStateOf(false) }
+    val atTop by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull() ?: return@derivedStateOf true
+            first.index == 0 && first.offset >= -4
         }
+    }
+    // 一旦回到顶部就恢复跟屏
+    LaunchedEffect(atTop) {
+        if (atTop) userScrolledAway = false
+    }
+    // 正在滚动且不在顶部 → 用户主动离开了最新日志
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling ->
+                if (scrolling && !atTop) userScrolledAway = true
+            }
     }
 
     val calls = remember(state.calls, filter) {
@@ -119,9 +153,7 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
             title = "记录",
             subtitle = "调用与请求日志",
             actions = {
-                IconButton(onClick = { viewModel.refresh() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "刷新")
-                }
+                // 刷新按钮已删除：本页每 5 秒自动刷新，手动刷新只会打断自动滚屏
                 StatusChip(state.running)
             },
         )
@@ -214,7 +246,13 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
 
-        val listState = rememberLazyListState()
+        // 新日志是插入到 index 0 的，所以「保持最新可见」= 保持在顶部。
+        // 用条数作触发器：只在真多了一条时才动，不会每帧抢滚动。
+        LaunchedEffect(tab, if (tab == LogTab.Calls) calls.size else logs.size) {
+            if (!userScrolledAway && listState.layoutInfo.totalItemsCount > 0) {
+                listState.animateScrollToItem(0)
+            }
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f).fillMaxWidth().scrollFade(listState),

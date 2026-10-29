@@ -311,6 +311,13 @@ private data class TopologyProviderBranch(
     val hasActiveRequest: Boolean,
     val activeCount: Int,
     val colorIndex: Int,
+    /**
+     * 当前正在服务的账号名（有在途请求时才有）。
+     *
+     * 多个账号同时在跑时只展示前两个 + 多出的数量，
+     * 因为拓扑分支只有一行高，塞不下完整名单。
+     */
+    val activeAccounts: List<String> = emptyList(),
 )
 
 /**
@@ -344,8 +351,25 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
         activeRequests.groupBy { it.providerId.lowercase() }.mapValues { it.value.size }
     }
 
+    // 在途请求命中的账号名（按供应商分组、去重保序）。
+    // 昵称为空时退回 uid 前几位，避免出现「空名字」的分支。
+    val activeAccountsByProvider = remember(activeRequests) {
+        activeRequests
+            .groupBy { it.providerId.lowercase() }
+            .mapValues { (_, list) ->
+                list.map { req ->
+                    req.nickname.ifEmpty {
+                        if (req.uid.length > 8) req.uid.take(6) + "…" else req.uid
+                    }
+                }.distinct()
+            }
+    }
+
     // 真实有账号的供应商
-    val branches = remember(state.accounts, state.providers, callCountsByProvider, activeCountsByProvider, totalRecentCalls) {
+    val branches = remember(
+        state.accounts, state.providers, callCountsByProvider,
+        activeCountsByProvider, activeAccountsByProvider, totalRecentCalls,
+    ) {
         val groupedAccounts = state.accounts.groupBy { it.providerId.lowercase() }
         if (groupedAccounts.isEmpty()) {
             emptyList()
@@ -381,6 +405,7 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
                     hasActiveRequest = activeCount > 0,
                     activeCount = activeCount,
                     colorIndex = index,
+                    activeAccounts = activeAccountsByProvider[pid].orEmpty(),
                 )
             }
         }
@@ -677,11 +702,21 @@ private fun ProviderBranchRow(
                         )
                     }
                 }
+                // 有在途时优先显示「正在用哪个账号」——这是主人最想看到的信息；
+                // 没有在途才回退到账号总数。
+                val activeLabel = branch.activeAccounts.take(2).joinToString("、") +
+                    if (branch.activeAccounts.size > 2) " +${branch.activeAccounts.size - 2}" else ""
                 Text(
-                    text = "${branch.usableAccounts}/${branch.totalAccounts} 可用",
+                    text = if (isBranchActive && activeLabel.isNotBlank()) {
+                        "▶ $activeLabel"
+                    } else {
+                        "${branch.usableAccounts}/${branch.totalAccounts} 可用"
+                    },
                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp, fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isBranchActive && activeLabel.isNotBlank()) gold else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = if (isBranchActive && activeLabel.isNotBlank()) FontWeight.SemiBold else FontWeight.Normal,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
