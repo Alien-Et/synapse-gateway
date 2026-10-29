@@ -1,5 +1,13 @@
 # AI 聚合网关
 
+![License](https://img.shields.io/badge/license-MIT%20%2B%20附加声明-blue)
+![Platform](https://img.shields.io/badge/platform-Android-green)
+![Kotlin](https://img.shields.io/badge/kotlin-2.1.0-purple)
+![Compose](https://img.shields.io/badge/Jetpack%20Compose-enabled-lightblue)
+![API](https://img.shields.io/badge/API-OpenAI%20Compatible-orange)
+![MinSdk](https://img.shields.io/badge/minSdk-26-blue)
+![TargetSdk](https://img.shields.io/badge/targetSdk-36-blue)
+
 Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账号统一翻译成 OpenAI 兼容接口，暴露在 `http://127.0.0.1:8790/v1`。
 
 任何支持 OpenAI 协议的客户端（Cline、Cherry Studio、Continue、curl 脚本……）都能直接接上手机里的所有账号额度。

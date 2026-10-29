@@ -9,7 +9,9 @@
 
 **一句话**：把你的 Android 手机变成一台私有的 AI 模型聚合服务器。
 
-你的手机上装着多个 AI 服务的账号（Trae、WorkBuddy、Antigravity、Loomy），这些服务的客户端协议各不相同、大多数无法直接在第三方工具中使用。AI Gateway 把它们**全部翻译成标准 OpenAI 协议**，暴露在本机 `http://127.0.0.1:8790/v1`，于是任何支持 OpenAI 协议的客户端（Cherry Studio、Cline、Continue、curl 脚本……）都能透明地使用你手机里所有账号的额度。
+你的手机上装着多个 AI 服务的账号（腾讯、字节、谷歌、讯飞、商汤），这些服务的客户端协议各不相同、大多数无法直接在第三方工具中使用。AI Gateway 把它们**全部翻译成标准 OpenAI 协议**，暴露在本机 `http://127.0.0.1:8790/v1`，于是任何支持 OpenAI 协议的客户端（Cherry Studio、Cline、Continue、curl 脚本……）都能透明地使用你手机里所有账号的额度。
+
+路由按模型真实归属：写了前缀就按前缀走，不写前缀就查各家模型目录，谁有这个模型就发给谁。详见 README「路由逻辑」章节。
 
 **用户价值排序**（功能优先级以此为准）：
 1. **稳定可用**——账号不被封、请求不 503，这压倒一切新功能；
@@ -43,11 +45,11 @@
                 ▼
 ┌─────────────────────────────────────────────────┐
 │ Provider 实现（每个封装一个上游私有协议）             │
-│  trae:        SOLO 私有 SSE → OpenAI SSE          │
-│  codebuddy:   腾讯 OpenAI 兼容（强制 stream）       │
-│  antigravity: Gemini 风格 → OpenAI（双向翻译）      │
-│  loomy:       近乎直通（HTTP 200 + 业务码陷阱）      │
-│  raccoon:     小浣熊（OpenAI 结构包在 data 里）       │
+│  codebuddy:   腾讯（强制 stream:true）                │
+│  trae:        字节（SOLO 私有 SSE → OpenAI SSE）     │
+│  antigravity: 谷歌（Gemini 风格 → OpenAI，双向翻译）  │
+│  loomy:       讯飞（HTTP 200 + 业务码陷阱）           │
+│  raccoon:     商汤（OpenAI 结构包在 data 里）         │
 │  custom:*:    纯直通                              │
 └───────────────┬─────────────────────────────────┘
                 ▼
@@ -84,11 +86,11 @@
 | `provider/Provider.kt` | Provider 接口 + AuthKind 枚举 | 抽象边界，勿随意扩接口 |
 | `provider/ChatCall.kt` | 上游响应封装（stream/aggregated/failure 三态） | |
 | `provider/StreamSupport.kt` | `LineTransformStream`（逐行翻译）、`OpenAiSseAggregator`（SSE聚合/completionAsSse/isEmptyCompletion） | SSE 帧必须以 `\n\n` 结尾 |
-| `provider/antigravity/` | Google Antigravity（Gemini 协议）| **凭证策略见下文第 5 节，严禁回退**；额度查询完全对接 CLIProxyAPI |
-| `provider/codebuddy/` | 腾讯 WorkBuddy（国内 copilot.tencent.com / 国际 workbuddy.ai）| 上游拒绝非流式，必须 stream:true |
-| `provider/trae/` | 字节 Trae SOLO 通道（最重的协议转换）| |
-| `provider/loomy/` | 讯飞 Loomy（HTTP 200 + 业务码陷阱）| |
-| `provider/raccoon/` | 商汤小浣熊（`xiaohuanxiong.com`，web 通道，网页回调登录）| OpenAI 结构包在 `data` 里、`delta` 是字符串；字段用标准名（v2 是 LiteLLM 层，`max_new_tokens` 会被 500 拒）；有积分余额接口 |
+| `provider/antigravity/` | 谷歌（Gemini 协议）| **凭证策略见下文第 5 节，严禁回退**；额度查询完全对接 CLIProxyAPI |
+| `provider/codebuddy/` | 腾讯（国内 copilot.tencent.com / 国外 workbuddy.ai）| 上游拒绝非流式，必须 stream:true |
+| `provider/trae/` | 字节（SOLO 通道，最重的协议转换）| 国内 `trae.cn` / 国外 `trae.ai` |
+| `provider/loomy/` | 讯飞（HTTP 200 + 业务码陷阱）| |
+| `provider/raccoon/` | 商汤（`xiaohuanxiong.com`，web 通道，网页回调登录）| OpenAI 结构包在 `data` 里、`delta` 是字符串；字段用标准名（v2 是 LiteLLM 层，`max_new_tokens` 会被 500 拒）；有积分余额接口；每日赠送积分由服务端自动发放，「签到」按钮领取的是桌面端登录奖励 |
 | `provider/custom/` | 任意 OpenAI 兼容中转站 | 一个 key = 一个账号 |
 | `store/KeyValueStore.kt` | 存储抽象（App 侧用 EncryptedSharedPreferences 实现） | |
 | `security/` | `SecuritySettings`（脱敏/限速开关）、`RequestSanitizer`（system 提示词零宽字符脱敏 + 出网取证）、`AccountRateLimiter`（账号级最小间隔 + 抖动） | 只改 system 消息，不碰 user 输入 |
@@ -154,11 +156,11 @@ call/...                           # 调用日志
 
 | Provider | id | 登录方式 | 上游 | 协议陷阱 |
 |---|---|---|---|---|
-| Trae | `trae` | WebView 回调 51120 | `trae-api-cn.mchost.guru` | SOLO 私有 SSE；content 必须是 `[{type:text}]` 数组；tool 参数是字符串；流内 `notify_usage` 上报计费 |
-| WorkBuddy | `codebuddy` | 设备授权（state 轮询） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式（必须 stream:true）；tool_choice 只认字符串；签到/成长中心仅国内版 |
-| Antigravity | `antigravity` | OAuth loopback 51121 | `cloudcode-pa.googleapis.com` | Gemini 风格：role 用 user/model；schema 不支持 const/$ref；contents 必须严格交替；tool 参数名是 parametersJsonSchema；response.result 必须是字符串 |
-| Loomy | `loomy` | 手机短信 | `xfinfr.com` | 鉴权失败是 **HTTP 200 + 业务码**，不是 4xx |
-| 小浣熊 | `raccoon` | 网页回调（`/code/authorize` → `authorization_code`） | `xiaohuanxiong.com`（web 通道） | 登录 URL **不能带 `login_source=desktop`**（否则走 `office-raccoon://` 分支跳不回来）；对话走 v2（LiteLLM 层）：字段用标准名（`max_new_tokens` 会被 500 拒）、`delta` 是**字符串**不是对象；有积分余额/流水接口；「签到」实为桌面端登录奖励，须带 `X-Client-Platform`/`X-Client-Version` 才会发放 |
+| 字节 | `trae` | WebView 回调 51120 | `trae-api-cn.mchost.guru` | SOLO 私有 SSE；content 必须是 `[{type:text}]` 数组；tool 参数是字符串；流内 `notify_usage` 上报计费 |
+| 腾讯 | `codebuddy` | 设备授权（state 轮询） | 国内 `copilot.tencent.com` / 国外 `workbuddy.ai` | 上游拒绝非流式（必须 stream:true）；tool_choice 只认字符串；签到/成长中心仅国内版 |
+| 谷歌 | `antigravity` | OAuth loopback 51121 | `cloudcode-pa.googleapis.com` | Gemini 风格：role 用 user/model；schema 不支持 const/$ref；contents 必须严格交替；tool 参数名是 parametersJsonSchema；response.result 必须是字符串 |
+| 讯飞 | `loomy` | 手机短信 | `xfinfr.com` | 鉴权失败是 **HTTP 200 + 业务码**，不是 4xx |
+| 商汤 | `raccoon` | 网页回调（`/code/authorize` → `authorization_code`） | `xiaohuanxiong.com`（web 通道） | 登录 URL **不能带 `login_source=desktop`**（否则走 `office-raccoon://` 分支跳不回来）；对话走 v2（LiteLLM 层）：字段用标准名（`max_new_tokens` 会被 500 拒）、`delta` 是**字符串**不是对象；有积分余额/流水接口；每日赠送积分由服务端自动发放，「签到」按钮领取的是桌面端登录奖励，须带 `X-Client-Platform`/`X-Client-Version` 才会发放 |
 | 自定义 | `custom:<key>` | API Key | 用户填的 baseUrl | 无 |
 
 ---
@@ -210,35 +212,34 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
   - `resolveModel` 先查「模型目录里真有的 id」再做子串路由：`gemini-4-argon` 含 `pro`，否则会被改写成 `gemini-pro-agent`。
   - **额度查询路径的 403 不等于登录失效**：403 常见于权限/订阅分流（free-tier 访问部分 RPC 返回 `SUBSCRIPTION_REQUIRED`），此时应降级继续查配额并把真实状态码写进 detail；只有 401 才是重新登录。对话路径的 `classify` 仍保持 401/403 → `SESSION_DEAD`（见第 5 节铁律，勿改）。
 
-### 腾讯 WorkBuddy
+### 腾讯（CodeBuddy）
 - 上游**拒绝非流式**：必须强制 `stream:true`，网关侧聚合。
 - `tool_choice` 只认字符串。
 - ⚠️ **请求体形状是硬要求**（不满足直接 400，不是降级）：
-  - **首条消息必须是 `system`**，否则 `400 code=11128 "first message is not system prompt"`。我们自己发起的探测（模型页「测试」）最初就是纯 user 消息，直接撞上这条。
+  - **首条消息必须是 `system`**，否则 `400 code=11128 "first message is not system prompt"`。
   - 角色 `developer` 上游不认，要改叫 `system`；参数 `max_completion_tokens` 要改叫 `max_tokens`。
-  - ⚠️ **内容也会被拦**：带 Claude Code / Codex CLI 特征文本的请求会被以「Illegal API invocation from an unapproved channel」拒掉。已知替换（公开实现 magpie 用真实客户端逐词实测）：删 `x-anthropic-billing-header:…` 行；`You are Claude Code, Anthropic's official CLI for Claude` → 去掉 `official`；`Main branch (you will usually use this for PRs)` → `Main branch (usually the base for PRs)`；`Codex CLI is an open source project led by OpenAI.` → 前面补 `The `。都实现在 `prepareCodeBuddyBody`，**任何路径（含探测/自测）都要先过它**。
-- 国际/国内是两套端点（见下）；模型目录国内走网页控制台 `/console/enterprises/personal/models`，国际版走客户端 product config `/v3/config`。
-- ⚠️ **国内与国际是两套端点，不能混用**：国内主域 `copilot.tencent.com` / `codebuddy.cn`，国际 `workbuddy.ai`（历史域名 `codebuddy.ai`）。
-  - 拿国际版 token 打国内站会被直接拒（500/401）；区域靠 JWT `iss` 判定最可靠（`workbuddy.ai`=国际），凭证里的 `domain` 次之。
-  - **模型目录两条路径不通用**：国内走网页控制台 `/console/enterprises/personal/models`（无凭证 302 跳 OIDC 登录页）；国际版走客户端 product config `/v3/config`（该路径国内也能用）。国际版拿 Bearer token 打 console 路径会被后端 500，打 `/v2/enterprises/personal/models` 会挂死不返回。两份响应的结构相同（`data.agents[name=cli].models` + `data.models[]`），解析可共用。
-  - 设备授权的 state 与 token **不通用**：跨站轮询 `/v2/plugin/auth/token` 对未知 state 恒返回 `{"code":11217}`，不报错、只会静默等到超时——所以「打开登录页」与「轮询」必须用同一个区域。
-- 签到 `/v2/daily-checkin` 幂等；成长中心在 `/v2/activity/growth/*` 下；**仅国内版有**，国际版（workbuddy.ai）没有签到制度。
+  - ⚠️ **内容也会被拦**：带 Claude Code / Codex CLI 特征文本的请求会被以「Illegal API invocation from an unapproved channel」拒掉。已知替换见 `prepareCodeBuddyBody`。
+- ⚠️ **国内与国外是两套端点，不能混用**：国内主域 `copilot.tencent.com` / `codebuddy.cn`，国外 `workbuddy.ai`。
+  - 拿国外 token 打国内站会被直接拒（500/401）；区域靠 JWT `iss` 判定最可靠。
+  - 模型目录两条路径不通用：国内走网页控制台，国外走客户端 product config。
+  - 设备授权的 state 与 token **不通用**：「打开登录页」与「轮询」必须用同一个区域。
+- 签到 `/v2/daily-checkin` 幂等；成长中心在 `/v2/activity/growth/*` 下；**仅国内版有**，国外版没有签到制度。
 
-### 字节 Trae（SOLO）
-- ⚠️ **agent host 分区域且与 OAuth host 不同**：国内 agent `trae-api-cn.mchost.guru`、额度 `api.trae.cn`、鉴权 `api.trae.com.cn`；国际 agent `trae-api-sg.mchost.guru`、额度 `ug-normal.trae.ai`、鉴权 `api.trae.ai`。国际版把 agent host 写成 `api.trae.ai` 会让对话与模型目录全部 **404**（该域上 `/api/agent/v3/llm_utils_chat`、`/api/ide/v1/get_detail_param` 都不存在）。额度接口版本段也不同：国内 v2、国际 v1。
-- `content` 必须是 `[{type:"text",text}]` 数组；`tools[].function.parameters` 必须是 JSON 字符串；`tool_choice` 只认字符串；assistant 的 `tool_calls[].function` 要改名 `function_call`。
+### 字节（Trae）
+- ⚠️ **agent host 分区域且与 OAuth host 不同**：国内 agent `trae-api-cn.mchost.guru`、国外 agent `trae-api-sg.mchost.guru`。国外版把 agent host 写成 `api.trae.ai` 会让对话与模型目录全部 **404**。
+- `content` 必须是 `[{type:"text",text}]` 数组；`tools[].function.parameters` 必须是 JSON 字符串；`tool_choice` 只认字符串。
 - 流内 `notify_usage.ide_credits` 是真实积分消耗，需回写账号池。
 
-### 讯飞 Loomy
+### 讯飞（Loomy）
 - **鉴权失败是 HTTP 200 + 业务码**（JSON 里 code 字段），不是 4xx。不做业务码判定会把错误 JSON 当正常回复透传。
 
-### 商汤小浣熊（raccoon）
+### 商汤（Raccoon）
 - 登录是网页回调：`/code/authorize?appname=Raccoon&redirect=<回调>`，回调带 `authorization_code`，再 `POST /api/web/auth/v1/login_with_authorization_code` 换 `access_token`(JWT)/`refresh_token`。
-- ⚠️ **不要带 `login_source=desktop`**：授权页在 `login_source=desktop` 时走 `office-raccoon://auth/callback?code=…` 自定义 scheme 分支（手机上没有 App 能接，表现为「点授权跳首页、登录不回来」）；不传时才会把 `?authorization_code=…` 回推到 `redirect`（`window.open(redirect+code)`）。`redirect` 不传时兜底跳官网首页，这正是 bug 现象。
-- 积分：余额 `GET /api/web/points/v1/balance`（`available_points`，另有 `daily_points` / `monthly_points` / `reward_points` / `topup_points`）；流水 `GET /api/web/points/v1/bills?paging.limit=&paging.offset=&type=all`（`data.items[]` 带 `bill_id` / `event_name` / `biz_type` / `points` / `created_at`，**支出是负数**）。
-- ⚠️ **桌面端登录奖励不是「每日签到」**：`POST /api/web/desktop/v1/login/points/grant`（官方客户端函数名 `grantDesktopLoginPoints`）**必须带 `X-Client-Platform`（`desktop-windows` / `desktop-macos` / `desktop-linux`）与 `X-Client-Version`（如 `v1.0.38`）**，缺了上游不发放；响应 `data.granted` 表示本次是否发放，**积分在 `data.popup.points`，不在 `data.points`**。只看 HTTP 2xx 就报「签到成功」会骗人。每日赠送积分（免费 300/日、Pro 500/日）由服务端每天 00:00 自动发放、当天登录后有效期延长至 7 天，**不存在「点一下加积分」的签到**。
-- ⚠️ **小浣熊没有积分任务体系**：桌面端的「任务中心」是 Agent 任务（新建/定时任务），积分侧只有 balance / bills / grant 三个端点。别再去找「任务领积分」接口（探测过 30+ 候选路径全 404）。
-- 对话端点 `POST /api/web/llm/v2/chat/completions`（v2 是 LiteLLM 的 OpenAI 兼容层，字段名用标准 `max_tokens`；**改成 `max_new_tokens` 会被上游 500 拒**）。响应**真正的 OpenAI 结构被包在 `data` 里**（外层 `{"status":{"code":..},"data":{...}}`），且 **`delta` 是字符串**（正文片段）不是对象，需逐行翻译回标准 OpenAI SSE；请求体补 `n=1`、`stop="<|endofmessage|>"`。
+- ⚠️ **不要带 `login_source=desktop`**：授权页在 `login_source=desktop` 时走 `office-raccoon://auth/callback?code=…` 自定义 scheme 分支（手机上没有 App 能接，表现为「点授权跳首页、登录不回来」）。
+- 积分：余额 `GET /api/web/points/v1/balance`；流水 `GET /api/web/points/v1/bills`（`data.items[]` 带 `bill_id` / `event_name` / `biz_type` / `points` / `created_at`，**支出是负数**）。
+- ⚠️ **每日赠送积分由服务端自动发放**：免费 300/日、Pro 500/日，每天 00:00 自动发放、当天登录后有效期延长至 7 天。**不存在「点一下加积分」的签到**。
+- ⚠️ **商汤没有积分任务体系**：桌面端的「任务中心」是 Agent 任务（新建/定时任务），积分侧只有 balance / bills / grant 三个端点。
+- 对话端点 `POST /api/web/llm/v2/chat/completions`（v2 是 LiteLLM 的 OpenAI 兼容层，字段名用标准 `max_tokens`；**改成 `max_new_tokens` 会被上游 500 拒**）。响应**真正的 OpenAI 结构被包在 `data` 里**（外层 `{"status":{...}, "data":{...}}`），且 **`delta` 是字符串**（正文片段）不是对象，需逐行翻译回标准 OpenAI SSE。
 - 鉴权 `Authorization: Bearer <access_token>`；需带桌面 Web 客户端 UA + `Accept-Language: zh-Hans`；有组织时带 `X-Org-Code`。
 - 旧主机 `raccoon.sensetime.com` / `code.sensetime.com` 已解析不了，现主机是 `xiaohuanxiong.com`。
 
@@ -258,6 +259,10 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 4. **测试要求**：`:core:test` 全绿才能出包。协议相关改动必须先加失败用例再修（复现→修→锁住）。
 5. **构建三坑**（aarch64 PRoot 容器）：JDK 必须 17；必须 `LD_PRELOAD=/opt/android-sdk/lib/libdelfix.so`；aapt2/zipalign 必须用 aarch64 静态版（备份在 `~/.aicode/backup/`）。详见全局记忆 `android-build-arm64-proot`。
 6. **版本纪律**：每次交付 versionCode+1 / versionName patch+1；出包后 `aapt2 dump badging` 核对；产物命名 `ai-gateway-<版本>-release.apk`。
-7. **外部来源必须可追溯**：上游协议细节、UI 动效参数凡参考了外部项目，都要在代码注释里写明来源，
-   并在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 汇总（项目名 / 作者 / 地址 / 许可证 / 具体借鉴内容）。
+7. **路由纪律**：
+   - 前缀**只认中文**（`腾讯/`、`字节/`、`谷歌/`…），英文前缀不再作为路由前缀识别。
+   - 无前缀时**先查模型目录再猜**（`resolveByModelOwnership`），不能直接按名称猜供应商。
+   - `deepseek/kimi/glm/qwen` 这类在多家都有的模型**不猜**，返回 null 交给兜底。
+   - 区域型供应商（腾讯/字节）**按区域分别查目录**，模型在哪个站点上线就路由到哪个站点。
+8. **外部来源必须可追溯**：上游协议细节、UI 动效参数凡参考了外部项目，都要在代码注释里写明来源，并在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 汇总（项目名 / 作者 / 地址 / 许可证 / 具体借鉴内容）。
    提交信息正文同样要标注「借鉴自 <仓库>（作者，协议）：<内容>」。没有许可证的项目只参考行为与结论，不复制代码。
