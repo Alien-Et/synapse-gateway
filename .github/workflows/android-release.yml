@@ -14,7 +14,11 @@ name: Android Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      # ⚠️ GitHub Actions 的 tag 过滤用的是 glob（minimatch），不是正则！
+      # 写成 'v[0-9]+.[0-9]+.[0-9]+' 里的 `+` 会被当成普通字符，永远匹配不上 v2.23.0。
+      # 这里只做粗过滤（v 开头），具体的「三段数字」格式由下面的校验步骤用 grep -qE 严格把关，
+      # 所以 v2.23.0-beta 这类标签会进入工作流但被校验步骤拒绝，不会误发版。
+      - 'v*'
   workflow_dispatch:
 
 permissions:
