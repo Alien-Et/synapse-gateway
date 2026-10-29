@@ -466,8 +466,10 @@ private fun ModelRow(
                         color = MaterialTheme.colorScheme.primary,
                     )
                     extra["rateDiscount"]?.takeIf { it.isNotBlank() }?.let { discount ->
+                        val until = extra["rateDiscountUntil"].orEmpty()
                         Text(
-                            text = "限时 $discount",
+                            // 结束时间来自上游实时下发（活动延期刷新即变），有就带上，没有只显示倍率
+                            text = if (until.isEmpty()) "限时 $discount" else "限时 $discount（至 $until）",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.tertiary,
                         )

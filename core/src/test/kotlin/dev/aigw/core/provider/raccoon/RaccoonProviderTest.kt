@@ -94,7 +94,9 @@ class RaccoonProviderTest {
              "description":"DeepSeek V4.1 Flash",
              "billing_multiplier":0.25,"billing_effective_multiplier":0,
              "billing_status":"limited_free",
-             "billing_discounts":[{"name":"限免至10月31日","multiplier":0}],
+             "billing_discounts":[{"name":"限免至10月31日","multiplier":0,
+                                   "start_at":"2026-08-28T00:00:00+08:00",
+                                   "end_at":"2026-11-01T00:00:00+08:00"}],
              "params":{"context_window":1000000,"max_tokens":100000}}
         ]}}"""
         withUpstream(path = "/api/web/llm/v2/model_catalog", body = body) { base ->
@@ -112,6 +114,9 @@ class RaccoonProviderTest {
             assertEquals("0.25×", deepseek.extra["rate"])
             assertEquals("0×", deepseek.extra["rateDiscount"], "限免时生效倍率是 0")
             assertEquals("限免至10月31日", deepseek.extra["rateDiscountTag"])
+            // 上游 end_at 是「下一段开始」（11-01 00:00），展示时减 1 秒才是真正的结束时刻
+            assertEquals("10月31日 23:59", deepseek.extra["rateDiscountUntil"],
+                "结束时间应来自上游 end_at 并减 1 秒")
             assertEquals("100000", deepseek.extra["maxOutput"])
         }
     }

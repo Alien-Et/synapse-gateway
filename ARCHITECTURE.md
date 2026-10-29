@@ -242,6 +242,8 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
   - `billing_effective_multiplier`：**当前实际生效倍率**。限免活动期间为 `0`，与基准不同时说明有折扣在生效。
   - `billing_status`：`normal` / `limited_free`（限免）。
   - `billing_discounts[]`：折扣数组，元素带 `name`（如「限免至10月31日」）/ `multiplier` / `start_at` / `end_at`。
+    - ⚠️ **起止时间是服务器实时下发的**（ISO-8601 带时区），不是本地硬编码：活动延期、提前结束或换档，刷新一次模型目录就跟着变。**不要在客户端写死日期**。
+    - ⚠️ `end_at` 是「下一段开始的时刻」（如 `2026-11-01T00:00:00+08:00` 表示 10-31 23:59 结束），展示前减 1 秒，否则会和官方文案「限免至10月31日」差一天。
   - `billing_category`：`normal` / `lite`（轻量档）。
   - ⚠️ **`context_window` 与 `max_tokens` 嵌套在 `params` 对象里**（顶层没有）：`params:{"context_window":1000000,"max_tokens":100000}`。只读顶层会让上下文窗口恒为 0、界面显示不出来。
   - 显示名优先取 `description`（如 `Raccoon-Work`），`name` / `model_name` 其实是模型 id。

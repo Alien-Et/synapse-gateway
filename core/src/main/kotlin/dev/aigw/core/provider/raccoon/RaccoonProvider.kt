@@ -523,12 +523,14 @@ class RaccoonProvider(
             val maxOutput = params?.firstLong("max_tokens", "max_output_tokens", "maxOutputTokens") ?: 0L
 
             // 倍率：billing_multiplier 是基准价，billing_effective_multiplier 是当前实际生效价
-            // （限免活动时为 0，此时 billing_discounts[0].name 给出「限免至10月31日」这类说明）。
+            // （限免活动时为 0）。折扣的起止时间由**服务器实时下发**（billing_discounts[].start_at/end_at），
+            // 不是本地硬编码——活动延期或提前结束，刷新一次就跟着变。
             val baseRate = item.doubleOrNull("billing_multiplier")
             val effectiveRate = item.doubleOrNull("billing_effective_multiplier")
-            val discountName = item.arrayOrNull("billing_discounts")
+            val discount = item.arrayOrNull("billing_discounts")
                 ?.firstOrNull { it.isJsonObject }?.asJsonObject
-                ?.stringOrNull("name").orEmpty()
+            val discountName = discount?.stringOrNull("name").orEmpty()
+            val discountEnd = discount?.stringOrNull("end_at")?.let { formatDiscountEnd(it) }
 
             result.add(
                 ProviderModel(
@@ -543,6 +545,7 @@ class RaccoonProvider(
                         if (baseRate != null && effectiveRate != null && effectiveRate != baseRate) {
                             put("rateDiscount", formatRate(effectiveRate) + "×")
                             if (discountName.isNotEmpty()) put("rateDiscountTag", discountName)
+                            if (discountEnd != null) put("rateDiscountUntil", discountEnd)
                         }
                         if (maxOutput > 0) put("maxOutput", maxOutput.toString())
                     },
@@ -559,6 +562,27 @@ class RaccoonProvider(
         } else {
             String.format(java.util.Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
         }
+
+    /**
+     * 折扣结束时间 →「10月31日 23:59」这种短标签。
+     *
+     * ⚠️ 上游 `end_at` 是**下一段开始的时刻**（如 `2026-11-01T00:00:00+08:00` 表示 10-31 23:59 结束），
+     * 所以展示前减 1 秒，否则会和官方文案「限免至10月31日」对不上，看起来像多送一天。
+     *
+     * 时间完全来自服务器（活动延期/提前结束刷新即变），本地不做任何硬编码。
+     * 解析失败返回 null，界面退回只显示折扣倍率。
+     */
+    private fun formatDiscountEnd(raw: String): String? = runCatching {
+        val end = OffsetDateTime.parse(raw.trim()).minusSeconds(1)
+        val now = OffsetDateTime.now()
+        val hh = end.hour.toString().padStart(2, '0')
+        val mm = end.minute.toString().padStart(2, '0')
+        if (end.year == now.year) {
+            "${end.monthValue}月${end.dayOfMonth}日 $hh:$mm"
+        } else {
+            "${end.year}年${end.monthValue}月${end.dayOfMonth}日"
+        }
+    }.getOrNull()
 
     /** 读倍率：JSON 里可能是整数 `1` 也可能是小数 `0.75`，非数字（如 "normal"）返回 null。 */
     private fun JsonObject.doubleOrNull(name: String): Double? =
