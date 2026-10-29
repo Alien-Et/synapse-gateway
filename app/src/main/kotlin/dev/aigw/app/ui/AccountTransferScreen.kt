@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import dev.aigw.app.ui.providers.ProviderUiRegistry
 import dev.aigw.core.pool.AccountImportResult
 import dev.aigw.core.provider.ProviderAccount
 import kotlinx.coroutines.Dispatchers
@@ -88,6 +89,8 @@ fun AccountTransferScreen(
     var overwrite by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<AccountImportResult?>(null) }
     var importError by remember { mutableStateOf("") }
+    // 导入完成弹窗：只做一次确认反馈，关掉后页面上的统计行仍在
+    var showResultDialog by remember { mutableStateOf(false) }
 
     val exportGroups = state.providers
         .map { info ->
@@ -256,17 +259,22 @@ fun AccountTransferScreen(
             val accounts = parsed
             if (accounts != null) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                val grouped = state.providers
-                    .map { info -> info.id to accounts.filter { it.providerId == info.id } }
+                val grouped = (state.providers.map { it.id } + accounts.map { it.providerId })
+                    .distinct()
+                    .map { id -> id to accounts.filter { it.providerId == id } }
                     .filter { it.second.isNotEmpty() }
-                val unknown = accounts.filter { account -> state.providerOf(account.providerId) == null }
+                // 只提示「连自动创建都救不了」的那些：自定义标签在导入时会当场建出来，
+                // 所以不算未知。真正认不出来的只有既非自定义、本机又没有同名的内置供应商。
+                val unknown = accounts
+                    .filterNot { it.providerId.startsWith(ProviderUiRegistry.CUSTOM_PREFIX) }
+                    .filter { account -> state.providerOf(account.providerId) == null }
                 Text(
                     text = "文件里有 ${accounts.size} 个账号，已选 ${importSelection.size} 个",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (unknown.isNotEmpty()) {
                     Text(
-                        text = "本机没有这些供应商，将被跳过：" +
+                        text = "无法识别的供应商（将被跳过）：" +
                             unknown.map { it.providerId }.distinct().joinToString("、"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
@@ -289,9 +297,12 @@ fun AccountTransferScreen(
                             importError = "没有选中任何账号"
                             return@Button
                         }
-                        result = viewModel.importAccountsJson(parsedJson, importSelection, overwrite)
+                        val outcome = viewModel.importAccountsJson(parsedJson, importSelection, overwrite)
+                        result = outcome
                         importError = ""
                         viewModel.refresh()
+                        // 导入后弹窗反馈：新增/覆盖/跳过一目了然，不用自己数下面的统计行
+                        showResultDialog = true
                     },
                     enabled = importSelection.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth(),
@@ -310,10 +321,22 @@ fun AccountTransferScreen(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Text(
                     text = "导入完成：新增 ${outcome.added.size}、覆盖 ${outcome.updated.size}、" +
-                        "跳过 ${outcome.skipped.size}、未知供应商 ${outcome.unknownProviders.size}",
+                        "跳过 ${outcome.skipped.size}" +
+                        if (outcome.createdProviders.isNotEmpty()) {
+                            "、新建供应商 ${outcome.createdProviders.size}"
+                        } else {
+                            ""
+                        },
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+                if (outcome.createdProviders.isNotEmpty()) {
+                    Text(
+                        text = "已新建供应商：" + outcome.createdProviders.joinToString("、"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 if (outcome.skipped.isNotEmpty()) {
                     Text(
                         text = "跳过的账号：" + outcome.skipped.take(8).joinToString("、") +
@@ -324,7 +347,8 @@ fun AccountTransferScreen(
                 }
                 if (outcome.unknownProviders.isNotEmpty()) {
                     Text(
-                        text = "未知供应商：" + outcome.unknownProviders.distinct().joinToString("、"),
+                        text = "无法识别的供应商（不是自定义标签，本机也没有同名内置供应商）：" +
+                            outcome.unknownProviders.distinct().joinToString("、"),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -347,6 +371,66 @@ fun AccountTransferScreen(
             },
             onDismiss = { showExportPassword = false },
         )
+    }
+
+    // ---------------- 导入结果 ----------------
+    if (showResultDialog) {
+        result?.let { outcome ->
+            AlertDialog(
+                onDismissRequest = { showResultDialog = false },
+                title = { Text(if (outcome.added.isNotEmpty() || outcome.updated.isNotEmpty()) "导入完成" else "没有任何账号被导入") },
+                text = {
+                    Column {
+                        Text("新增 ${outcome.added.size} 个，覆盖 ${outcome.updated.size} 个，跳过 ${outcome.skipped.size} 个")
+                        if (outcome.createdProviders.isNotEmpty()) {
+                            Text(
+                                text = "\n已创建这些自定义供应商（导入即创建）：\n" +
+                                    outcome.createdProviders.joinToString("\n"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        if (outcome.restoredProviders.isNotEmpty()) {
+                            Text(
+                                text = "\n已按文件恢复这些供应商的状态（地址/模型/启用）：\n" +
+                                    outcome.restoredProviders.joinToString("\n"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        if (outcome.placeholderProviders.isNotEmpty()) {
+                            Text(
+                                text = "其中 " + outcome.placeholderProviders.joinToString("、") +
+                                    " 还没有接口地址（原文件里没带这个信息），" +
+                                    "到供应商详情页补上就完全可用了。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (outcome.unknownProviders.isNotEmpty()) {
+                            Text(
+                                text = "\n无法识别这些账号的供应商，已跳过：\n" +
+                                    outcome.unknownProviders.distinct().joinToString("\n") +
+                                    "\n（自定义标签不存在时会自动创建；出现这条说明它既不是自定义标签，" +
+                                    "本机也没有同名的内置供应商）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                        if (outcome.skipped.isNotEmpty()) {
+                            Text(
+                                text = "\n跳过的账号已存在。要覆盖，请打开上方的「覆盖同名账号」。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showResultDialog = false }) { Text("知道了") }
+                },
+            )
+        }
     }
 
     // ---------------- 导入口令 ----------------

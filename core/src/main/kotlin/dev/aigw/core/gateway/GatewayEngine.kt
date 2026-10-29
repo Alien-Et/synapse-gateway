@@ -3,6 +3,7 @@ package dev.aigw.core.gateway
 import com.google.gson.JsonObject
 import dev.aigw.core.pool.AccountImportResult
 import dev.aigw.core.pool.AccountPool
+import dev.aigw.core.pool.AccountSnapshot
 import dev.aigw.core.pool.AccountStatus
 import dev.aigw.core.pool.AccountTransfer
 import dev.aigw.core.pool.PoolSummary
@@ -715,16 +716,54 @@ class GatewayEngine(
      *
      * 只取当前确实在池里的账号：勾选后又被删掉的不会凭空出现在导出内容里。
      */
+    /**
+     * 导出账号（含它们所属的自定义供应商定义与当前状态）。
+     *
+     * 这是一份**快照**：账号的凭证、手动启用开关、使用优先级，加上自定义供应商的
+     * 标签/地址/协议/启用状态/模型列表，全都按当前的样子记下来；导入时原样恢复。
+     *
+     * **自定义供应商必须一起导出**：它们的标签/地址/模型存在
+     * `settings/custom.json` 里，不在账号池里。只导账号的话，换到新设备后
+     * 这些账号所属的供应商根本不存在，会被当成「本机未创建」整批跳过。
+     */
     fun exportAccounts(selection: Set<String> = emptySet()): String {
         val all = pool.accounts()
         val picked = if (selection.isEmpty()) all else all.filter { "${it.providerId}/${it.uid}" in selection }
-        return AccountTransfer.encode(picked.sortedWith(compareBy({ it.providerId }, { it.uid })), nowMillis())
+        // 连池里的状态一起快照：手动停用的号、↑/↓ 调过的优先级都要跟着走。
+        // 只导凭证的话，一个被主动停用的号导入后会自己变成启用——悄悄改了用户的策略。
+        val stateById = pool.statuses().associateBy { "${it.providerId}/${it.uid}" }
+        val snapshots = picked
+            .sortedWith(compareBy({ it.providerId }, { it.uid }))
+            .map { account ->
+                val status = stateById["${account.providerId}/${account.uid}"]
+                AccountSnapshot(
+                    account = account,
+                    enabled = status?.enabled ?: true,
+                    priority = status?.priority ?: 0,
+                )
+            }
+        // 只带与导出账号相关的自定义供应商，不相关的不带
+        val ownerProviderIds = picked.map { it.providerId }.filter { it.startsWith(CUSTOM_PREFIX) }.toSet()
+        val providers = if (ownerProviderIds.isEmpty()) {
+            emptyList()
+        } else {
+            settingsRepository.loadCustomProviders().filter { it.providerId in ownerProviderIds }
+        }
+        return AccountTransfer.encode(
+            accounts = snapshots,
+            exportedAt = nowMillis(),
+            providers = providers,
+        )
     }
 
     /**
-     * 导入账号。
+     * 导入账号。文件的语义是**快照**，导入就是把它恢复回来。
      *
-     * [overwrite] 为 true 时同 (providerId, uid) 的已有账号被覆盖（凭证与昵称），否则跳过。
+     * 供应商：文件里带了定义的，本机没有就建、已有就按文件盖回去（地址/协议/模型/启用状态）；
+     * 没带定义的（v1 老文件）按标签建占位，不报「未创建」。
+     *
+     * 账号：[overwrite] 为 true 时同 (providerId, uid) 的已有账号被覆盖
+     * （凭证、昵称、手动启用开关、使用优先级），否则跳过。
      * 未注册的 providerId 不落池，单独报出来——否则会存下一个永远选不了号的死账号。
      * [selection] 是 `providerId/uid` 集合，空集合表示导入文件里的全部账号。
      */
@@ -737,14 +776,116 @@ class GatewayEngine(
         val picked = if (selection.isEmpty()) {
             envelope.accounts
         } else {
-            envelope.accounts.filter { "${it.providerId}/${it.uid}" in selection }
+            envelope.accounts.filter { "${it.account.providerId}/${it.account.uid}" in selection }
         }
+        // 导入即是创建 + 导入即是恢复。
+        //
+        // 文件里的自定义供应商定义是一份**快照**，按它决定本机怎么办：
+        // 1. 本机没有 + 文件带定义 → 建出来（导入即创建），地址/模型/启用状态一并落地；
+        // 2. 本机已有 + 文件带定义 → **按文件把状态盖回去**（导入即恢复）；
+        // 3. 本机没有 + 文件没带（v1 老文件）→ 建一个「地址待填」的占位。
+        //
+        // 第 3 条是关键：用户的真实诉求就是「本机没创建，所以才要导入」。要是只在
+        // 「文件带了定义」时才建，老文件就会变成「没创建 → 导不进去 → 永远创建不了」的死循环。
+        val createdProviders = ArrayList<String>()
+        val restoredProviders = ArrayList<String>()
+        val placeholderProviders = ArrayList<String>()
+        run {
+            val existingConfigs = settingsRepository.loadCustomProviders()
+            val byKey = existingConfigs.associateBy { it.key.lowercase() }
+            val declaredByKey = envelope.providers.associateBy { it.key.lowercase() }
+
+            // 只处理本次真正要导入的账号用到的标签：
+            // 用户没勾的账号，不该顺手在他机器上多出一堆 / 改掉一堆供应商。
+            val wantedKeys = picked
+                .mapNotNull { snapshot ->
+                    snapshot.account.providerId
+                        .takeIf { it.startsWith(CUSTOM_PREFIX) }
+                        ?.removePrefix(CUSTOM_PREFIX)
+                }
+                .filter { it.isNotEmpty() }
+                .distinctBy { it.lowercase() }
+
+            val merged = existingConfigs.toMutableList()
+            for (key in wantedKeys) {
+                val lower = key.lowercase()
+                val declared = declaredByKey[lower]
+                val existing = byKey[lower]
+                // 地址空着的单独标出来：旧文件没存过地址，得让用户补一次
+                fun markPlaceholder(provider: CustomProviderConfig) {
+                    if (provider.baseUrl.isBlank()) placeholderProviders.add(provider.key)
+                }
+                when {
+                    declared != null && existing == null -> {
+                        merged.add(declared)
+                        createdProviders.add(declared.key)
+                        markPlaceholder(declared)
+                    }
+
+                    declared != null && existing != null -> {
+                        // 按快照恢复。key 保持本机的写法（它已经绑在 providerId 上了）；
+                        // apiKeys 是本机「待同步」的载体，文件里不带，原样留着。
+                        val restored = existing.copy(
+                            name = declared.name,
+                            baseUrl = declared.baseUrl,
+                            protocol = declared.protocol,
+                            models = declared.models,
+                            enabled = declared.enabled,
+                        )
+                        if (restored != existing) {
+                            val index = merged.indexOfFirst { it.key.equals(existing.key, ignoreCase = true) }
+                            if (index >= 0) merged[index] = restored
+                            restoredProviders.add(restored.key)
+                        }
+                        markPlaceholder(restored)
+                    }
+
+                    existing == null -> {
+                        // 文件里没带定义（v1 老文件）：只能按标签建占位，地址留给用户补。
+                        // 不编造一个假地址——那样看着能用、实际必错。
+                        val placeholder = CustomProviderConfig(
+                            key = key,
+                            name = key,
+                            baseUrl = "",
+                            apiKeys = emptyList(),
+                            models = emptyList(),
+                        )
+                        merged.add(placeholder)
+                        createdProviders.add(placeholder.key)
+                        placeholderProviders.add(placeholder.key)
+                    }
+
+                    // 本机已有、文件里却没带定义：旧文件没这个信息，不动本机配置
+                    else -> Unit
+                }
+            }
+
+            if (createdProviders.isNotEmpty() || restoredProviders.isNotEmpty()) {
+                settingsRepository.saveCustomProviders(merged)
+                reloadCustomProviders()
+            }
+        }
+
         val added = ArrayList<String>()
         val updated = ArrayList<String>()
         val skipped = ArrayList<String>()
         val unknown = ArrayList<String>()
-        for (account in picked) {
+        for (snapshot in picked) {
+            val account = snapshot.account
             val key = "${account.providerId}/${account.uid}"
+            // 自定义供应商的 providerId 是 `custom:<key>`，而它是否已注册取决于
+            // 这份配置有没有被 reloadCustomProviders() 加载过。
+            // 导入前先按需补登一次，否则会把整批自定义账号误判成「未知供应商」。
+            if (account.providerId.startsWith(CUSTOM_PREFIX) && registry.get(account.providerId) == null) {
+                val configKey = account.providerId.removePrefix(CUSTOM_PREFIX)
+                val config = settingsRepository.loadCustomProviders()
+                    .firstOrNull { it.key.equals(configKey, ignoreCase = true) }
+                if (config != null) {
+                    registry.register(
+                        dev.aigw.core.provider.custom.CustomProvider(config = config, nowMillis = nowMillis),
+                    )
+                }
+            }
             if (registry.get(account.providerId) == null) {
                 unknown.add(key)
                 continue
@@ -753,23 +894,60 @@ class GatewayEngine(
             when {
                 existing == null -> {
                     pool.upsert(account)
+                    restoreAccountState(snapshot)
                     added.add(key)
                 }
                 overwrite -> {
                     pool.upsert(account)
+                    restoreAccountState(snapshot)
                     updated.add(key)
                 }
                 else -> skipped.add(key)
             }
         }
         if (added.isNotEmpty() || updated.isNotEmpty()) {
-            onLog("账号导入：新增 ${added.size}、覆盖 ${updated.size}、跳过 ${skipped.size}")
+            onLog(
+                "账号导入：新增 ${added.size}、覆盖 ${updated.size}、跳过 ${skipped.size}" +
+                    if (createdProviders.isNotEmpty()) "、新建供应商 ${createdProviders.size}" else "" +
+                    if (restoredProviders.isNotEmpty()) "、恢复供应商 ${restoredProviders.size}" else "",
+            )
+            // 自定义供应商的账号落池后，provider 实例里的账号快照必须重建，
+            // 否则界面/转发拿到的还是旧实例（看不到刚导入的 Key）。
+            if (picked.any { it.account.providerId.startsWith(CUSTOM_PREFIX) }) {
+                reloadCustomProviders()
+            }
         }
-        return AccountImportResult(added = added, updated = updated, skipped = skipped, unknownProviders = unknown)
+        return AccountImportResult(
+            added = added,
+            updated = updated,
+            skipped = skipped,
+            unknownProviders = unknown,
+            createdProviders = createdProviders,
+            placeholderProviders = placeholderProviders,
+            restoredProviders = restoredProviders,
+        )
+    }
+
+    /**
+     * 把快照里的账号状态写回池里（手动启用开关 + 使用优先级）。
+     *
+     * 凭证由 [AccountPool.upsert] 落好，这里只补状态。不恢复**运行时探测**出的状态
+     * （凭证失效的硬禁用、余额），那些导入后会重新探一遍——存下来只会是过期的假象。
+     */
+    private fun restoreAccountState(snapshot: AccountSnapshot) {
+        val account = snapshot.account
+        pool.setEnabled(
+            account.providerId,
+            account.uid,
+            snapshot.enabled,
+            reason = if (snapshot.enabled) "" else "手动停用",
+        )
+        pool.setPriority(account.providerId, account.uid, snapshot.priority)
     }
 
     /** 解析导出内容（只读、不落池），供导入前预览与勾选。 */
-    fun parseAccountTransfer(json: String): List<ProviderAccount> = AccountTransfer.decode(json).accounts
+    fun parseAccountTransfer(json: String): List<ProviderAccount> =
+        AccountTransfer.decode(json).accounts.map { it.account }
 
     /**
      * 修正历史遗留的账号标识（uid 口径变过时自愈）。启动后调用一次，幂等。
