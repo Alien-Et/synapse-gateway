@@ -256,11 +256,14 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                     existing = state.customProviders.firstOrNull { it.key == page.key },
                     // 标签校验交给核心层：它才知道内置标签表与其它自定义供应商的名字
                     validateLabel = { viewModel.validateCustomLabel(it, page.key) },
-                    onSave = {
-                        viewModel.saveCustomProvider(it)
-                        // 新建完直接进编辑页：那里能继续改地址、获取模型、加 Key，
-                        // 不再落在一个只有「添加账号」按钮的空白页上。
-                        subPage = SubPage.ProviderDetail(it.providerId)
+                    onSave = { config, apiKey ->
+                        // 一次到位：落盘 + 落账号 + 后台自动拉模型。
+                        // 拉模型可能要几百毫秒到几秒，不阻塞返回：先跳去详情页，
+                        // 拉完会把结果写回配置并在那页看到列表。
+                        viewModel.saveCustomProviderAndSync(config, apiKey) { ok, message ->
+                            viewModel.notice(message)
+                            if (ok) subPage = SubPage.ProviderDetail(config.providerId)
+                        }
                     },
                     onDelete = {
                         viewModel.removeCustomProvider(it)

@@ -3,52 +3,42 @@ package dev.aigw.app.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.aigw.core.gateway.CustomProviderConfig
 
 /**
- * 自定义供应商的新建/编辑。
+ * 新建自定义供应商。
  *
- * 表单按「逐条添加」组织，而不是一次性铺一堆输入框：
- * - **模型列表**：点「＋ 添加模型」一条条加，加过的列出来（可删除）；
- * - **API Key**：点「＋ 添加 Key」一条条加，每个 Key 对应一个账号。
+ * **标签 + 地址 + 一个 API Key 填完就能保存**，模型在保存后由后台自动从
+ * `/v1/models` 拉取 —— 不需要手填模型，也不需要先进到详情页再保存一次。
  *
- * 为什么这样改：原先只能填一个 Key、模型要靠后面详情页再维护，
- * 新建时「到底要填到哪一步才算配好」很模糊。现在标签 + 地址填完、
- * 至少加一个模型和一个 Key，就能直接用。
+ * 与编辑页的分工：
+ * - 这里只做「一次性创建」，保存即完成；
+ * - 之后想改名称/地址/账号，到供应商详情页（它本身就是编辑页）。
  *
- * [existing] 不为空时是编辑：标签不可改（它是路由前缀，改了就断掉已有客户端配置），
- * 已存在的 Key 只展示不解密回填。
+ * 两边的字段刻意保持一致，避免「新建能填、编辑不能改」这种割裂感。
  */
 @Composable
 fun CustomProviderScreen(
     existing: CustomProviderConfig?,
     /** 校验标签是否合法（由核心层提供：不能与内置标签重名、不能与别家重名等）。返回 null 表示通过。 */
     validateLabel: (String) -> String?,
-    onSave: (CustomProviderConfig) -> Unit,
+    /** 保存：核心层负责落盘 + 落账号 + 后台拉模型。 */
+    onSave: (config: CustomProviderConfig, apiKey: String?) -> Unit,
     onDelete: ((String) -> Unit)?,
     onBack: () -> Unit,
 ) {
@@ -57,30 +47,16 @@ fun CustomProviderScreen(
     var key by remember { mutableStateOf(existing?.key.orEmpty()) }
     var name by remember { mutableStateOf(existing?.name.orEmpty()) }
     var baseUrl by remember { mutableStateOf(existing?.baseUrl.orEmpty()) }
-    var enabled by remember { mutableStateOf(existing?.enabled ?: true) }
 
-    // 逐条添加的模型（新建时为空，编辑时回填已有模型）
-    val models = remember { mutableStateListOf<String>().apply { addAll(existing?.models.orEmpty()) } }
-    var modelDraft by remember { mutableStateOf("") }
+    // API Key：一个输入框搞定，**点保存即生效**，不需要先点「添加」再保存。
+    //
+    // 之前是「输入框 + 添加按钮 → 列表 → 保存」的三段式，等于把同一件事做两遍，
+    // 少点一次就白填。现在一个框、一行一个 Key，保存时直接收走。
+    //
+    // 编辑模式不回显旧 Key（加密存储里只有摘要），留空即「不动现有账号」。
+    var keyInput by remember { mutableStateOf("") }
 
-    // 逐条添加的 API Key。编辑模式下不放回已有 Key（加密存储里只有摘要），
-    // 只允许「追加」新的 Key；已有账号请在详情页查看/删除。
-    val newKeys = remember { mutableStateListOf<String>() }
-    var keyDraft by remember { mutableStateOf("") }
-
-    fun addModel() {
-        val m = modelDraft.trim()
-        if (m.isEmpty()) return
-        if (models.none { it.equals(m, ignoreCase = true) }) models.add(m)
-        modelDraft = ""
-    }
-
-    fun addKey() {
-        val k = keyDraft.trim()
-        if (k.isEmpty()) return
-        if (newKeys.none { it == k }) newKeys.add(k)
-        keyDraft = ""
-    }
+    val parsedKeys = parseApiKeys(keyInput)
 
     PageScaffold(
         title = if (isNew) "新建供应商" else "编辑供应商",
@@ -101,7 +77,9 @@ fun CustomProviderScreen(
                 value = key,
                 onValueChange = { key = it.trim() },
                 label = { Text("模型标签🏷️") },
-                supportingText = { Text("调用时写成「标签/模型名」，例如 ${key.ifEmpty { "mysite" }}/gpt-4o") },
+                supportingText = {
+                    Text("调用时写成「标签/模型名」，例如 ${key.ifEmpty { "mysite" }}/gpt-4o；创建后不可修改")
+                },
                 singleLine = true,
                 enabled = isNew,
                 modifier = Modifier.fillMaxWidth(),
@@ -122,156 +100,98 @@ fun CustomProviderScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text("启用", style = MaterialTheme.typography.bodyMedium)
-                Switch(checked = enabled, onCheckedChange = { enabled = it })
-            }
         }
 
-        // ---------------- 模型：逐条添加 ----------------
-        SectionCard {
-            SectionLabel("模型列表")
-            Text(
-                text = "一条条添加这个中转站支持的模型名，调用时就写在标签后面。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = modelDraft,
-                    onValueChange = { modelDraft = it.trim() },
-                    label = { Text("模型名，如 gpt-4o") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { addModel() }, enabled = modelDraft.isNotBlank()) {
-                    Icon(Icons.Filled.Add, contentDescription = null)
-                    Text("添加")
-                }
-            }
-            if (models.isEmpty()) {
-                Text(
-                    text = "还没有模型",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                for ((index, model) in models.toList().withIndex()) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            text = "$key/$model",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "删除 $model",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.clickable { models.removeAt(index) }.padding(4.dp),
-                        )
-                    }
-                }
-            }
-        }
-
-        // ---------------- API Key：逐条添加 ----------------
+        // ---------------- API Key ----------------
         SectionCard {
             SectionLabel("API Key（账号）")
             Text(
                 text = if (isNew) {
-                    "一个 Key = 一个账号。可以加多个，网关会在它们之间轮换。"
+                    "填一个就能保存，保存后会自动拿它去上游获取模型列表。" +
+                        "要多个 Key 就一行一个，一个 Key = 一个账号，网关会轮换使用。"
                 } else {
-                    "已配置 ${existing?.apiKeys?.size ?: 0} 个 Key（出于安全不回显）。要增删请到供应商详情页的账号列表。"
+                    "留空则不动现有账号；要加新账号就直接填，一行一个。"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Row(
+            OutlinedTextField(
+                value = keyInput,
+                // 不 trim 每一击：用户粘贴多行时中间的空行/缩进要能看见，保存时再清
+                onValueChange = { keyInput = it },
+                label = { Text("API Key") },
+                placeholder = { Text(if (isNew) "sk-…" else "留空则不改动") },
+                supportingText = {
+                    Text(
+                        when {
+                            parsedKeys.isEmpty() && isNew -> "一行一个，可填多个"
+                            parsedKeys.isEmpty() -> "留空 = 保留现有 ${existing?.apiKeys?.size ?: 0} 个账号"
+                            parsedKeys.size == 1 -> "将添加 1 个账号：${maskKey(parsedKeys.first())}"
+                            else -> "将添加 ${parsedKeys.size} 个账号"
+                        },
+                    )
+                },
+                minLines = 1,
+                maxLines = 5,
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedTextField(
-                    value = keyDraft,
-                    onValueChange = { keyDraft = it.trim() },
-                    label = { Text(if (isNew) "API Key" else "追加一个 API Key") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { addKey() }, enabled = keyDraft.isNotBlank()) {
-                    Icon(Icons.Filled.Add, contentDescription = null)
-                    Text("添加")
-                }
-            }
-            if (newKeys.isNotEmpty()) {
-                for ((index, k) in newKeys.toList().withIndex()) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text(
-                            text = maskKey(k),
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "删除这个 Key",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.clickable { newKeys.removeAt(index) }.padding(4.dp),
-                        )
-                    }
-                }
-            }
+            )
+        }
+
+        // ---------------- 模型说明（不用填） ----------------
+        SectionCard {
+            SectionLabel("模型")
+            Text(
+                text = "不需要在这里填。点「保存」后会自动向上游 /v1/models 获取，" +
+                    "拿到后可在供应商详情页里看到完整列表。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         // ---------------- 保存 ----------------
         SectionCard {
-            // 标签 = 路由前缀本身：空标签、与内置标签重名都会导致「看似能用实际必错」，
-            // 核心层还会在写盘前再校一次。
             val keyTrimmed = key.trim()
-            val nameTrimmed = name.trim()
             val baseUrlTrimmed = baseUrl.trim()
             val keyError = if (keyTrimmed.isEmpty()) "模型标签不能为空" else validateLabel(keyTrimmed)
+            // 只有新建才强制要有 Key：编辑页不回显旧 Key，留空是「不改动」，不是「填漏了」
+            val keyRequired = isNew && parsedKeys.isEmpty()
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (keyError != null) {
-                    Text(keyError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                when {
+                    keyError != null -> Text(
+                        keyError,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    baseUrlTrimmed.isEmpty() -> Text(
+                        "接口地址不能为空",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    keyRequired -> Text(
+                        "至少填一个 API Key（否则拿不到模型）",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
-                if (baseUrlTrimmed.isEmpty()) {
-                    Text("接口地址不能为空", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-                val canSave = keyError == null && baseUrlTrimmed.isNotEmpty()
-                OutlineActionButton(if (canSave) "保存" else "请先补全模型标签与接口地址") {
+                val canSave = keyError == null && baseUrlTrimmed.isNotEmpty() && !keyRequired
+                OutlineActionButton(if (canSave) "保存并获取模型" else "请先补全标签、地址与 Key") {
                     if (!canSave) return@OutlineActionButton
-                    // 编辑模式下 apiKeys 只追加新加的那几个；模型列表整体替换
-                    val mergedKeys = existing?.apiKeys.orEmpty() + newKeys
                     onSave(
                         CustomProviderConfig(
                             key = keyTrimmed,
                             // 显示名留空时用标签兜底：界面上总得有个名字
-                            name = nameTrimmed.ifEmpty { keyTrimmed },
+                            name = name.trim().ifEmpty { keyTrimmed },
                             baseUrl = baseUrlTrimmed,
-                            apiKeys = mergedKeys,
-                            models = models.toList(),
-                            enabled = enabled,
+                            // 本次要落成账号的 Key（已按行拆开、去重）。留空则不动账号池。
+                            apiKeys = parsedKeys,
+                            // 模型留空：保存后由后台拉取并写回
+                            models = existing?.models.orEmpty(),
+                            // 启用状态不在这一页管理（账号级的开关在详情页），保持原值
+                            enabled = existing?.enabled ?: true,
                         ),
+                        // 只用第一个 Key 去拉模型（拉目录不需要多账号）；留空则用账号池里已有的
+                        parsedKeys.firstOrNull(),
                     )
                 }
                 if (!isNew && onDelete != null) {
@@ -281,6 +201,17 @@ fun CustomProviderScreen(
         }
     }
 }
+
+/**
+ * 把 Key 输入框的内容拆成 Key 列表：容忍换行、逗号、分号（中英文都算）。
+ *
+ * 用户从别处复制 Key 时经常带进分隔符或空行，让他自己去删是没必要的刁难。
+ */
+private fun parseApiKeys(raw: String): List<String> =
+    raw.split('\n', '\r', ',', '，', ';', '；')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .distinct()
 
 /** Key 只显示首尾几位，避免录屏/截图泄漏。 */
 private fun maskKey(key: String): String {

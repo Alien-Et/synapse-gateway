@@ -61,14 +61,16 @@ fun CustomProviderDetailBody(
     // 之前用 `remember(providerId) { viewModel.customConfig(providerId) }`，
     // 切换开关只改了存储，这个快照永远不变，所以界面看不到「一开一关」。
     // state.customProviders 是 ViewModel 在每次 refresh 后重建的，切开关会跟着变。
-    val config = viewModel.state.collectAsStateWithLifecycle().value.customProviders
-        .firstOrNull { it.providerId == providerId }
+    val uiState = viewModel.state.collectAsStateWithLifecycle().value
+    val config = uiState.customProviders.firstOrNull { it.providerId == providerId }
     if (config == null) {
         SectionCard {
             Text("供应商配置不存在（可能已被删除）", style = MaterialTheme.typography.bodyMedium)
         }
         return
     }
+    // 保存后跳到这一页时模型还在路上，用它显示「正在获取…」而不是空列表
+    val fetchingModels = providerId in uiState.customFetchingModels
 
     var name by remember(config.key) { mutableStateOf(config.name) }
     var baseUrl by remember(config.key) { mutableStateOf(config.baseUrl) }
@@ -101,23 +103,18 @@ fun CustomProviderDetailBody(
             value = baseUrl,
             onValueChange = { baseUrl = it.trim() },
             label = { Text("接口地址") },
-            supportingText = { Text("填到 /v1，例如 https://api.example.com/v1") },
+            supportingText = {
+                Text(
+                    if (config.baseUrl.isBlank()) {
+                        "还没填地址（从导入的账号里补建出来的），补上才能正常调用"
+                    } else {
+                        "填到 /v1，例如 https://api.example.com/v1"
+                    },
+                )
+            },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("启用", style = MaterialTheme.typography.bodyMedium)
-            // 直接读配置里的值，切换立刻落盘：
-            // 之前用本地 remember 变量，切了不保存、离开页面就回滚，看起来「没反应」。
-            Switch(
-                checked = config.enabled,
-                onCheckedChange = { viewModel.setCustomEnabled(providerId, it) },
-            )
-        }
     }
 
     // ---------------- 模型：自动获取 ----------------
@@ -136,7 +133,19 @@ fun CustomProviderDetailBody(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        if (models.isEmpty()) {
+        if (fetchingModels) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Text(
+                    text = "正在从上游获取模型，稍等一下…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        } else if (models.isEmpty()) {
             Text(
                 text = "还没有模型——点下方「保存」后会自动从上游获取。",
                 style = MaterialTheme.typography.bodySmall,

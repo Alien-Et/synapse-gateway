@@ -258,6 +258,13 @@ data class AppUiState(
     val providers: List<ProviderInfo> = emptyList(),
     val accounts: List<AccountStatus> = emptyList(),
     val customProviders: List<CustomProviderConfig> = emptyList(),
+    /**
+     * 正在从上游拉模型的自定义供应商 id。
+     *
+     * 保存后跳进详情页时，模型要几百毫秒才回来；有这个标记，界面可以显示
+     * 「正在获取…」而不是干巴巴一句「还没有模型」，用户才知道等一会儿就好。
+     */
+    val customFetchingModels: Set<String> = emptySet(),
     val models: List<RoutedModel> = emptyList(),
     val modelsError: String = "",
     /** 模型目录是否正在流式加载（各供应商就绪即增量写入 [models]）。 */
@@ -1166,12 +1173,6 @@ class AppViewModel(
             .firstOrNull { it.key.equals(key, ignoreCase = true) }
     }
 
-    /** 自定义供应商的启用开关（就是 provider 级 enabled）。 */
-    fun setCustomEnabled(providerId: String, enabled: Boolean) {
-        val config = customConfig(providerId) ?: return
-        saveCustomProvider(config.copy(enabled = enabled))
-    }
-
     /**
      * 自定义供应商详情页的「保存」：一次做完三件事。
      *
@@ -1187,19 +1188,50 @@ class AppViewModel(
         newApiKey: String?,
         onDone: (ok: Boolean, message: String) -> Unit,
     ) {
-        val key = config.key
-        saveCustomProvider(config)
-        if (!newApiKey.isNullOrBlank()) {
-            runCatching { addCustomAccount(config.providerId, config.name, newApiKey, config.models) }
-        }
-        val providerId = config.providerId
-        refreshCustomModels(providerId, newApiKey) { models, error ->
-            if (error.isNotEmpty()) {
-                onDone(false, "基本信息已保存，但获取模型失败：$error")
-            } else {
-                onDone(true, "已保存，共 ${models.size} 个模型")
+        viewModelScope.launch {
+            // 顺序很重要：**先落盘，再拉模型**。
+            //
+            // 之前落盘是 fire-and-forget（saveCustomProvider 内部起协程），紧接着就去读
+            // 配置拉模型；新建供应商时协程还没写完，读到的是「配置不存在」，模型永远拉不
+            // 回来，必须手动点一次刷新才行。现在等它写完再往下走。
+            val error = withContext(Dispatchers.IO) {
+                runCatching {
+                    saveCustomProviderNow(config)
+                    // 详情页是「单独填一个新 Key」的交互，它不在 config.apiKeys 里，
+                    // 而 syncCustomAccounts 只认 config.apiKeys，这里补一手。
+                    newApiKey?.trim()?.takeIf { it.isNotEmpty() }?.let { key ->
+                        addCustomAccountNow(config.providerId, config.name, key)
+                    }
+                }.exceptionOrNull()?.message
+            }
+            if (error != null) {
+                _state.value = _state.value.copy(notice = error)
+                onDone(false, error)
+                return@launch
+            }
+            refresh()
+            // 配置已经在盘上了，界面可以立刻返回：拉模型可能几百毫秒到几秒，
+            // 不该把用户卡在保存按钮上。详情页会看到列表自己长出来。
+            onDone(true, "已保存，正在后台获取模型…")
+            refreshCustomModels(config.providerId, newApiKey) { _, fetchError ->
+                notice(
+                    if (fetchError.isNotEmpty()) {
+                        "获取模型失败：$fetchError（可到供应商详情页重新保存重试）"
+                    } else {
+                        "模型已获取"
+                    },
+                )
             }
         }
+    }
+
+    /** 把单个 API Key 落成账号（已存在则跳过）。同步执行，调用方决定线程。 */
+    private fun addCustomAccountNow(providerId: String, nickname: String, apiKey: String) {
+        val key = apiKey.trim()
+        if (key.isEmpty()) return
+        val uid = CustomProvider.uidOf(key)
+        if (engine.account(providerId, uid) != null) return
+        engine.addAccount(providerId, uid, nickname.trim().ifEmpty { providerId }, CustomProvider.secretOf(key))
     }
 
     /**
@@ -1211,6 +1243,25 @@ class AppViewModel(
      * [apiKey] 留空时用账号池里第一个可用账号的 Key（编辑页出于安全不回显旧 Key）。
      */
     fun refreshCustomModels(providerId: String, apiKey: String?, onResult: (List<String>, String) -> Unit) {
+        // 打上「获取中」标记，界面才能显示进度而不是一句「还没有模型」
+        setCustomFetching(providerId, true)
+        fetchCustomModelsInternal(providerId, apiKey) { models, error ->
+            setCustomFetching(providerId, false)
+            onResult(models, error)
+        }
+    }
+
+    private fun setCustomFetching(providerId: String, fetching: Boolean) {
+        _state.value = _state.value.copy(
+            customFetchingModels = if (fetching) {
+                _state.value.customFetchingModels + providerId
+            } else {
+                _state.value.customFetchingModels - providerId
+            },
+        )
+    }
+
+    private fun fetchCustomModelsInternal(providerId: String, apiKey: String?, onResult: (List<String>, String) -> Unit) {
         val config = customConfig(providerId)
         if (config == null) {
             onResult(emptyList(), "供应商配置不存在")
@@ -1517,8 +1568,20 @@ class AppViewModel(
 
     fun saveCustomProvider(config: CustomProviderConfig) = action {
         // 保存前再校一次：界面校验只管当前输入框，这里防的是并发编辑 / 外部写入绕过去
+        saveCustomProviderNow(config)
+        "供应商已保存"
+    }
+
+    /**
+     * 落盘一个自定义供应商（同步执行，调用方决定线程）。
+     *
+     * 抽出来是给 [saveCustomProviderAndSync] 用的：它必须**等写完了再去读**
+     * （拉模型要读这份刚写的配置），走 [action] 那种 fire-and-forget 会读到旧值。
+     */
+    private fun saveCustomProviderNow(config: CustomProviderConfig) {
+        // 界面校验只管当前输入框，这里防的是并发编辑 / 外部写入绕过去
         engine.validateCustomLabel(config.key, config.key)?.let { reason ->
-            return@action reason
+            throw IllegalStateException(reason)
         }
         val list = engine.settingsRepository.loadCustomProviders().toMutableList()
         val index = list.indexOfFirst { it.key == config.key }
@@ -1526,7 +1589,6 @@ class AppViewModel(
         engine.settingsRepository.saveCustomProviders(list)
         engine.reloadCustomProviders()
         engine.syncCustomAccounts(config)
-        "供应商已保存"
     }
 
     fun removeCustomProvider(key: String) = action {
