@@ -74,7 +74,10 @@ private const val SMS_RESEND_INTERVAL_MS = 60_000L
 private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
 
 /** 项目仓库地址（GitHub）。 */
-private const val PROJECT_URL = "https://github.com/xibai6668/Android-AI-gateway"
+// 项目地址指向本仓库
+private const val PROJECT_URL = "https://github.com/Alien-Et/Android-AI-gateway"
+// 上游原作者仓库：只做署名与溯源，检查更新不看它（版本线已经分叉）
+private const val UPSTREAM_URL = "https://github.com/xibai6668/Android-AI-gateway"
 
 /** 外观偏好：动态取色、明暗模式、页面底色与金色渐变两端。 */
 class AppearanceStore(private val store: KeyValueStore) {
@@ -395,6 +398,26 @@ class AppViewModel(
     @Volatile
     private var modelsFetchedAt = 0L
 
+    /**
+     * 请求日志的实时监听器（声明位置必须在 init 之前：init 里要注册它）。
+     *
+     * 取代之前的 5 秒轮询：排障时「日志晚 5 秒才出现」很折磨人。
+     * 合并标志 + 120ms 小窗口：日志写入可能很密集（一次请求十几条），
+     * 每条都发一次主线程更新会把 UI 拖卡。
+     */
+    private var pendingLogRefresh = false
+
+    private val requestLogListener: () -> Unit = {
+        if (!pendingLogRefresh) {
+            pendingLogRefresh = true
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(120)
+                pendingLogRefresh = false
+                refreshRecords()
+            }
+        }
+    }
+
     private var lastActiveSignature = ""
     private val activeRequestsListener: (List<dev.aigw.core.gateway.ActiveRequest>) -> Unit = { list ->
         val sig = list.joinToString(";") { "${it.id}:${it.providerId}:${it.phase}" }
@@ -408,6 +431,8 @@ class AppViewModel(
 
     init {
         engine.activeRequests.addListener(activeRequestsListener)
+        // 日志实时刷新：新日志写入就推一次，取代 5 秒轮询
+        engine.requestLog.addListener(requestLogListener)
         val initialActive = engine.activeRequests.snapshot()
         lastActiveSignature = initialActive.joinToString(";") { "${it.id}:${it.providerId}:${it.phase}" }
         _state.value = _state.value.copy(activeRequests = initialActive)
@@ -442,6 +467,7 @@ class AppViewModel(
 
     override fun onCleared() {
         engine.activeRequests.removeListener(activeRequestsListener)
+        engine.requestLog.removeListener(requestLogListener)
         engine.onAccountsChanged = null
         engine.setStartupDataReadyListener(null)
     }
@@ -1129,6 +1155,87 @@ class AppViewModel(
         return provider.baseUrl
     }
 
+    /** 自定义供应商的账号行：(uid, 是否启用)。供编辑页展示。 */
+    fun customAccountRows(providerId: String): List<Pair<String, Boolean>> =
+        engine.accounts(providerId).map { it.uid to it.usable }
+
+    /** 取自定义供应商的完整配置（详情页直接当编辑页用）。 */
+    fun customConfig(providerId: String): CustomProviderConfig? {
+        val key = providerId.removePrefix("custom:")
+        return engine.settingsRepository.loadCustomProviders()
+            .firstOrNull { it.key.equals(key, ignoreCase = true) }
+    }
+
+    /** 自定义供应商的启用开关（就是 provider 级 enabled）。 */
+    fun setCustomEnabled(providerId: String, enabled: Boolean) {
+        val config = customConfig(providerId) ?: return
+        saveCustomProvider(config.copy(enabled = enabled))
+    }
+
+    /**
+     * 自定义供应商详情页的「保存」：一次做完三件事。
+     *
+     * 1. 写入基本信息（名称 / 地址）；
+     * 2. 若填了新 API Key，先落成账号；
+     * 3. **自动从上游拉模型**并写回配置（模型不再需要人工点按钮或手填）。
+     *
+     * 模型拉取失败不回滚前面两步：信息已经存好了，只是模型为空，
+     * 用户看到提示后可以再点一次保存重试。
+     */
+    fun saveCustomProviderAndSync(
+        config: CustomProviderConfig,
+        newApiKey: String?,
+        onDone: (ok: Boolean, message: String) -> Unit,
+    ) {
+        val key = config.key
+        saveCustomProvider(config)
+        if (!newApiKey.isNullOrBlank()) {
+            runCatching { addCustomAccount(config.providerId, config.name, newApiKey, config.models) }
+        }
+        val providerId = config.providerId
+        refreshCustomModels(providerId, newApiKey) { models, error ->
+            if (error.isNotEmpty()) {
+                onDone(false, "基本信息已保存，但获取模型失败：$error")
+            } else {
+                onDone(true, "已保存，共 ${models.size} 个模型")
+            }
+        }
+    }
+
+    /**
+     * 从上游拉取模型目录并**直接落盘**（详情页「获取模型」用）。
+     *
+     * 自定义供应商的模型一律由 `/v1/models` 自动获取，不手工输入：
+     * 手打一个字符就可能在调用时报错，而且排查时很难看出是名字拼错。
+     *
+     * [apiKey] 留空时用账号池里第一个可用账号的 Key（编辑页出于安全不回显旧 Key）。
+     */
+    fun refreshCustomModels(providerId: String, apiKey: String?, onResult: (List<String>, String) -> Unit) {
+        val config = customConfig(providerId)
+        if (config == null) {
+            onResult(emptyList(), "供应商配置不存在")
+            return
+        }
+        val effectiveKey = apiKey?.takeIf { it.isNotBlank() }
+            ?: engine.accounts(providerId).firstOrNull()
+                ?.let { engine.account(providerId, it.uid)?.secret }
+                .orEmpty()
+        if (effectiveKey.isEmpty()) {
+            onResult(emptyList(), "先添加一个 API Key，再获取模型")
+            return
+        }
+        fetchCustomModels(config.baseUrl, effectiveKey) { models, error ->
+            if (error.isNotEmpty() || models.isEmpty()) {
+                onResult(models, error.ifEmpty { "没有拉到模型" })
+            } else {
+                // 拉到就写回配置：模型列表以上游为准，不需要人工维护
+                val latest = customConfig(providerId) ?: config
+                saveCustomProvider(latest.copy(models = models))
+                onResult(models, "")
+            }
+        }
+    }
+
     private fun noticeOf(outcome: LoginOutcome): String =
         if (outcome.ok) "登录成功：${outcome.nickname.ifEmpty { outcome.uid }}" else "失败：${outcome.error}"
 
@@ -1152,6 +1259,23 @@ class AppViewModel(
 
     /** 导出账号为 JSON 文本；[selection] 为 `providerId/uid` 集合，空集表示全部。 */
     fun exportAccountsJson(selection: Set<String>): String = engine.exportAccounts(selection)
+
+    /**
+     * 导出为二进制 .agw。
+     *
+     * [password] 为空 → 明文正文（用户主动选择不加密）；非空 → AES-256-GCM 加密。
+     * 旧的「复制到剪贴板」入口已删除：剪贴板是最容易泄漏 token 的地方。
+     */
+    fun exportAccountsBytes(selection: Set<String>, password: String?): ByteArray =
+        dev.aigw.core.pool.AccountTransferCodec.encode(engine.exportAccounts(selection), password)
+
+    /** 解密 .agw 得到 JSON；口令错/文件损坏会抛异常。 */
+    fun decodeAccountsFile(bytes: ByteArray, password: String?): String =
+        dev.aigw.core.pool.AccountTransferCodec.decode(bytes, password)
+
+    /** 文件是否加密（界面用来决定要不要先问口令）。 */
+    fun isAccountsFileEncrypted(bytes: ByteArray): Boolean =
+        dev.aigw.core.pool.AccountTransferCodec.isEncrypted(bytes)
 
     /** 解析导出内容（只读），供导入前预览；格式不对抛错，消息可直接展示。 */
     fun parseAccountTransfer(json: String) = engine.parseAccountTransfer(json)
@@ -1382,7 +1506,20 @@ class AppViewModel(
 
     // ------------------------------------------------------------------ 自定义供应商
 
+    /**
+     * 校验自定义供应商的模型标签是否可用；null 表示通过。
+     *
+     * 交给核心层判断：只有它知道内置标签表（腾讯国内 / 字节国外 / 谷歌…）与
+     * 其它自定义供应商的名字。界面只管把结果展示给用户。
+     */
+    fun validateCustomLabel(label: String, exceptKey: String?): String? =
+        engine.validateCustomLabel(label, exceptKey)
+
     fun saveCustomProvider(config: CustomProviderConfig) = action {
+        // 保存前再校一次：界面校验只管当前输入框，这里防的是并发编辑 / 外部写入绕过去
+        engine.validateCustomLabel(config.key, config.key)?.let { reason ->
+            return@action reason
+        }
         val list = engine.settingsRepository.loadCustomProviders().toMutableList()
         val index = list.indexOfFirst { it.key == config.key }
         if (index >= 0) list[index] = config else list.add(config)
@@ -1498,6 +1635,13 @@ class AppViewModel(
     fun openProjectRepo() {
         if (!openBrowser(PROJECT_URL)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开项目地址")
+        }
+    }
+
+    /** 打开上游原作者仓库（仅用于署名与溯源）。 */
+    fun openUpstreamRepo() {
+        if (!openBrowser(UPSTREAM_URL)) {
+            _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开原作者仓库")
         }
     }
 
