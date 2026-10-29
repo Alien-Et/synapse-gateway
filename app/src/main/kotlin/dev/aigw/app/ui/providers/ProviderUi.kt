@@ -78,13 +78,6 @@ class ProviderUiActions(
     val onRenameAccount: (providerId: String, uid: String, nickname: String) -> Unit = { _, _, _ -> },
     /** 读账号的 API Key（仅自定义供应商）。 */
     val accountApiKeyOf: (providerId: String, uid: String) -> String = { _, _ -> "" },
-    /** 读自定义供应商已保存的模型列表。 */
-    val customModelsOf: (providerId: String) -> List<String> = { _ -> emptyList() },
-    /** 读自定义供应商的接口地址（拉模型用）。 */
-    val customBaseUrlOf: (providerId: String) -> String = { _ -> "" },
-    /** 用任意 key 从云端拉模型列表（自定义供应商）。 */
-    val onFetchCustomModels: (baseUrl: String, apiKey: String, onResult: (List<String>, String) -> Unit) -> Unit =
-        { _, _, _ -> },
     val onNotice: (String) -> Unit = {},
 )
 

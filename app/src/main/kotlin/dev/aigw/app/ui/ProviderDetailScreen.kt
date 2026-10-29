@@ -64,11 +64,6 @@ fun ProviderDetailScreen(
             onAddCustomAccount = { id, nickname, apiKey, models -> viewModel.addCustomAccount(id, nickname, apiKey, models) },
             onRenameAccount = { id, uid, nickname -> viewModel.renameAccount(id, uid, nickname) },
             accountApiKeyOf = { id, uid -> viewModel.accountApiKey(id, uid) },
-            customModelsOf = { id -> viewModel.customModels(id) },
-            customBaseUrlOf = { id -> viewModel.customBaseUrl(id) },
-            onFetchCustomModels = { baseUrl, apiKey, onResult ->
-                viewModel.fetchCustomModels(baseUrl, apiKey, onResult)
-            },
             onRefreshCredits = { id, uid -> viewModel.refreshCredits(id, uid) },
             onAction = { id, uid, action, payload -> viewModel.performAction(id, uid, action, payload) },
             onToggleAccount = { id, uid, enabled -> viewModel.setAccountEnabled(id, uid, enabled) },
@@ -109,19 +104,20 @@ fun ProviderDetailScreen(
                     .padding(6.dp),
             )
         },
-        actions = {
-            if (providerId.startsWith(ProviderUiRegistry.CUSTOM_PREFIX)) {
-                Icon(
-                    Icons.Filled.Edit,
-                    contentDescription = "编辑供应商",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .clickable { onEditCustom(providerId) }
-                        .padding(6.dp),
-                )
-            }
-        },
+        // 自定义供应商不需要额外入口：页面本身就是编辑页
     ) {
+        // 自定义供应商：详情页就是编辑页（能改地址、自动拉模型、管账号），
+        // 不再需要右上角铅笔图标跳去另一个表单。
+        if (providerId.startsWith(ProviderUiRegistry.CUSTOM_PREFIX)) {
+            dev.aigw.app.ui.providers.custom.CustomProviderDetailBody(
+                providerId = providerId,
+                viewModel = viewModel,
+                actions = actions,
+                onDeleted = onBack,
+            )
+            return@PageScaffold
+        }
+
         // LoginEntry 自带卡片，这里不再包一层，避免双层卡片
         ui.LoginEntry(accounts, actions)
 
