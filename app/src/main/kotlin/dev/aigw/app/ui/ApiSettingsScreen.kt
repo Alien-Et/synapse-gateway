@@ -1,9 +1,6 @@
 package dev.aigw.app.ui
 
 import android.widget.Toast
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.unit.dp
@@ -23,7 +20,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 
 /** 接入设置：客户端要用的地址、端口与网关鉴权 Key。 */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) {
     val settings = state.settings
@@ -94,23 +90,6 @@ fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> 
         }
 
         SectionCard(enterIndex = 3) {
-            SectionLabel("默认供应商")
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                state.providers.forEach { provider ->
-                    ChoiceChip(
-                        text = provider.displayName,
-                        selected = (settings.defaultProvider == provider.id),
-                        onClick = { viewModel.updateSettings(settings.copy(defaultProvider = provider.id)) },
-                    )
-                }
-            }
-        }
-
-        SectionCard(enterIndex = 4) {
             OutlineActionButton("保存") {
                 val parsed = port.toIntOrNull()
                 if (parsed == null || parsed !in 1024..65535) {

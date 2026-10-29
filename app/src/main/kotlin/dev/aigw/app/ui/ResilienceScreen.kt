@@ -53,10 +53,11 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
             onOpenEdit = { editTarget = ResilienceEditTarget.Concurrency },
         )
         Spacer(Modifier.height(4.dp))
+        // 重试与退避仍然有效（同一供应商内换号重试），
+        // 但「启用故障转移」开关已删除：跨供应商转移的逻辑已不存在，
+        // 留着开关只会让人以为还能切到别家。
         RetryComponent(
-            enabled = failover.enabled,
             config = failover.retry,
-            onToggle = { viewModel.updateFailoverSettings(failover.copy(enabled = it)) },
             onOpenEdit = { editTarget = ResilienceEditTarget.Retry },
         )
         Spacer(Modifier.height(4.dp))
@@ -73,7 +74,7 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
         Spacer(Modifier.height(8.dp))
         Text(
             text = "全部参数保存后立即生效，无需重启网关。并发在途指「已向上游发起、尚未返回」的请求；" +
-                "排队超时后该次尝试换下一个账号/供应商。",
+                "排队超时后该次尝试换下一个账号。请求只会发往标签指定的供应商，不会自动切到其它家。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -135,30 +136,13 @@ private fun ConcurrencyComponent(config: ConcurrencyConfig, onOpenEdit: () -> Un
 
 @Composable
 private fun RetryComponent(
-    enabled: Boolean,
     config: RetryConfig,
-    onToggle: (Boolean) -> Unit,
     onOpenEdit: () -> Unit,
 ) {
-    SectionLabel("故障转移（单供应商内重试 + 跨供应商切换）")
+    // 「启用故障转移」开关已删除：跨供应商转移的逻辑已不存在。
+    // 这里只剩下「同一供应商内换号重试」的退避参数，那是真实生效的。
+    SectionLabel("换号重试与退避（同一供应商内）")
     SectionCard(enterIndex = 1) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("启用故障转移", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "关闭后单请求只在本供应商内换号：不退避重试、也不切到其它供应商",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(checked = enabled, onCheckedChange = onToggle)
-        }
-        Spacer(Modifier.height(8.dp))
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         ParamRow("最大尝试次数", "${config.maxAttempts} 次（含首次）")
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

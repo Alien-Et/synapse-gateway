@@ -183,6 +183,13 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
 
         EditorialRow(
             "04.2",
+            "原作者仓库 · UPSTREAM",
+            "xibai6668/Android-AI-gateway（本项目的上游）",
+            "GitHub",
+        ) { viewModel.openUpstreamRepo() }
+
+        EditorialRow(
+            "04.3",
             "项目地址 · GITHUB",
             "在浏览器打开源码仓库",
             "GitHub",
