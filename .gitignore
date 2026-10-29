@@ -8,6 +8,7 @@ captures/
 *.apk
 *.keystore
 *.jks
+*.b64
 keystore.properties
 
 # 只用于本地构建/诊断，不进仓库
