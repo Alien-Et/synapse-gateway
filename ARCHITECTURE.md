@@ -11,7 +11,9 @@
 
 你的手机上装着多个 AI 服务的账号（腾讯、字节、谷歌、讯飞、商汤），这些服务的客户端协议各不相同、大多数无法直接在第三方工具中使用。AI Gateway 把它们**全部翻译成标准 OpenAI 协议**，暴露在本机 `http://127.0.0.1:8790/v1`，于是任何支持 OpenAI 协议的客户端（Cherry Studio、Cline、Continue、curl 脚本……）都能透明地使用你手机里所有账号的额度。
 
-路由按模型真实归属：写了前缀就按前缀走，不写前缀就查各家模型目录，谁有这个模型就发给谁。详见 README「路由逻辑」章节。
+**标签即路由**：调用时写成「标签/模型名」，标签唯一绑定一家供应商，选了哪家就只去哪家。
+不写标签、标签不存在、或标签指向的供应商没登录/未启用，一律直接报错——
+不查目录、不猜名称、不跨家转移。详见 README「路由逻辑」章节。
 
 **用户价值排序**（功能优先级以此为准）：
 1. **稳定可用**——账号不被封、请求不 503，这压倒一切新功能；
@@ -24,7 +26,7 @@
 
 ```
 客户端 (Cline / Cherry Studio / curl)
-   │  POST /v1/chat/completions  {model: "gemini-3.8-flash", ...}
+   │  POST /v1/chat/completions  {model: "腾讯国内/glm-5.2", ...}
    ▼
 ┌─────────────────────────────────────────────────┐
 │ GatewayHttpServer (NanoHTTPD, app进程内)          │
@@ -34,12 +36,12 @@
                 ▼
 ┌─────────────────────────────────────────────────┐
 │ GatewayEngine                                    │
-│  ③ resolveCandidateRoutes(model)                 │
-│     → [首选路由, 同款模型备用路由1, 备用路由2...]    │
-│  ④ 遍历候选：AccountPool.pick() 选号              │
+│  ③ resolveRoute(model) → 标签→唯一一家供应商       │
+│     无标签 / 标签无效 → null，直接报错              │
+│  ④ AccountPool.pick() 选号（跳过已知空额度账号）    │
 │     → provider.refreshAccount() 预刷新凭证         │
 │     → provider.openChat() 发起上游请求             │
-│     → 失败则换号/切下一个供应商 (Failover，凭证失效硬禁用) │
+│     → 失败只在同一家内换号重试，**绝不换家**           │
 │  ⑤ 成功 → 透传 SSE / 回传 JSON，记调用日志          │
 └───────────────┬─────────────────────────────────┘
                 ▼
@@ -73,15 +75,15 @@
 
 | 文件 | 职责 | 关键约束 |
 |---|---|---|
-| `gateway/GatewayEngine.kt` | 总调度器：持有 AccountPool/Registry/Settings，`resolveRoute`/`resolveCandidateRoutes` 路由解析，错误分类→重试/换号/跨供应商 Failover 决策（凭证失效才硬禁用） | 路由逻辑改动必须同步 `SmartRoutingTest` |
-| `gateway/GatewayHttpServer.kt` | NanoHTTPD 服务器：`/v1/chat/completions`（含 Failover 循环）、`/v1/models`、`/authorize`（Trae 回调） | 鉴权兼容 Bearer/x-goog-api-key/?key= |
-| `gateway/GatewaySettings.kt` | 全局设置（端口、apiKey、allowNoKey、maxRotate=换号上限、refreshSkewSeconds、defaultProvider） | `maxRotate` 默认 3：单请求最多试 3 个账号 |
+| `gateway/GatewayEngine.kt` | 总调度器：持有 AccountPool/Registry/Settings，`resolveRoute` 按标签路由（`routeByLabel` 四道校验），`validateCustomLabel` 管标签合法性；错误分类→同一家内换号/重试决策（凭证失效才硬禁用） | 路由逻辑改动必须同步 `SmartRoutingTest`；**不得重新引入任何跨供应商转移** |
+| `gateway/GatewayHttpServer.kt` | NanoHTTPD 服务器：`/v1/chat/completions`（同一家内换号循环）、`/v1/models`、`/authorize`（Trae 回调） | 鉴权兼容 Bearer/x-goog-api-key/?key= |
+| `gateway/GatewaySettings.kt` | 全局设置（端口、apiKey、allowNoKey、maxRotate=换号上限、refreshSkewSeconds） | `maxRotate` 默认 3：单请求最多试 3 个账号；`defaultProvider` 字段已删除 |
 | `gateway/ProxySettings.kt` | 代理开关 + `DOMESTIC_SUFFIXES` 国内域名强制直连白名单 | 白名单优先级 > 一切代理设置 |
 | `gateway/ProviderBootstrap.kt` | 内置 Provider 登记处 | 新增供应商在此加一行 |
 | `gateway/LoopbackCallbackServer.kt` | OAuth 登录回调监听（Trae 51120 / Antigravity 51121） | 临时端口，用完即释放 |
 | `gateway/OpenAiApi.kt` | OpenAI 报文拼装（error/modelList） | |
-| `failover/` | 容灾调度：`FailoverConfig`（候选/重试/熔断/并发参数；`FailoverCandidate.weight`/`timeoutMs` **未生效**，仅配置兼容）、`FailoverDecision`（错误→重试/换家/终止）、`ProviderCircuitBreaker`（连续失败熔断）、`ConcurrencyGate`（全局/单账号在途上限，`concurrency` 配置热生效；**默认单账号串行 `maxPerAccount=1`、排队超时 120s**——上游按账号限并发流，同账号并发会被挂住只回一个空首 chunk，官方客户端本身也是一次一个请求）、`ProviderMetricsTracker`（健康指标，仅观测）；新增 `ModelCooldownTracker`（按 `供应商|模型` 记模型级冷却，仅内存） | 熔断只计上游侧错误，客户端 400 不计；**模型级错误（CodeBuddy `6004`、Trae `1005`）不计熔断、不换号**，只冷却该模型；并发许可覆盖含流式转发的全过程，`Handle.release` 幂等 |
-| `pool/AccountPool.kt` | 账号池：选号（余额最高者）、硬禁用（disabled）、持久化；不做本地冷却，上游错误由换号/Failover 应对 | 状态持久化在 `pool/state/<providerId>/<uid>.json`（一账号一文件；旧版 `pool/state/<providerId>.json` 首次读取时惰性迁移） |
+| `failover/` | 容灾调度：`FailoverConfig`（重试/熔断/并发参数；`FailoverCandidate.weight`/`timeoutMs` **未生效**，仅配置兼容）、`FailoverDecision`（错误→重试/终止；`SWITCH_NEXT_PROVIDER` 现在等同于终止）、`ProviderCircuitBreaker`（连续失败熔断）、`ConcurrencyGate`（全局/单账号在途上限，`concurrency` 配置热生效；**默认单账号串行 `maxPerAccount=1`、排队超时 120s**——上游按账号限并发流，同账号并发会被挂住只回一个空首 chunk，官方客户端本身也是一次一个请求）、`ProviderMetricsTracker`（健康指标，仅观测）；新增 `ModelCooldownTracker`（按 `供应商|模型` 记模型级冷却，仅内存） | 熔断只计上游侧错误，客户端 400 不计；**模型级错误（CodeBuddy `6004`、Trae `1005`）不计熔断、不换号**，只冷却该模型；并发许可覆盖含流式转发的全过程，`Handle.release` 幂等 |
+| `pool/AccountPool.kt` | 账号池：选号（优先级 + 余额排序；`skipEmptyCredits` 可跳过已知空额度账号，全空时自愈退回）、硬禁用（disabled）、持久化；`clearExhaustedMark` 在对话成功后摘掉「额度耗尽」标记；`availability()` 按区域统计可用性（区分手动停用/凭证失效） | 状态持久化在 `pool/state/<providerId>/<uid>.json`（一账号一文件；旧版 `pool/state/<providerId>.json` 首次读取时惰性迁移） |
 | `protocol/OpenAiGemini.kt` | OpenAI⇄Gemini 双向转换（Antigravity 专用）：严格 user/model 角色交替、tool 聚合、thinking、safetySettings | **上游强制要求 contents 角色交替**，连续同 role 会 400 |
 | `provider/Provider.kt` | Provider 接口 + AuthKind 枚举 | 抽象边界，勿随意扩接口 |
 | `provider/ChatCall.kt` | 上游响应封装（stream/aggregated/failure 三态） | |
@@ -372,14 +374,27 @@ logcat -d -b all | grep "MY-DEBUG-TAG"
 1. **修 bug 前先回答**：这个 bug 在 0.1.39（最后一个全绿版本）存在吗？
    - 不存在 → 是 0.1.39 之后某次改动引入的。**先 git diff 找到引入点，恢复原行为，再考虑要不要保留新特性**。不要在引入 bug 的代码上继续叠补丁。
 2. **任何触碰 `refreshAccount`/`classify` 的改动**：先重读本文档第 5 节。Antigravity 的凭证策略已被验证过一次错误方向，不要用「看起来更健壮」的理由再踩一遍。
-3. **新增供应商**：只需 ①core 加 `provider/<id>/` 实现 `Provider` 接口，②`ProviderBootstrap` 加一行，③app 加 `ProviderUi` 实现并在 `ProviderUiRegistry` 登记。框架自动获得账号池、Failover、代理分流、日志、保活。
+3. **新增供应商**：只需 ①core 加 `provider/<id>/` 实现 `Provider` 接口，②`ProviderBootstrap` 加一行，③app 加 `ProviderUi` 实现并在 `ProviderUiRegistry` 登记。另外记得在 `chineseRoutePrefix` 里给它的**模型标签**加一条（否则无法被路由到）。框架自动获得账号池、换号重试、代理分流、日志、保活。
 4. **测试要求**：`:core:test` 全绿才能出包。协议相关改动必须先加失败用例再修（复现→修→锁住）。
 5. **构建三坑**（aarch64 PRoot 容器）：JDK 必须 17；必须 `LD_PRELOAD=/opt/android-sdk/lib/libdelfix.so`；aapt2/zipalign 必须用 aarch64 静态版（备份在 `~/.aicode/backup/`）。详见全局记忆 `android-build-arm64-proot`。
 6. **版本纪律**：每次交付 versionCode+1 / versionName patch+1；出包后 `aapt2 dump badging` 核对；产物命名 `ai-gateway-<版本>-release.apk`。
-7. **路由纪律**：
-   - 前缀**只认中文**（`腾讯/`、`字节/`、`谷歌/`…），英文前缀不再作为路由前缀识别。
-   - 无前缀时**先查模型目录再猜**（`resolveByModelOwnership`），不能直接按名称猜供应商。
-   - `deepseek/kimi/glm/qwen` 这类在多家都有的模型**不猜**，返回 null 交给兜底。
-   - 区域型供应商（腾讯/字节）**按区域分别查目录**，模型在哪个站点上线就路由到哪个站点。
-8. **外部来源必须可追溯**：上游协议细节、UI 动效参数凡参考了外部项目，都要在代码注释里写明来源，并在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 汇总（项目名 / 作者 / 地址 / 许可证 / 具体借鉴内容）。
+7. **告警纪律**：账号/额度类告警走 `GatewayEngine.quotaAlerts`（`QuotaAlert` + `Level`），
+   App 侧由 `QuotaAlertNotifier` 统一做震动 + 通知。三级语义不得混淆：
+   `ACCOUNT_EXHAUSTED`（换号成功，轻提醒）、`PROVIDER_EXHAUSTED`（没钱了，指向充值）、
+   `ALL_ACCOUNTS_DISABLED`（账号被关/失效，**指向启用或重新登录，不是充值**）。
+   告警只做展示，不得参与任何调度决策。
+8. **路由纪律（标签路由，不可回退）**：
+   - **标签是路由的唯一依据**。调用必须写成「标签/模型名」，没有标签一律返回 null。
+   - 标签**只认中文内置名 + 自定义标签**：`腾讯国内/`、`腾讯国外/`、`字节国内/`、`字节国外/`、
+     `谷歌/`、`讯飞/`、`商汤/`，以及用户创建的自定义供应商标签。英文标签不得恢复。
+   - 标签校验四道关（`routeByLabel`）：标签存在 → 供应商已注册 → 已启用 → 有账号。
+     任一不过就返回 null，**不得退化成“发给别家”**。
+   - **不得实现任何跨供应商转移**：名称推断、目录归属查询、默认供应商、单供应商接管、
+     自动找同款模型、用户优先级表——全部已删除，不得以任何形式重新引入。
+     失败只能在同一供应商内换号重试。
+   - 自定义供应商的标签**不得与内置标签重名**（`validateCustomLabel`），
+     否则它会真的被解析到内置供应商，得到一个“看似能配、实际必错”的配置。
+   - 腾讯、字节只认带区域的写法；裸品牌（`腾讯/`、`字节/`）与同区别名（`腾讯中国/`、`字节国际/`）不得恢复。
+   - `小浣熊/` 已随品牌改名删除，统一用 `商汤/`。
+9. **外部来源必须可追溯**：上游协议细节、UI 动效参数凡参考了外部项目，都要在代码注释里写明来源，并在 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 汇总（项目名 / 作者 / 地址 / 许可证 / 具体借鉴内容）。
    提交信息正文同样要标注「借鉴自 <仓库>（作者，协议）：<内容>」。没有许可证的项目只参考行为与结论，不复制代码。
