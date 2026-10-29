@@ -1,5 +1,9 @@
 # AI 聚合网关
 
+> **原作者**：[xibai6668](https://github.com/xibai6668) · 原仓库：[Android-AI-gateway](https://github.com/xibai6668/Android-AI-gateway)
+>
+> 本项目基于原作者代码进行路由优化（中文供应商前缀 + 按模型真实归属路由），感谢原作者的开源贡献喵～
+
 ![License](https://img.shields.io/badge/license-MIT%20%2B%20附加声明-blue)
 ![Platform](https://img.shields.io/badge/platform-Android-green)
 ![Kotlin](https://img.shields.io/badge/kotlin-2.1.0-purple)
