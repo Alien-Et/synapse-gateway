@@ -3,6 +3,7 @@ package dev.aigw.core.provider.codebuddy
 import com.google.gson.JsonParser
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 /**
  * 模型目录解析。
@@ -63,6 +64,33 @@ class CodeBuddyModelsTest {
 
         // credits 为空时不给倍率，不能编造
         assertEquals(null, models.single { it.id == "default-model" }.extra["rate"])
+    }
+
+    @Test
+    fun `限时活动从 tags 的 badge 里解析出来`() {
+        // 真实上游结构（2026-10 实测）：限时活动以 tags 数组里的 `badge:<文案>:<颜色>`
+        // 下发，同时 credits 被压到 x0.00。
+        val models = parse(
+            """
+            {"code": 0, "data": {"models": [
+              {"id": "hy3", "name": "Hy3", "credits": "x0.00 credits",
+               "tags": ["craft", "badge:限时免费:#FF0000"], "maxInputTokens": 192000},
+              {"id": "normal", "name": "Normal", "credits": "x0.79 credits",
+               "tags": ["craft"]}
+            ]}}
+            """.trimIndent(),
+        )
+
+        val free = models.single { it.id == "hy3" }
+        assertEquals("0×", free.extra["rate"])
+        assertEquals("0×", free.extra["rateDiscount"], "限时活动要有折扣倍率")
+        assertEquals("限时免费", free.extra["rateDiscountTag"], "文案取自 badge")
+
+        // 没有 badge 的模型不应凭空多出折扣字段
+        val normal = models.single { it.id == "normal" }
+        assertEquals("0.79×", normal.extra["rate"])
+        assertNull(normal.extra["rateDiscount"])
+        assertNull(normal.extra["rateDiscountTag"])
     }
 
     @Test

@@ -1045,7 +1045,19 @@ class CodeBuddyProvider(
                     contextWindow = item.get("maxInputTokens")?.asLong ?: 0L,
                     extra = buildMap {
                         // 上游给的是 "x0.79 credits" 这种串，抽出数值作为倍率展示
-                        parseCreditsStatic(item.get("credits")?.asString)?.let { put("rate", "$it×") }
+                        val rate = parseCreditsStatic(item.get("credits")?.asString)
+                        rate?.let { put("rate", "$it×") }
+                        // 限时活动在 tags 里以 `badge:<文案>:<颜色>` 下发（如「限时免费」）。
+                        // 有 badge 且倍率被压到 0 时，按「限时 0×」展示，与商汤/字节同一套字段。
+                        val badge = item.arrayOrNull("tags")
+                            ?.mapNotNull { it.takeIf { t -> t.isJsonPrimitive }?.asString }
+                            ?.firstOrNull { it.startsWith("badge:") }
+                            ?.split(':')?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
+                        if (badge != null) {
+                            val effective = if (rate == "0") "0" else rate
+                            effective?.let { put("rateDiscount", "$it×") }
+                            put("rateDiscountTag", badge)
+                        }
                         item.get("maxOutputTokens")?.asLong?.takeIf { it > 0 }?.let {
                             put("maxOutput", it.toString())
                         }

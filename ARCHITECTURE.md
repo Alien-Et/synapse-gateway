@@ -224,14 +224,24 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
   - 模型目录两条路径不通用：国内走网页控制台，国外走客户端 product config。
   - 设备授权的 state 与 token **不通用**：「打开登录页」与「轮询」必须用同一个区域。
 - 签到 `/v2/daily-checkin` 幂等；成长中心在 `/v2/activity/growth/*` 下；**仅国内版有**，国外版没有签到制度。
+- **倍率与限时活动**：倍率在 `credits` 字段（如 `"x0.79 credits"`，抽出数值）；限时活动在 `tags[]` 里以 **`badge:<文案>:<颜色>`** 下发（实测 `"badge:限时免费:#FF0000"`，同时 `credits` 被压到 `x0.00`）。
+  - 解析后统一填 `rate` / `rateDiscount` / `rateDiscountTag`，与字节、商汤同一套字段，界面共用一段渲染代码。
+  - ⚠️ 上游**不提供活动结束时间**，所以腾讯只有「限时免费」文案、没有「至 X月X日」。
 
 ### 字节（Trae）
 - ⚠️ **agent host 分区域且与 OAuth host 不同**：国内 agent `trae-api-cn.mchost.guru`、国外 agent `trae-api-sg.mchost.guru`。国外版把 agent host 写成 `api.trae.ai` 会让对话与模型目录全部 **404**。
 - `content` 必须是 `[{type:"text",text}]` 数组；`tools[].function.parameters` 必须是 JSON 字符串；`tool_choice` 只认字符串。
 - 流内 `notify_usage.ide_credits` 是真实积分消耗，需回写账号池。
+- **倍率不在上游字段里**：`get_detail_param` 两份独立实现（trae2api-web `FetchModels`、cli2api `catalog.go`）都不解析价格/倍率，所以倍率来自 `ModelRates` **本地参考表**（来源：docs.trae.cn《内置模型限时折扣》，2026-09 抓取）。
+  - 折扣同样来自本地表的 `discounted` / `discountTag`（如「会员5折」「空闲5折」），**没有结束时间**。
+  - 查不到的模型 `rateOf` 返回 null，界面不显示——不编造数字。
 
 ### 讯飞（Loomy）
 - **鉴权失败是 HTTP 200 + 业务码**（JSON 里 code 字段），不是 4xx。不做业务码判定会把错误 JSON 当正常回复透传。
+- ⚠️ **上游模型接口没有倍率字段**：`/api/v1/models` 只返回 `id` / `name` / `limit{context,output}` / `capabilities` / `modalities`。积分侧只有 `/api/v1/points/records`（流水）与 `team-points/balance`（余额），**没有「每个模型多少倍率」的接口**。所以模型页不显示讯飞倍率，这是上游能力限制，不是漏解析。
+
+### 谷歌（Antigravity）
+- 模型目录同样**不返回倍率**，界面不显示。
 
 ### 商汤（Raccoon）
 - 登录是网页回调：`/code/authorize?appname=Raccoon&redirect=<回调>`，回调带 `authorization_code`，再 `POST /api/web/auth/v1/login_with_authorization_code` 换 `access_token`(JWT)/`refresh_token`。

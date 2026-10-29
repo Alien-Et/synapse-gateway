@@ -453,23 +453,33 @@ private fun ModelRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
                 )
             }
-            // 倍率与限时折扣：供应商（Trae 按积分倍率、CodeBuddy 按 credits）已算好，不显示等于白算
+            // 倍率与限时折扣：统一字段名 rate / rateDiscount / rateDiscountTag / rateDiscountUntil，
+            // 腾讯（credits + tags badge）、字节（本地参考表）、商汤（billing_*）都往这里填。
             val rateLabel = extra["rate"]?.takeIf { it.isNotBlank() }
-            if (rateLabel != null) {
+            val discount = extra["rateDiscount"]?.takeIf { it.isNotBlank() }
+            if (rateLabel != null || discount != null) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    Text(
-                        text = "倍率 $rateLabel",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    extra["rateDiscount"]?.takeIf { it.isNotBlank() }?.let { discount ->
-                        val until = extra["rateDiscountUntil"].orEmpty()
+                    if (rateLabel != null) {
                         Text(
-                            // 结束时间来自上游实时下发（活动延期刷新即变），有就带上，没有只显示倍率
-                            text = if (until.isEmpty()) "限时 $discount" else "限时 $discount（至 $until）",
+                            text = "倍率 $rateLabel",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (discount != null) {
+                        // 文案优先级：上游给的 tag（如「会员5折」「限时免费」）> 默认「限时」；
+                        // 结束时间只有商汤会下发，有就带上。
+                        val tag = extra["rateDiscountTag"]?.takeIf { it.isNotBlank() }
+                        val until = extra["rateDiscountUntil"]?.takeIf { it.isNotBlank() }
+                        val prefix = tag ?: "限时"
+                        Text(
+                            text = buildString {
+                                append("$prefix $discount")
+                                if (until != null) append("（至 $until）")
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.tertiary,
                         )
