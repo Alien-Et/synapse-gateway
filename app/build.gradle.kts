@@ -1,5 +1,4 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import java.io.File
 import java.util.Properties
 
 plugins {
@@ -9,11 +8,13 @@ plugins {
 }
 
 /**
- * release 签名：从 keystore.properties 读，仅在文件存在时装配。
+ * 签名配置：从根目录 keystore.properties 读取，debug 与 release **共用同一套密钥**。
  *
- * 本地开发只出 debug 包（见 buildTypes.debug），不需要 keystore.properties；
- * 云端发版时才由 CI 现生成该文件。文件缺失时不在配置阶段报错，
- * 但 release 构建会因无签名配置而失败——正是期望行为。
+ * - 本地：keystore.properties 指向工作区里的 release.keystore
+ * - CI：工作流从 Secrets 还原出同名文件，并生成内容相同的 keystore.properties
+ *
+ * 文件缺失时不在配置阶段报错，构建出的包就是未签名的（release 装不上）——
+ * 这是期望行为，避免把「没配密钥」误当成成功。
  */
 val keystoreProps = Properties().apply {
     val file = rootProject.file("keystore.properties")
@@ -21,19 +22,6 @@ val keystoreProps = Properties().apply {
 }
 
 val hasReleaseKeystore = rootProject.file("keystore.properties").exists()
-
-/**
- * debug 签名用的固定 keystore：从 keystore.properties 的 `debugStoreFile` 读，不存在则不装配。
- *
- * 为什么要固定：容器（PRoot rootfs）重置会重新生成 `~/.android/debug.keystore`，
- * debug 包的签名随之改变，之前装好的 debug 版就再也无法原地升级
- * （`INSTALL_FAILED_UPDATE_INCOMPATIBLE`，系统提示「应用签名不一致」）。
- * 把 debug 密钥放到持久位置并在 keystore.properties 里显式指过去，签名就不再随容器重置漂移。
- *
- * CI/他人机器不写 `debugStoreFile`，此处为空，回落到 AGP 默认的 debug 签名，不受影响。
- */
-val debugKeystoreFile: File? =
-    keystoreProps.getProperty("debugStoreFile")?.let { File(it) }?.takeIf { it.isFile }
 
 fun keystoreValue(key: String): String =
     keystoreProps.getProperty(key)
@@ -57,23 +45,25 @@ android {
     }
 
     signingConfigs {
-        // 只有存在 keystore.properties 时才创建 release 签名；
-        // 本地只出 debug 包时不依赖该文件。
+        // 统一签名：debug 与 release 都用 keystore.properties 指向的**同一个 keystore**。
+        //
+        // 为什么必须统一（历史教训）：
+        // - 曾用 AGP 默认 debug key 签 debug 包、release keystore 签 release 包，
+        //   两者证书不同 → 装过 debug 包就再也装不上 release 包（INSTALL_FAILED_UPDATE_INCOMPATIBLE），
+        //   反之亦然，每次换包都要卸载重装、丢账号与配置。
+        // - 容器（PRoot rootfs）重置还会重新生成 ~/.android/debug.keystore，
+        //   debug 签名随之漂移，之前装好的包连原地升级都做不到。
+        //
+        // 现在本地与 CI 共用同一套密钥：
+        // - 本地：keystore.properties 指向工作区里的 release.keystore
+        // - CI：工作流从 Secrets 还原出同名文件并生成同样的 keystore.properties
+        // 因此本地 debug / 本地 release / CI release 三种包签名完全一致，可互相覆盖升级。
         if (hasReleaseKeystore) {
-            create("release") {
+            create("unified") {
                 storeFile = file(keystoreValue("storeFile"))
                 storePassword = keystoreValue("storePassword")
                 keyAlias = keystoreValue("keyAlias")
                 keyPassword = keystoreValue("keyPassword")
-            }
-        }
-        // debug 签名固定到持久 keystore（见上面的 debugKeystoreFile）。
-        if (debugKeystoreFile != null) {
-            create("debugStable") {
-                storeFile = debugKeystoreFile
-                storePassword = keystoreValue("debugStorePassword")
-                keyAlias = keystoreValue("debugKeyAlias")
-                keyPassword = keystoreValue("debugKeyPassword")
             }
         }
     }
@@ -85,23 +75,22 @@ android {
         // material-icons-extended 的 10660 个未使用图标类会被裁掉。
         // 裁剪后 debug 3.5MB / release 1.4MB（未开前 debug 是 16.8MB）。
         //
-        // debug = 本地开发包：**与 release 同包名**（覆盖安装，不共存）。
+        // debug = 本地开发包：**与 release 同包名、同签名**（可互相覆盖安装）。
         // 不加 applicationIdSuffix——加了好处只是能同机共存，代价是装完出现两个图标、
         // 配置/账号/日志全部另起一份，用户还得在两者间来回切。
-        // 签名固定到持久 keystore（未配置时用 AGP 默认 debug 签名），
-        // 否则容器重置会换 key，装上后的包永远无法原地升级。
         debug {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (debugKeystoreFile != null) signingConfig = signingConfigs.getByName("debugStable")
+            // 与 release 用同一个 keystore（见 signingConfigs.unified）
+            if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("unified")
         }
-        // release = 仅由 GitHub Actions 云端构建并发版；本地不产出 release 包。
+        // release = 本地/云端都能构建；云端由 push v* 标签触发并发版。
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("unified")
         }
     }
 
