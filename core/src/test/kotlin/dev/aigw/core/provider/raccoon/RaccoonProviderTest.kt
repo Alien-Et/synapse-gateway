@@ -28,6 +28,7 @@ class RaccoonProviderTest {
 
     private companion object {
         const val GRANT_PATH = "/api/web/desktop/v1/login/points/grant"
+        const val SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
         const val BILLS_PATH = "/api/web/points/v1/bills"
         const val BALANCE_PATH = "/api/web/points/v1/balance"
     }
@@ -276,43 +277,51 @@ class RaccoonProviderTest {
         assertEquals(listOf("data: [DONE]\n\n"), translator.close())
     }
 
-    // ------------------------------------------------------------------ 签到（桌面端登录奖励）
+    // ------------------------------------------------------------------ 签到（每日发放）
 
     @Test
-    fun `签到携带桌面端请求头`() {
-        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000}}}""") { base, captured ->
+    fun `签到打 setting_info 并带桌面端请求头`() {
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":0,"data":{"point_grant_popups":true}}""") { base, captured ->
             RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             val headers = captured()
-            // 官方桌面客户端靠这两个头判定「是桌面端」，缺了上游不发放
+            // 对照 Buddy2api：每日发放靠 GET setting_info 触发，不是 desktop login grant
             assertEquals("desktop-windows", headers["x-client-platform"]?.firstOrNull(), "缺 X-Client-Platform：$headers")
+            assertEquals(RaccoonProvider.CLIENT_VERSION, headers["x-client-version"]?.firstOrNull())
+            assertEquals("zh", headers["x-raccoon-language"]?.firstOrNull(), "官方桌面端会带 X-Raccoon-Language：$headers")
+            assertEquals("office-raccoon/1.0.0", headers["user-agent"]?.firstOrNull())
+        }
+    }
+
+    @Test
+    fun `签到不再打已废弃的桌面登录奖励端点`() {
+        // 那个端点是「桌面端登录奖励」，不是每日领取；打它点了没反应
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":0,"data":{}}""") { base, captured ->
+            RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(
-                headers["x-client-version"]?.firstOrNull()?.startsWith("v") == true,
-                "缺 X-Client-Version（需带 v 前缀）：$headers",
+                captured()["x-client-platform"] != null,
+                "应该已经发出请求",
             )
         }
     }
 
     @Test
-    fun `发放成功时汇报 popup 里的积分`() {
-        val body = """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000,"expire_at":"2026-10-20"}}}"""
-        withUpstreamHeaders(GRANT_PATH, body) { base, _ ->
+    fun `签到成功时汇报到账积分`() {
+        // 靠流水对比判到账：before 无、after 有 300 → 本次领到 300
+        withUpstreamHeaders(
+            SETTING_INFO_PATH,
+            """{"code":0,"data":{"point_grant_popups":true}}""",
+        ) { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(result.ok, result.message)
-            assertTrue(result.message.contains("3000"), "积分没从 data.popup.points 取：${result.message}")
         }
     }
 
     @Test
-    fun `未发放时报失败且说明原因`() {
-        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":false}}""") { base, _ ->
+    fun `上游业务码非 0 时如实报失败`() {
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":500,"message":"daily grant failed"}""") { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
-            // 报 ok=true 会让引擎去补刷额度，界面只冒一句「未发放」然后原地不动，
-            // 用户看到的就是「点了签到没反应」。必须如实报失败。
-            assertFalse(result.ok, "上游明确没发积分，不能报成功：${result.message}")
-            assertTrue(
-                result.message.contains("桌面端登录奖励"),
-                "要让用户知道这不是每日签到：${result.message}",
-            )
+            assertFalse(result.ok, "上游明确报错不能算成功：${result.message}")
+            assertTrue(result.message.contains("daily grant failed"), result.message)
         }
     }
 
@@ -520,14 +529,32 @@ class RaccoonProviderTest {
     }
 
     @Test
-    fun `user_info 回传 userId 时优先用它当 uid`() {
+    fun `JWT 有用户声明时以它为准，不依赖 user_info`() {
+        // 对照 Buddy2api：账号标识首选 JWT 的用户声明（实测每号不同且稳定），
+        // user_info 只用来补昵称/Pro/orgCode，不当 id 首选
         val token = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "jwt-sub-1")
         withLoginUpstream(
             mapOf("c" to token),
             infoBody = """{"code":0,"data":{"userId":"real-42"}}""",
         ) { base ->
             val acc = RaccoonProvider(host = base).completeWebLogin("http://127.0.0.1/cb?authorization_code=c")
-            assertEquals("real-42", acc.uid)
+            assertEquals("jwt-sub-1", acc.uid, "JWT 声明应优先，user_info 的 id 只做兜底")
+        }
+    }
+
+    @Test
+    fun `同一账号重复登录 uid 保持稳定`() {
+        // access_token 每次登录都轮换，所以 uid 绝不能由它派生，否则同一号会反复变成新条目
+        val token1 = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "stable-user")
+        val token2 = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "stable-user")
+        withLoginUpstream(
+            mapOf("a" to token1, "b" to token2),
+            infoBody = """{"code":0,"data":{}}""",
+        ) { base ->
+            val provider = RaccoonProvider(host = base)
+            val first = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=a")
+            val second = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=b")
+            assertEquals(first.uid, second.uid, "同一账号两次登录必须得到同一 uid")
         }
     }
 
