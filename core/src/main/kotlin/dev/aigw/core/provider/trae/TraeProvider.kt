@@ -384,12 +384,16 @@ class TraeProvider(
         synchronized(pending) {
             pending[traceId] = machineId to deviceId
         }
-        // 同时落盘：进程被杀或回调晚到时，仍能拿回与登录一致的设备指纹
+        // 同时落盘：进程被杀或回调晚到时，仍能拿回与登录一致的设备指纹。
+        // ⚠️ region 必须一起存：用户在国际站点登录时，如果只靠回调里的
+        // loginHost / enterpriseId 反推，上游一旦不带这些字段就会被误判成国内版
+        // （之后模型目录/对话全打到 trae.cn，表现为「登录成功但用不了」）。
         store.write(
             pendingKey(traceId),
             JsonObject().apply {
                 addProperty("machineId", machineId)
                 addProperty("deviceId", deviceId)
+                addProperty("region", target.id)
                 addProperty("at", nowMillis())
             }.toString(),
         )
@@ -404,11 +408,20 @@ class TraeProvider(
         val callback = TraeLogin.parseCallback(callbackUrl)
         val traceId = queryParam(callbackUrl, "loginTraceID")
         val machine = resolveMachine(traceId)
-        // 回调里的 loginHost / 回调域名能区分发行版；拿不到就按国内版处理
-        val region = TraeRegion.infer(
-            queryParam(callbackUrl, "loginHost"),
-            callback.enterpriseId.ifEmpty { queryParam(callbackUrl, "host") },
-        )
+        // 区域判定优先级（越靠前越可信）：
+        //   1. 登录发起时用户选的区域（beginWebLogin 存在 pending 里）—— 最可靠，
+        //      因为它就是登录页实际打开的站点，不会和上游返回字段的缺失打架
+        //   2. 回调里的 loginHost / enterpriseId / host —— 上游给的发行版线索
+        //   3. 都没有 → 国内（历史默认行为）
+        val pendingRegion = resolvePendingRegion(traceId)
+        val region = if (pendingRegion != null) {
+            TraeRegion.of(pendingRegion)
+        } else {
+            TraeRegion.infer(
+                queryParam(callbackUrl, "loginHost"),
+                callback.enterpriseId.ifEmpty { queryParam(callbackUrl, "host") },
+            )
+        }
         var account = TraeAccount(
             uid = callback.uid,
             accessToken = callback.accessToken,
@@ -440,6 +453,22 @@ class TraeProvider(
         val machineId = obj.get("machineId")?.asString.orEmpty()
         val deviceId = obj.get("deviceId")?.asString.orEmpty()
         return if (machineId.isEmpty() || deviceId.isEmpty()) null else machineId to deviceId
+    }
+
+    /**
+     * 取登录发起时用户选的区域（`cn` / `global`）。
+     *
+     * 这是回调后判定区域最可靠的依据：用户在国际页登录，就一定属于国际版。
+     * 只靠回调参数推断会在上游不返回 `loginHost` 时误判成国内版，
+     * 导致国际账号被写进国内 host、所有请求打错站点。
+     *
+     * 旧版本落下 pending 时没有 region 字段，此时返回 null 走回调推断兜底。
+     */
+    private fun resolvePendingRegion(traceId: String?): String? {
+        if (traceId.isNullOrEmpty()) return null
+        val raw = store.read(pendingKey(traceId)) ?: return null
+        val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return null
+        return obj.get("region")?.asString?.takeIf { it.isNotEmpty() }
     }
 
     // ------------------------------------------------------------------ 工具

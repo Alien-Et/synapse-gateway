@@ -242,6 +242,9 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 
 ### 字节（Trae）
 - ⚠️ **agent host 分区域且与 OAuth host 不同**：国内 agent `trae-api-cn.mchost.guru`、国外 agent `trae-api-sg.mchost.guru`。国外版把 agent host 写成 `api.trae.ai` 会让对话与模型目录全部 **404**。
+- ⚠️ **登录回调的区域判定必须以「登录时选的区域」为准**：回调里的 `loginHost` / `enterpriseId` / `host` 上游**不保证返回**，只靠它们推断会把国际账号存成国内版，之后模型目录/对话全打到 `trae.cn`，表现为「登录成功但用不了」。
+  - 现在 `beginWebLogin` 把用户选的 region 与设备指纹一起落盘（`login/pending/trae/<traceId>` 的 `region` 字段），`completeWebLogin` 优先采信它，缺失时才退回回调参数推断。
+  - 登录 URL 的区域差异：`x_app_type` 国际版是 `trae`、国内是 `stable`；`x_os_version` 国际版填 `Windows 11 Pro`、国内填 `1.0`。
 - `content` 必须是 `[{type:"text",text}]` 数组；`tools[].function.parameters` 必须是 JSON 字符串；`tool_choice` 只认字符串。
 - 流内 `notify_usage.ide_credits` 是真实积分消耗，需回写账号池。
 - **倍率有两个来源，优先用上游**：

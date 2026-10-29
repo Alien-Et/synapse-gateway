@@ -4,6 +4,8 @@ import dev.aigw.core.InMemoryKeyValueStore
 import dev.aigw.core.provider.ProviderAccount
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * 区域推断：凭证里的 domain 既可能是区域 id（cn/global），也可能是主机名（trae.cn / www.trae.ai），
@@ -99,4 +101,32 @@ class TraeRegionTest {
         """.trimIndent()
         return ProviderAccount(TraeProvider.ID, "u1", "昵称", secret)
     }
+
+    @Test
+    fun `登录时选的区域会被持久化，回调优先采信`() {
+        val store = InMemoryKeyValueStore()
+        val provider = TraeProvider(
+            store = store,
+            version = { TraeVersion() },
+            defaultModel = { "glm-5.2" },
+        )
+
+        // 在国际站点发起登录
+        val ticket = provider.beginWebLogin("http://127.0.0.1:51120/callback", TraeRegion.INTL.id)
+
+        // 登录链接必须指向国际控制台
+        assertTrue(
+            ticket.loginUrl.startsWith(TraeRegion.INTL.consoleHost),
+            "国际版登录页应打开 trae.ai，实际：${ticket.loginUrl}",
+        )
+        // x_app_type 国际版是 trae，国内是 stable
+        assertTrue(ticket.loginUrl.contains("x_app_type=trae"), ticket.loginUrl)
+
+        // pending 里必须记住 region，否则回调时只能靠上游字段猜（可能误判成国内）
+        val pendingRaw = store.read("login/pending/trae/${ticket.id}")
+        assertNotNull(pendingRaw, "登录 pending 应落盘")
+        assertTrue(pendingRaw.contains("\"region\""), "pending 应记录 region：$pendingRaw")
+        assertTrue(pendingRaw.contains(TraeRegion.INTL.id), "pending 的 region 应为 global：$pendingRaw")
+    }
+
 }
