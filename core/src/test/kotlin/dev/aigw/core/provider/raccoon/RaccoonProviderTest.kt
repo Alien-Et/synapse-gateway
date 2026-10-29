@@ -529,14 +529,32 @@ class RaccoonProviderTest {
     }
 
     @Test
-    fun `user_info 回传 userId 时优先用它当 uid`() {
+    fun `JWT 有用户声明时以它为准，不依赖 user_info`() {
+        // 对照 Buddy2api：账号标识首选 JWT 的用户声明（实测每号不同且稳定），
+        // user_info 只用来补昵称/Pro/orgCode，不当 id 首选
         val token = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "jwt-sub-1")
         withLoginUpstream(
             mapOf("c" to token),
             infoBody = """{"code":0,"data":{"userId":"real-42"}}""",
         ) { base ->
             val acc = RaccoonProvider(host = base).completeWebLogin("http://127.0.0.1/cb?authorization_code=c")
-            assertEquals("real-42", acc.uid)
+            assertEquals("jwt-sub-1", acc.uid, "JWT 声明应优先，user_info 的 id 只做兜底")
+        }
+    }
+
+    @Test
+    fun `同一账号重复登录 uid 保持稳定`() {
+        // access_token 每次登录都轮换，所以 uid 绝不能由它派生，否则同一号会反复变成新条目
+        val token1 = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "stable-user")
+        val token2 = fakeJwt("iss" to "https://xiaohuanxiong.com", "sub" to "stable-user")
+        withLoginUpstream(
+            mapOf("a" to token1, "b" to token2),
+            infoBody = """{"code":0,"data":{}}""",
+        ) { base ->
+            val provider = RaccoonProvider(host = base)
+            val first = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=a")
+            val second = provider.completeWebLogin("http://127.0.0.1/cb?authorization_code=b")
+            assertEquals(first.uid, second.uid, "同一账号两次登录必须得到同一 uid")
         }
     }
 
