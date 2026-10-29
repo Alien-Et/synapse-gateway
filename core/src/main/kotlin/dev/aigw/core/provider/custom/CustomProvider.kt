@@ -62,6 +62,14 @@ class CustomProvider(
     }.getOrDefault(emptyList())
 
     override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall {
+        // 地址为空 = 这条配置是导入时补建的占位（旧导出文件没存地址）。
+        // 明确报出来，别让它拼成一个 "/chat/completions" 的相对地址去撞一个看不懂的错误。
+        if (config.baseUrl.isBlank()) {
+            return FailedChatCall(
+                0,
+                "供应商「${config.name.ifEmpty { config.key }}」还没填接口地址，请到供应商详情页补全",
+            )
+        }
         val key = parseKey(account) ?: return FailedChatCall(401, "凭证无法解析")
         val streaming = isStreaming(openAiBody)
         val model = requestedModel(openAiBody)

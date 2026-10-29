@@ -168,8 +168,16 @@ data class CustomProviderConfig(
 
         fun fromJson(obj: JsonObject): CustomProviderConfig? {
             val key = obj.get("key")?.asString.orEmpty()
+            // 只卡 key，**不卡 baseUrl**。
+            //
+            // 导入账号时，本机还没有的自定义供应商会被补建一条「地址待填」的占位配置
+            // （旧导出文件里根本没存地址）。这里要是连 baseUrl 一起卡，占位配置写下去
+            // 立刻就被读丢了：账号导入 → 报「供应商没创建」→ 用户以为要手动先建 →
+            // 可他就是因为没创建才要导入。死循环就在这一行。
+            //
+            // 地址留空不影响安全：真正发请求前的 openChat 会明确拒掉并提示补全。
+            if (key.isEmpty()) return null
             val baseUrl = obj.get("baseUrl")?.asString.orEmpty()
-            if (key.isEmpty() || baseUrl.isEmpty()) return null
             val keys = obj.arrayOrNull("apiKeys")?.mapNotNull { it.asString } ?: emptyList()
             val models = obj.arrayOrNull("models")?.mapNotNull { it.asString } ?: emptyList()
             return CustomProviderConfig(
