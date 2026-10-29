@@ -108,10 +108,18 @@ object RaccoonUi : ProviderUi {
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ChoiceChip("签到领积分", false) {
+                ChoiceChip("领登录奖励", false) {
                     actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
                 }
             }
+            // 说清楚这不是「每日签到」：小浣熊的每日赠送积分由服务端自动发放，
+            // 这个按钮只领官方桌面客户端登录奖励，一天一次。不写这句，
+            // 用户点完发现积分没变，就会认为「签到没反应」。
+            Text(
+                text = "小浣熊没有每日签到；每日赠送积分由服务端自动发放。此按钮领取桌面端登录奖励，一天一次。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             PointsBillsSection(status, actions)
         }
     }

@@ -254,6 +254,23 @@ class GatewayEngine(
     }
     private val lastAutoCreditRefresh = ConcurrentHashMap<String, Long>()
 
+    /** 一个区域的模型目录快照（region = null 表示非区域型供应商）。 */
+    private data class RegionOwnedEntries(val region: String?, val modelIds: List<String>)
+
+    /**
+     * 「模型真实归属」判定用的目录缓存：providerId → (各区域模型 id 列表, 拉取时刻)。
+     *
+     * 见 [ownedEntriesByRegion]。区域型供应商每个区域各存一条，非区域型只有 region=null 一条。
+     * 路由是每个对话请求的必经路径，这里把目录结果按 provider
+     * 缓存 [OWNERSHIP_CACHE_TTL_MILLIS]，避免无账号/拉取失败的供应商在每次请求上重试。
+     */
+    private val ownershipCache = ConcurrentHashMap<String, Pair<List<RegionOwnedEntries>, Long>>()
+
+    /** 目录刷新（用户点刷新/登录新账号）后清掉归属缓存，下次路由立刻用上新目录。 */
+    fun invalidateOwnershipCache() {
+        ownershipCache.clear()
+    }
+
     private var server: GatewayHttpServer? = null
 
     /** 串行化 start/stop：startForegroundService 与 UI 协程可能同时调 start()，无锁会出现双建 server 或假失败。 */
@@ -1354,7 +1371,7 @@ class GatewayEngine(
                         provider.id,
                         "${provider.displayName}（$label）",
                         model,
-                        routePrefix = "${provider.id}-$region",
+                        routePrefix = chineseRoutePrefixOf(provider.id, region),
                         region = region,
                         cached = view.fromFallback,
                     ),
@@ -1372,7 +1389,15 @@ class GatewayEngine(
         val view = fetchCatalog(provider, pool.pick(provider.id))
         val models = view.models
             .filterNot { settings.onlyUsableModels && provider.isInternalModel(it.id) }
-            .map { RoutedModel(provider.id, provider.displayName, it, cached = view.fromFallback) }
+            .map {
+                RoutedModel(
+                    provider.id,
+                    provider.displayName,
+                    it,
+                    routePrefix = chineseRoutePrefixOf(provider.id, null),
+                    cached = view.fromFallback,
+                )
+            }
         return ProviderModelsChunk(
             provider.id,
             models,
@@ -1410,14 +1435,21 @@ class GatewayEngine(
             val subModel = model.substring(slash + 1).trim()
             val normalized = normalizeProviderPrefix(rawPrefix)
             if (normalized != null && registry.get(normalized) != null) {
-                // 区域型前缀（如 codebuddy-cn/glm-5.2）：路由到该供应商并把区域约束带上，
+                // 区域型前缀（如 codebuddy-cn/glm-5.2、腾讯国内/glm-5.2）：路由到该供应商并把区域约束带上，
                 // 选号只在该区域的账号中进行
-                val region = regionPrefixOf(rawPrefix.lowercase(), normalized)
+                val region = chineseRegionPrefix(rawPrefix)
                 return Route(normalized, subModel, region)
             }
         }
 
-        // 无前缀或前缀未识别：按模型名特征推导
+        // 无前缀或前缀未识别：先按各家模型目录做「真实归属」判定，再退到名称特征猜测。
+        // 这是主人要的行为：用腾讯的模型就路由到腾讯，用字节的就路由到字节。
+        // 原先 glm/qwen/deepseek 这类品牌模糊的模型走的是 listOf("codebuddy","trae").firstOrNull，
+        // 谁先注册就用谁——模型真实只在字节也会被发去腾讯。
+        val owned = resolveByModelOwnership(model)
+        if (owned != null) return owned
+
+        // 目录里查不到（没账号/没拉过目录/新模型）才按名称特征推导
         val inferred = inferProviderByModel(model)
         if (inferred != null && registry.get(inferred) != null) {
             if (providerSettings(inferred).enabled && pool.size(inferred) > 0) {
@@ -1451,6 +1483,144 @@ class GatewayEngine(
     }
 
     /**
+     * 按「模型真实归属」解析路由：谁家的模型目录里真有这个模型，就发给谁。
+     *
+     * 这是无前缀调用的主判定（[resolveRoute] 中位于前缀解析之后、名称猜测之前）。
+     * 前缀形式的调用完全不经过这里——显式写了 `腾讯/xxx` 就一定是腾讯。
+     *
+     * **区域型供应商（腾讯 / 字节）按区域分别查目录**：国内站与国外站是两套独立的
+     * 上游站点、两份不同的模型清单，同一个模型往往只存在于其中一边。
+     * 所以这里会分别问「这个模型在 cn 目录里吗？」「在 global 目录里吗？」，
+     * 命中哪边就把 [Route.region] 设成哪边——调用方据此只会在该区域的账号里选号，
+     * 不会出现「发给一个根本没这个模型的国外账号」。
+     *
+     * 匹配顺序（严格到宽松）：
+     * 1. 模型 id 完全相同（忽略大小写）；
+     * 2. 归一化后相同（下划线/空格统一成连字符，见 [normalizeModelKey]）；
+     * 3. 去掉版本修饰符后相同（[isEquivalentModel]，如 `-high` / `-low` / `-preview`）。
+     *
+     * 只有**已启用且有账号**的供应商参与，避免路由到用户关掉或没登录的一方。
+     * 多家都命中时（同一模型在多平台上线）优先余额最高的账号所在家；
+     * 余额相同按注册顺序，保证结果稳定可复现。
+     */
+    private fun resolveByModelOwnership(model: String): Route? {
+        val candidates = registry.all().filter { provider ->
+            providerSettings(provider.id).enabled && pool.size(provider.id) > 0
+        }
+        if (candidates.isEmpty()) return null
+
+        val normWanted = normalizeModelKey(model)
+        var best: Route? = null
+        var bestCredits = Long.MIN_VALUE
+        var bestRank = Int.MAX_VALUE
+
+        for (provider in candidates) {
+            // 区域型供应商会返回多条（每个区域一条），非区域型只有 region = null 一条
+            for (entry in ownedEntriesByRegion(provider)) {
+                val matched = matchModelIn(entry.modelIds, model, normWanted) ?: continue
+                val hitRank = matched.second
+                val hitModel = matched.first
+
+                // 余额按「该区域的账号」算：region 非空时只统计该区域的账号
+                val credits = creditOf(provider.id, entry.region)
+                val better = when {
+                    hitRank < bestRank -> true
+                    hitRank > bestRank -> false
+                    credits > bestCredits -> true
+                    else -> false
+                }
+                if (better) {
+                    bestRank = hitRank
+                    bestCredits = credits
+                    best = Route(provider.id, hitModel, entry.region)
+                }
+            }
+        }
+        return best
+    }
+
+    /** 某个区域（null = 不限区域）内账号的最高余额；未知按 0。 */
+    private fun creditOf(providerId: String, region: String?): Long {
+        val statuses = pool.statuses(providerId)
+        val regionAware = registry.get(providerId) as? dev.aigw.core.provider.RegionAwareSupport
+        val scoped = if (region != null && regionAware != null) {
+            val accounts = pool.accounts(providerId).associateBy { it.uid }
+            statuses.filter { st -> accounts[st.uid]?.let { regionAware.regionOf(it) } == region }
+        } else {
+            statuses
+        }
+        return scoped.maxOfOrNull { it.credits } ?: 0L
+    }
+
+    /**
+     * 在一份模型 id 列表里找匹配项；返回（命中的真实 id, 精度 rank）或 null。
+     * rank 越小越精确：0 完全相同，1 归一化相同，2 去除修饰符后相同。
+     */
+    private fun matchModelIn(ids: List<String>, model: String, normWanted: String): Pair<String, Int>? {
+        var bestRank = Int.MAX_VALUE
+        var bestId: String? = null
+        for (entry in ids) {
+            val rank = when {
+                entry.equals(model, ignoreCase = true) -> 0
+                normalizeModelKey(entry) == normWanted -> 1
+                isEquivalentModel(normalizeModelKey(entry), normWanted) -> 2
+                else -> continue
+            }
+            if (rank < bestRank) {
+                bestRank = rank
+                bestId = entry
+            }
+            if (rank == 0) break
+        }
+        val id = bestId ?: return null
+        return id to bestRank
+    }
+
+    /**
+     * 取一个供应商各区域的模型 id 列表（带短时缓存）。
+     *
+     * 区域型供应商（腾讯 / 字节）**必须按区域各拉一次**：国内与国际是两套不同的上游站点、
+     * 两份不同的模型清单，只用一个账号拉一次再当成所有区域的清单，
+     * 就会出现「以为国外站也有这个模型，实际没有」——这正是要避免的错路由。
+     * 某区域没有可用账号时不为它产生条目（没有账号的分组点进去必然失败）。
+     *
+     * 供应商自身目录缓存是分钟级，但「无账号 / 拉取失败」时返回空表且不入缓存，
+     * 每次请求都会重新尝试。路由是每个对话请求的必经路径，故这里按
+     * [OWNERSHIP_CACHE_TTL_MILLIS] 缓存一份，挡住重复开销。
+     */
+    private fun ownedEntriesByRegion(provider: Provider): List<RegionOwnedEntries> {
+        val now = nowMillis()
+        ownershipCache[provider.id]?.let { (entries, at) ->
+            if (now - at < OWNERSHIP_CACHE_TTL_MILLIS) return entries
+        }
+
+        val regions = (provider as? dev.aigw.core.provider.RegionAwareSupport)
+            ?.regions()
+            ?.filter { region -> pickAccount(provider.id, region = region) != null }
+            ?.takeIf { it.isNotEmpty() }
+        // 非区域型（或该供应商所有区域都没有可用账号）走单份目录
+        val entries = if (regions == null) {
+            listOf(RegionOwnedEntries(null, fetchOwnedIds(provider, null)))
+        } else {
+            regions.map { region ->
+                RegionOwnedEntries(region, fetchOwnedIds(provider, region))
+            }
+        }
+        ownershipCache[provider.id] = entries to now
+        return entries
+    }
+
+    /** 用指定区域的账号拉一份模型 id 列表；失败返回空表（不缓存失败结果以外的信息）。 */
+    private fun fetchOwnedIds(provider: Provider, region: String?): List<String> = try {
+        val account = if (region == null) pool.pick(provider.id) else pickAccount(provider.id, region = region)
+        provider.listModels(account).models.map { it.id }
+    } catch (e: Exception) {
+        logWarn("路由归属判定：拉取 [${provider.id}]${region?.let { "($it)" } ?: ""} 模型目录失败（${e.message ?: "未知错误"}），本次降级到名称推断")
+        emptyList()
+    }
+
+
+    /**
      * 把路由前缀解析成区域约束。
      *
      * 两种形式都认：
@@ -1458,19 +1628,6 @@ class GatewayEngine(
      * - `workbuddy-cn` / `workbuddy-global`。
      * 非区域型前缀（如 `trae`、`google`）返回 null。
      */
-    private fun regionPrefixOf(rawPrefixLower: String, providerId: String): String? {
-        val provider = registry.get(providerId) as? dev.aigw.core.provider.RegionAwareSupport ?: return null
-        for (region in provider.regions()) {
-            if (rawPrefixLower == "${providerId.lowercase()}-$region" ||
-                rawPrefixLower == "workbuddy-$region" ||
-                rawPrefixLower == "codebuddy-$region"
-            ) {
-                return region
-            }
-        }
-        return null
-    }
-
     /**
      * 在指定供应商中选号；[region] 非空时只选属于该区域且处于可用状态的账号中余额最高者。
      */
@@ -1621,20 +1778,88 @@ class GatewayEngine(
         }
     }
 
+    /**
+     * 路由前缀解析：**只认中文前缀**。
+     *
+     * 之前还接受 codebuddy/workbuddy/trae/google/loomy/raccoon 等英文别名，
+     * 会和中文前缀并存出两套写法，容易「东一个英文、西一个中文」。
+     * 现在统一成中文品牌名 + 中文区域后缀（腾讯国内 / 字节国外 …），
+     * 英文前缀不再被识别——写了英文会落到「无前缀」路径由模型名/目录推断。
+     *
+     * 例外：`custom:` 前缀是自定义供应商的存储键，必须原样保留（它本身不是品牌名）。
+     */
     private fun normalizeProviderPrefix(prefix: String): String? {
-        val existing = registry.get(prefix)
-        if (existing != null) return existing.id
+        // 只认中文品牌前缀（腾讯 / 腾讯国内 / 字节国外 …）。
+        // ⚠️ 不能先查 registry.get()：它是按 provider id（英文）做的忽略大小写查找，
+        // 一旦放在前面，`codebuddy/glm-5.2` 就会被当成合法前缀，英文前缀等于"偷偷还能用"。
+        chineseRoutePrefix(prefix)?.let { return it }
+        // 自定义供应商的 `custom:<id>` 是存储键，不是品牌名，必须原样保留。
         val lower = prefix.lowercase()
-        return when {
-            lower in listOf("antigravity", "google", "gemini", "agy", "alphabet") -> "antigravity"
-            lower in listOf("codebuddy", "workbuddy", "tencent", "wb") -> "codebuddy"
-            lower.startsWith("codebuddy-") || lower.startsWith("workbuddy-") -> "codebuddy"
-            lower in listOf("trae", "bytedance", "doubao", "solo") -> "trae"
-            // 区域型前缀：trae-cn / trae-global（少了这条，`trae-cn/模型名` 会整个
-            // 当成模型名发给上游，Trae 直接以 4001「param is invalid」拒绝）
-            lower.startsWith("trae-") -> "trae"
-            lower in listOf("loomy", "iflytek", "spark", "xf") -> "loomy"
-            else -> if (lower.startsWith("custom:")) lower else null
+        return if (lower.startsWith("custom:")) lower else null
+    }
+
+    /**
+     * 中文路由前缀 → 供应商 id。
+     *
+     * 与英文前缀**并存**：`腾讯/glm-5.2` 与 `codebuddy/glm-5.2` 等价，
+     * 老客户端的配置不会因为支持中文而失效。区域前缀也支持中文
+     * （`腾讯国内` / `腾讯国外` / `字节国内` / `字节国外`）。
+     *
+     * 中文不做 lowercase（本身就是无大小写语言），但允许前后空白。
+     */
+    private fun chineseRoutePrefix(prefix: String): String? {
+        val p = prefix.trim()
+        if (p.isEmpty()) return null
+        // 先判区域形式（更长、更具体），再判裸品牌名
+        return when (p) {
+            "腾讯国内", "腾讯中国" -> "codebuddy"
+            "腾讯国外", "腾讯国际" -> "codebuddy"
+            "字节国内", "字节中国" -> "trae"
+            "字节国外", "字节国际" -> "trae"
+            "腾讯" -> "codebuddy"
+            "字节" -> "trae"
+            "谷歌" -> "antigravity"
+            "讯飞" -> "loomy"
+            "商汤", "小浣熊" -> "raccoon"
+            else -> null
+        }
+    }
+
+    /**
+     * 中文区域前缀对应的区域标识（cn/global）。
+     *
+     * 只处理中文写法的区域后缀；英文前缀（`trae-cn` 等）仍由 [regionPrefixOf] 判定。
+     * 非中文区域前缀返回 null。
+     */
+    private fun chineseRegionPrefix(prefix: String): String? = when (prefix.trim()) {
+        "腾讯国内", "腾讯中国", "字节国内", "字节中国" -> "cn"
+        "腾讯国外", "腾讯国际", "字节国外", "字节国际" -> "global"
+        else -> null
+    }
+
+    /**
+     * 生成对外暴露的中文路由前缀（模型 id 的 `/` 前半部分）。
+     *
+     * `/v1/models` 与 App 模型页都从这里取前缀，所以界面与 API 看到的是同一套中文名。
+     * 英文前缀在 [resolveRoute] 里继续作为别名可用，老客户端配置无需改动。
+     *
+     * [region] 非空时拼区域后缀（腾讯国内 / 腾讯国外），与 [chineseRegionPrefix] 互为逆运算。
+     */
+    private fun chineseRoutePrefixOf(providerId: String, region: String?): String {
+        val brand = when (providerId) {
+            "codebuddy" -> "腾讯"
+            "trae" -> "字节"
+            "antigravity" -> "谷歌"
+            "loomy" -> "讯飞"
+            "raccoon" -> "商汤"
+            // 未知/自定义供应商沿用 id，不硬编中文
+            else -> return if (region == null) providerId else "$providerId-$region"
+        }
+        if (region == null) return brand
+        return brand + when (region) {
+            "cn" -> "国内"
+            "global" -> "国外"
+            else -> region
         }
     }
 
@@ -1642,12 +1867,17 @@ class GatewayEngine(
         val lower = model.lowercase()
         return when {
             lower.startsWith("gemini") || lower.startsWith("antigravity") -> "antigravity"
-            lower.startsWith("claude") && (lower.contains("thinking") || lower.contains("4-6") || lower.contains("sonnet") || lower.contains("opus")) -> "antigravity"
+            lower.startsWith("claude") -> "antigravity"
             lower.startsWith("doubao") || lower.startsWith("seed-") -> "trae"
             lower.startsWith("spark") || lower.contains("星火") -> "loomy"
+            lower.startsWith("raccoon") || lower.startsWith("sensetime") || lower.contains("商汤") -> "raccoon"
             lower.startsWith("deepseek") || lower.startsWith("kimi") || lower.startsWith("minimax") || lower.startsWith("glm") || lower.startsWith("qwen") -> {
-                // 只认已启用且有账号的供应商，避免推导到一个被用户关掉的供应商
-                listOf("codebuddy", "trae").firstOrNull { providerSettings(it).enabled && pool.size(it) > 0 }
+                // 这几家品牌在腾讯/字节都有上线，名称本身判定不了归属。
+                // 正常情况下 [resolveByModelOwnership] 已经用真实目录定好了；
+                // 走到这里说明目录里没有（没账号/没拉到）。此时**不猜**，返回 null 交给
+                // 下面的「单供应商接管 / defaultProvider」分支，避免把只在字节的模型
+                // 硬塞给腾讯（原先 firstOrNull { ... } 就是谁先注册用谁）。
+                null
             }
             else -> null
         }
@@ -1720,6 +1950,14 @@ class GatewayEngine(
 
         /** 区域型供应商：等待各区域目录拉取的预算（单个请求自身的读超时另算）。 */
         private const val REGIONAL_FETCH_WAIT_MS = 16_000L
+
+        /**
+         * 「模型真实归属」目录缓存的有效期。
+         *
+         * 比 provider 自身目录 TTL（分钟级）短，平衡两件事：目录刚拉到就立刻生效，
+         * 又不让一次拉取失败在整段时间里把路由钉死在名称推断上。
+         */
+        private const val OWNERSHIP_CACHE_TTL_MILLIS = 60_000L
 
         const val CUSTOM_PREFIX = "custom:"
 

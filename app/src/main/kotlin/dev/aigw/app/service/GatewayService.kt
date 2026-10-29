@@ -38,6 +38,9 @@ class GatewayService : Service() {
             acquireLocks()
             applyOverlay(engine)
             // 实时状态通知：仅在网关运行期间存在，跟随在途请求增删（onDestroy 一并注销）
+            LiveStatusNotifier.setProviderLabelResolver { providerId ->
+                engine.registry.get(providerId)?.displayName ?: providerId
+            }
             LiveStatusNotifier.start(
                 context = this,
                 requests = engine.activeRequests,

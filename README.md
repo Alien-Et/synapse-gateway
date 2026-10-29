@@ -20,6 +20,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 - [构建与发版](#构建与发版)
 - [接口与鉴权](#接口与鉴权)
 - [供应商](#供应商)
+- [路由逻辑](#路由逻辑)
 - [贡献](#贡献)
 - [使用声明](#使用声明)
 - [许可](#许可)
@@ -29,9 +30,9 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 ## 特性
 
 - **OpenAI 兼容网关**：`/v1/chat/completions` + `/v1/models`，流式 SSE / 非流式 / 多模态识图。
-- **五家内置供应商**：Trae、WorkBuddy、Antigravity、Loomy、小浣熊（商汤），以及任意自定义 OpenAI 兼容中转站。
+- **五家内置供应商**：腾讯（CodeBuddy）、字节（Trae）、谷歌（Antigravity）、讯飞（Loomy）、商汤（Raccoon），以及任意自定义 OpenAI 兼容中转站。
 - **同款模型 Failover**：首选供应商失败或无可用账号时，自动切换到拥有同款模型的其他供应商。
-- **智能路由**：`供应商/模型` 前缀路由（含 `trae-cn/`、`codebuddy-global/` 这类区域前缀与 `google/`、`agy/` 等别名），兼支持无前缀的模型名自动推导。
+- **智能路由**：按模型真实归属路由——模型属于哪家供应商、在哪个区域站点上线，就发给谁；不再按名称猜供应商。
 - **账号管理**：同一供应商多账号按余额选号、失败自动换号、额度查询与额度包明细、跨供应商容灾、批量签到与任务中心。
 - **模型开放名单**：只把勾选的模型暴露给 `/v1/models`，其余模型对客户端隐藏。
 - **用量与日志**：调用记录（请求/转发/返回全链路）、今日与累计用量趋势、运行日志、按前缀统计存储占用与保留期自动清理。
@@ -48,7 +49,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 3. 到「供应商」页登录要用的账号（Trae / WorkBuddy / Antigravity / Loomy / 小浣熊），或添加自定义 OpenAI 兼容中转站。
 4. 客户端里填接入信息：
    - Base URL：手机本机填 `http://127.0.0.1:8790/v1`；局域网内其它设备填首页复制的局域网地址（需先在「接入设置」里打开「同时监听局域网」）。
-   - 模型：可填 `供应商/模型`（如 `antigravity/gemini-3.8-flash-high`），也可直接填模型名由网关推导。
+   - 模型：可填 `供应商/模型`（如 `腾讯/glm-5.2`、`字节/qwen-max`），也可以直接填模型名，网关会自动查到它属于谁。区域前缀可选（`腾讯国内/`、`字节国外/`）用来强制指定站点。
    - API Key：默认开启「无 Key 调用」，随意填；关掉后需与「接入设置」里的 Key 一致。
 
 ---
@@ -109,7 +110,7 @@ usage/...                         # 用量统计
 
 ## 构建与发版
 
-本地构建（产出 debug 包，可与线上 release 包同机共存）：
+本地构建（产出 debug 包，包名与 release 一致，可原地覆盖升级、配置不丢）：
 
 ```sh
 ./gradlew :app:assembleDebug --console=plain   # 出 debug 包
@@ -117,9 +118,10 @@ usage/...                         # 用量统计
 ./gradlew :cli:installDist --console=plain     # 命令行工具，产出 cli/build/install/aigw/bin/aigw
 ```
 
-- 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app.debug`）。
+- 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app`，与 release 相同）。
 - 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
 - 本地**不产 release 包**：release 仅由云端 GitHub Actions 手动触发构建并发版，日常 push 不产生任何云端构建。
+- 注意：debug 包用 AGP 默认 debug key 签名，与云端 release keystore 签名不同；在已装 release 版的设备上覆盖安装需 root 或卸载重装。
 
 命令行联调（`:cli`，无需 Android 设备）：
 
@@ -150,21 +152,80 @@ usage/...                         # 用量统计
 curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <key>" \
-  -d '{"model":"gemini-3.8-flash","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"腾讯国内/glm-5.2","stream":true,"messages":[{"role":"user","content":"你好"}]}'
 ```
+
+也可以不写前缀，直接 `{"model":"glm-5.2",...}` 由网关自动路由（见上文「路由逻辑」）。
 
 ---
 
 ## 供应商
 
-| id | 供应商 | 上游 | 备注 |
+| id | 名称 | 上游 | 备注 |
 |---|---|---|---|
-| `trae` | Trae（字节） | SOLO 私有通道 | 协议转换最重 |
-| `codebuddy` | WorkBuddy（腾讯） | 国内 `copilot.tencent.com` / 国际 `workbuddy.ai` | 上游拒绝非流式，强制 `stream:true` |
-| `antigravity` | Antigravity（Google） | `cloudcode-pa.googleapis.com` | Gemini 风格协议；凭证策略有铁律，见 ARCHITECTURE.md 第 5 节 |
-| `loomy` | Loomy（讯飞） | `xfinfr.com` | 鉴权失败为 HTTP 200 + 业务码，而非 4xx |
-| `raccoon` | 小浣熊（商汤） | `xiaohuanxiong.com` | OpenAI 结构被包在 `data` 里；字段用标准名（v2 LiteLLM 层不认 `max_new_tokens`） |
+| `codebuddy` | 腾讯 | 国内 `copilot.tencent.com` / 国外 `workbuddy.ai` | 上游拒绝非流式，强制 `stream:true` |
+| `trae` | 字节 | SOLO 私有通道（国内 `trae.cn` / 国外 `trae.ai`） | 协议转换最重 |
+| `antigravity` | 谷歌 | `cloudcode-pa.googleapis.com` | Gemini 风格协议；凭证策略有铁律，见 ARCHITECTURE.md 第 5 节 |
+| `loomy` | 讯飞 | `xfinfr.com` | 鉴权失败为 HTTP 200 + 业务码，而非 4xx |
+| `raccoon` | 商汤 | `xiaohuanxiong.com` | OpenAI 结构被包在 `data` 里；字段用标准名（v2 LiteLLM 层不认 `max_new_tokens`） |
 | `custom:<key>` | 自定义 | 用户填写的 baseUrl | 任意 OpenAI 兼容中转站，一个 key = 一个账号 |
+
+---
+
+## 路由逻辑
+
+网关怎么把你写的 `model` 变成「发给哪家供应商、用哪个账号」：
+
+```
+① 写明前缀          腾讯/glm-5.2        → 一定走腾讯
+② 查模型真实归属    （无前缀时）          → 看各家目录，谁有这个模型就发给谁
+③ 名称特征兜底      （目录里也没有）      → gemini→谷歌、claude→谷歌、seed→字节…
+④ 单供应商接管      （只配了一家）        → 所有请求都交给它
+⑤ defaultProvider   （仍无法判定）        → 用设置里的默认供应商
+```
+
+### 前缀一律用中文
+
+| 前缀 | 含义 | 区域约束 |
+|---|---|---|
+| `腾讯/` | 腾讯，自动选站 | 按模型实际所在站点 |
+| `腾讯国内/` | 强制走腾讯国内站点 | cn |
+| `腾讯国外/` | 强制走腾讯国外站点 | global |
+| `字节/` | 字节，自动选站 | 按模型实际所在站点 |
+| `字节国内/` | 强制走字节国内站点 | cn |
+| `字节国外/` | 强制走字节国外站点 | global |
+| `谷歌/`、`讯飞/`、`商汤/` | 其余三家 | 无区域概念 |
+
+英文前缀（`codebuddy/`、`trae/` 等）不再作为路由前缀识别，写了会被当成普通模型名走自动归属判定。
+
+### 按模型归属，不猜
+
+`腾讯/glm-5.2` 里的 `glm-5.2` 具体该走国内还是国外站点，网关会**分别拉取两边的模型目录**：国内目录里有就发给国内账号，国外目录里有就发给国外账号，并带上正确的区域约束——不会出现「发给一个根本没有这个模型的站点」。
+
+同一个模型在多家供应商都上线时（如 `deepseek-v3`），按「已启用 + 有账号 + 余额最高」排序取第一。
+
+### 无前缀时自动判定
+
+只写模型名（`glm-5.2`、`gemini-3.8`、`raccoon-chat-ml-5-5`……）时：
+
+1. 先查各家模型目录，谁的目录里真有就发给谁（主要路径）；
+2. 目录里查不到，才按名称特征猜：`gemini`/`claude` → 谷歌，`doubao`/`seed-` → 字节，`spark`/星火 → 讯飞，`raccoon`/商汤 → 商汤；
+3. `deepseek`/`kimi`/`glm`/`qwen` 这类在多家都有的模型**不猜**，交给目录查询或兜底规则处理。
+
+模型匹配分三级精度（从严格到宽松）：完全相同 → 归一化后相同（大小写、`_` 与 `-` 等价）→ 去掉 `-high`/`-low`/`-preview` 后相同。
+
+### `/v1/models` 里看到的 id
+
+列表里的 id 与上表前缀一致，可以直接复制去客户端配置：
+
+```json
+{ "id": "腾讯国内/glm-5.2",    "owned_by": "codebuddy" }
+{ "id": "腾讯国外/gpt-5.6-sol", "owned_by": "codebuddy" }
+{ "id": "字节国内/doubao-pro",  "owned_by": "trae" }
+{ "id": "谷歌/gemini-3.8-flash", "owned_by": "antigravity" }
+```
+
+> 提醒：个别客户端会把 `model` 塞进 HTTP 头（header 只允许 ASCII），中文 id 在这类客户端上会失败。遇到时改用不带前缀的写法即可，网关会自动路由。
 
 ---
 

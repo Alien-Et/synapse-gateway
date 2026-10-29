@@ -67,7 +67,7 @@ class RaccoonProvider(
 ) : Provider, WebLoginSupport {
 
     override val id: String = ID
-    override val displayName: String = "小浣熊"
+    override val displayName: String = "商汤"
     override val authKind: AuthKind = AuthKind.WEBVIEW_CALLBACK
     override val capabilities: Set<ProviderCapability> =
         setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.CHECKIN, ProviderCapability.POINTS_BILLS)
@@ -421,14 +421,15 @@ class RaccoonProvider(
             val granted = data?.boolOrNull("granted") == true
             val points = data?.objOrNull("popup")?.firstLong("points") ?: 0L
             val message = extractMessage(text)
-            ProviderActionResult.success(
-                when {
-                    granted && points > 0 -> "签到成功，+$points 积分"
-                    granted -> message.ifEmpty { "签到成功" }
-                    message.isNotEmpty() -> friendlyCheckinResult(message)
-                    else -> "本次未发放积分（可能今日已领取）"
-                },
-            )
+            when {
+                granted && points > 0 -> ProviderActionResult.success("领到桌面端登录奖励 +$points 积分")
+                granted -> ProviderActionResult.success(message.ifEmpty { "领到桌面端登录奖励" })
+                // 上游明确 granted=false：本次确实没发放。这里必须报 ok=false——
+                // 报 ok=true 会让引擎认为动作成功并去补刷额度，界面只会冒一句
+                // 「本次未发放积分」然后原地不动，用户看到的就是「点了签到没反应」。
+                message.isNotEmpty() -> ProviderActionResult.failure(friendlyCheckinResult(message))
+                else -> ProviderActionResult.failure(NO_GRANT_MESSAGE)
+            }
         } catch (e: Exception) {
             ProviderActionResult.failure(e.message ?: "签到失败")
         }
@@ -692,6 +693,17 @@ class RaccoonProvider(
 
         /** 桌面端登录奖励（不是每日签到）。 */
         const val PATH_GRANT = "/api/web/desktop/v1/login/points/grant"
+
+        /**
+         * 上游 `granted=false` 且没给任何说明时的提示。
+         *
+         * 小浣熊**没有「点一下加积分」的每日签到**：每日赠送积分由服务端每天 00:00 自动发放，
+         * 这个端点只发「官方桌面客户端登录奖励」，且一天只发一次。所以这不是错误，
+         * 而是今天已经领过了——文案要直接说清楚，否则用户只会觉得「点了没反应」。
+         */
+        const val NO_GRANT_MESSAGE =
+            "本次未发放：小浣熊没有每日签到，这里是桌面端登录奖励，一天只能领一次（今日已领过）"
+
 
         /** 积分流水明细。 */
         const val PATH_BILLS = "/api/web/points/v1/bills"

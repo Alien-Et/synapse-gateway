@@ -43,7 +43,7 @@ class LoomyProvider(
 ) : Provider, SmsLoginSupport {
 
     override val id: String = ID
-    override val displayName: String = "Loomy"
+    override val displayName: String = "讯飞"
     override val authKind: AuthKind = AuthKind.SMS_CODE
     override val capabilities: Set<ProviderCapability> =
         setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.TASKS)

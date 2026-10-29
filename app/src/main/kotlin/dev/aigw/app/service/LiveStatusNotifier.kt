@@ -14,7 +14,6 @@ import dev.aigw.app.MainActivity
 import dev.aigw.app.R
 import dev.aigw.core.gateway.ActiveRequest
 import dev.aigw.core.gateway.ActiveRequests
-import java.util.Locale
 
 /**
  * 「实时状态」通知：把网关当前在途请求显示成 Android 16 的 Live Updates 常驻通知。
@@ -54,6 +53,19 @@ object LiveStatusNotifier {
     private const val SHORT_TEXT_MAX = 16
 
     private const val UNKNOWN_MODEL = "未知模型"
+
+    /**
+     * providerId → 界面显示名（中文品牌名）。
+     *
+     * 通知栏不能直接展示英文 providerId（如 CODEBUDDY），否则和 App 内的「腾讯」
+     * 对不上。由 GatewayService 在启动时注入（它才有 engine.registry）；
+     * 未注入时回退到 id，保证空指针安全。
+     */
+    private var providerLabel: (String) -> String = { it }
+
+    fun setProviderLabelResolver(resolver: (String) -> String) {
+        providerLabel = resolver
+    }
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -176,7 +188,7 @@ object LiveStatusNotifier {
         val model = primary.clientModel.ifBlank { UNKNOWN_MODEL }
         val title = if (list.size == 1) "正在处理 $model" else "${list.size} 个请求进行中"
         val account = primary.nickname.ifBlank { primary.uid }.ifBlank { "未知账号" }
-        val text = "${primary.providerId.uppercase(Locale.ROOT)} · $account"
+        val text = "${providerLabel(primary.providerId)} · $account"
 
         val open = PendingIntent.getActivity(
             context,

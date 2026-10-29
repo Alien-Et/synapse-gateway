@@ -45,7 +45,7 @@ class TraeProvider(
 ) : Provider, WebLoginSupport, dev.aigw.core.provider.RegionAwareSupport {
 
     override val id: String = ID
-    override val displayName: String = "Trae"
+    override val displayName: String = "字节"
     override val authKind: AuthKind = AuthKind.WEBVIEW_CALLBACK
     override val capabilities: Set<ProviderCapability> =
         setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.CHECKIN)
@@ -297,7 +297,7 @@ class TraeProvider(
         ACTION_CHECKIN -> {
             // 国际版没有签到制度（前端 JS 里 checkin 零命中）；正常由 supportsAction 拦下
             if (regionOfAccount(account) == TraeRegion.INTL) {
-                ProviderActionResult.failure("国际版没有签到制度")
+                ProviderActionResult.failure("国外账号没有签到制度")
             } else {
                 checkin(account)
             }

@@ -23,7 +23,7 @@ enum class TraeRegion(
 ) {
     CN(
         id = "cn",
-        label = "国内版",
+        label = "国内",
         agentHost = "https://trae-api-cn.mchost.guru",
         ugHost = "https://api.trae.cn",
         oauthHost = "https://api.trae.com.cn",
@@ -31,7 +31,7 @@ enum class TraeRegion(
     ),
     INTL(
         id = "global",
-        label = "国际版",
+        label = "国外",
         // 探测实测：api.trae.ai 上 /api/agent/v3/llm_utils_chat 与 /api/ide/v1/get_detail_param
         // 都是 404（那是 OAuth/控制台 host），国际版的 agent 集群在 -sg 这个 mchost 域名上：
         // 同一路径返回 401 + 与国内同构的 JSON，未知路径才 404。

@@ -55,7 +55,7 @@ class AntigravityProvider(
 ) : Provider, LoopbackOAuthSupport {
 
     override val id: String = ID
-    override val displayName: String = "Antigravity"
+    override val displayName: String = "谷歌"
     override val authKind: AuthKind = AuthKind.OAUTH_LOOPBACK
 
     // ------------------------------------------------------------------ 模型

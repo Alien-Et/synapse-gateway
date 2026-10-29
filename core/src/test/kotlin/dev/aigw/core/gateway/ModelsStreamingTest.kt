@@ -170,7 +170,7 @@ class ModelsStreamingTest {
 
         val chunk = engine.modelsStreaming { }.models.filter { it.providerId == "codebuddy" }
         assertEquals(
-            listOf("codebuddy-cn/glm-5.2", "codebuddy-global/gpt-5.6-sol"),
+            listOf("腾讯国内/glm-5.2", "腾讯国外/gpt-5.6-sol"),
             chunk.map { it.fullId },
         )
     }
@@ -182,7 +182,7 @@ class ModelsStreamingTest {
         engine.pool.upsert(ProviderAccount("codebuddy", "u-cn", "国内号", "{}"))
 
         val chunk = engine.modelsStreaming { }.models.filter { it.providerId == "codebuddy" }
-        assertEquals(listOf("codebuddy-cn/glm-5.2"), chunk.map { it.fullId })
+        assertEquals(listOf("腾讯国内/glm-5.2"), chunk.map { it.fullId })
     }
 
     /**

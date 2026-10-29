@@ -107,7 +107,7 @@ fun TaskCenterScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "额度刷新作用于全部账号。区域型供应商的国际版、企业账号本就没有签到/成长中心，已自动跳过。",
+                text = "额度刷新作用于全部账号。区域型供应商的国外账号、企业账号本就没有签到/成长中心，已自动跳过。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

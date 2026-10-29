@@ -42,7 +42,7 @@ fun keystoreValue(key: String): String =
 android {
     namespace = "dev.aigw.app"
     compileSdk = 36
-    buildToolsVersion = "35.0.0"
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "dev.aigw.app"
@@ -85,13 +85,14 @@ android {
         // material-icons-extended 的 10660 个未使用图标类会被裁掉。
         // 裁剪后 debug 3.5MB / release 1.4MB（未开前 debug 是 16.8MB）。
         //
-        // debug = 本地开发包：applicationId 加 .debug 后缀、应用名加 Debug，
-        // 可与 release 包同机共存、互不覆盖；签名固定到持久 keystore（未配置时用 AGP 默认 debug 签名），
-        // 否则容器重置会换 key，装上后的 debug 包永远无法原地升级。
+        // debug = 本地开发包：**与 release 同包名**（覆盖安装，不共存）。
+        // 不加 applicationIdSuffix——加了好处只是能同机共存，代价是装完出现两个图标、
+        // 配置/账号/日志全部另起一份，用户还得在两者间来回切。
+        // 签名固定到持久 keystore（未配置时用 AGP 默认 debug 签名），
+        // 否则容器重置会换 key，装上后的包永远无法原地升级。
         debug {
             isMinifyEnabled = true
             isShrinkResources = true
-            applicationIdSuffix = ".debug"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (debugKeystoreFile != null) signingConfig = signingConfigs.getByName("debugStable")
         }

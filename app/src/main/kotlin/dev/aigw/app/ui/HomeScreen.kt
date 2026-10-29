@@ -362,7 +362,7 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
                 val accs = groupedAccounts[pid] ?: emptyList()
                 val usable = accs.count { it.usable }
                 val provInfo = state.providers.firstOrNull { it.id.equals(pid, ignoreCase = true) }
-                val dName = provInfo?.displayName?.ifEmpty { pid.uppercase() } ?: pid.uppercase()
+                val dName = provInfo?.displayName?.ifEmpty { pid } ?: pid
 
                 val weight = if (totalRecentCalls > 0) {
                     ((callCountsByProvider[pid] ?: 0).toFloat() / totalRecentCalls).coerceIn(0.08f, 1f)
@@ -603,7 +603,7 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
         )
 
         // 块 2：最近一个请求的路由流水
-        RecentCallRoutingFlow(state.calls.firstOrNull())
+        RecentCallRoutingFlow(state.calls.firstOrNull()) { id -> state.providerOf(id)?.displayName ?: id }
 
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outlineVariant,
@@ -818,7 +818,7 @@ private fun GatewayHubNode(
  * 3. 结果 <成功/失败/中断> · HTTP <httpStatus> · 耗时 <x.x s> · tokens <in>→<out>
  */
 @Composable
-private fun RecentCallRoutingFlow(call: CallRecord?) {
+private fun RecentCallRoutingFlow(call: CallRecord?, providerLabel: (String) -> String = { it }) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = "最近路由记录 · LATEST DISPATCH",
@@ -867,7 +867,7 @@ private fun RecentCallRoutingFlow(call: CallRecord?) {
         RoutingFlowRow(
             dotColor = LocalAppColors.current.goldStart,
             label = "路由到",
-            detail = "${call.providerId.uppercase()} · $accountDisplay",
+            detail = "${providerLabel(call.providerId)} · $accountDisplay",
         )
 
         // 行 3：结果与耗时

@@ -51,7 +51,7 @@ object TraeUi : ProviderUi {
     // 国内 / 国际是两套独立账号：账号列表由本组件按滑块区域过滤后自行渲染
     override val managesOwnAccounts: Boolean get() = true
 
-    override fun description(): String = "网页登录导入，走 SOLO 免费通道（国内/国际）"
+    override fun description(): String = "网页登录导入，走 SOLO 免费通道（国内/国外）"
 
     @Composable
     override fun Icon(modifier: Modifier) {
@@ -100,12 +100,12 @@ object TraeUi : ProviderUi {
                         },
                     )
                 }
-                SectionLabel(if (global) "登录 · 国际版 trae.ai" else "登录 · 国内版 trae.cn")
+                SectionLabel(if (global) "登录 · 国外 trae.ai" else "登录 · 国内版 trae.cn")
                 Button(
                     onClick = { actions.onWebLogin(id, region) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (global) "在浏览器中打开 Trae 国际版登录页" else "在浏览器中打开 Trae 登录页")
+                    Text(if (global) "在浏览器中打开 Trae 国外登录页" else "在浏览器中打开 Trae 登录页")
                 }
                 OutlineActionButton(
                     text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",
@@ -147,7 +147,7 @@ object TraeUi : ProviderUi {
                 SectionCard(enterIndex = 1) {
                     SectionLabel("账号")
                     Text(
-                        text = if (global) "还没有国际版账号，先登录" else "还没有国内版账号，先登录",
+                        text = if (global) "还没有国外账号，先登录" else "还没有国内版账号，先登录",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

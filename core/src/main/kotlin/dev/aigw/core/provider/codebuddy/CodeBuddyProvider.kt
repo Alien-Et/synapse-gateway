@@ -62,7 +62,7 @@ class CodeBuddyProvider(
 ) : Provider, DeviceCodeSupport, dev.aigw.core.provider.RegionAwareSupport {
 
     override val id: String = ID
-    override val displayName: String = "WorkBuddy"
+    override val displayName: String = "腾讯"
     override val authKind: AuthKind = AuthKind.DEVICE_CODE
     override val capabilities: Set<ProviderCapability> =
         setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.CHECKIN, ProviderCapability.TASKS)
@@ -255,7 +255,7 @@ class CodeBuddyProvider(
         if (credential != null && regionOf(credential) == REGION_GLOBAL) {
             return when (action) {
                 ACTION_CHECKIN, ACTION_TASKS ->
-                    ProviderActionResult.failure("国际版没有签到与成长中心")
+                    ProviderActionResult.failure("国外账号没有签到与成长中心")
                 else -> ProviderActionResult.unsupported(action)
             }
         }
@@ -1380,7 +1380,7 @@ class CodeBuddyProvider(
         )
 
         internal val CN_ENDPOINT = Endpoint(
-            label = "国内版",
+            label = "国内",
             chatBase = "https://copilot.tencent.com",
             billingBase = "https://www.codebuddy.cn",
             origin = "https://www.codebuddy.cn",
@@ -1388,7 +1388,7 @@ class CodeBuddyProvider(
         )
 
         internal val GLOBAL_ENDPOINT = Endpoint(
-            label = "国际版",
+            label = "国外",
             chatBase = "https://www.workbuddy.ai",
             billingBase = "https://www.workbuddy.ai",
             origin = "https://www.workbuddy.ai",

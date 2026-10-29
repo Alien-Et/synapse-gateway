@@ -303,13 +303,15 @@ class RaccoonProviderTest {
     }
 
     @Test
-    fun `未发放时不报成签到成功`() {
+    fun `未发放时报失败且说明原因`() {
         withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":false}}""") { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
-            assertTrue(result.ok, result.message)
+            // 报 ok=true 会让引擎去补刷额度，界面只冒一句「未发放」然后原地不动，
+            // 用户看到的就是「点了签到没反应」。必须如实报失败。
+            assertFalse(result.ok, "上游明确没发积分，不能报成功：${result.message}")
             assertTrue(
-                result.message.contains("未发放"),
-                "上游明确没发积分，不能报成签到成功：${result.message}",
+                result.message.contains("桌面端登录奖励"),
+                "要让用户知道这不是每日签到：${result.message}",
             )
         }
     }

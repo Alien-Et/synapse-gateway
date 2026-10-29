@@ -106,12 +106,12 @@ object CodeBuddyUi : ProviderUi {
                     },
                 )
             }
-            SectionLabel(if (global) "登录 · 国际版 workbuddy.ai" else "登录 · 国内版 copilot.tencent.com")
+            SectionLabel(if (global) "登录 · 国外 workbuddy.ai" else "登录 · 国内版 copilot.tencent.com")
             Button(
                 onClick = { actions.onDeviceLogin(id, region) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (global) "打开国际版登录页" else "打开国内版登录页")
+                Text(if (global) "打开国外登录页" else "打开国内版登录页")
             }
             OutlineActionButton(
                 text = if (expanded) "收起粘贴导入" else "粘贴凭证 JSON 导入",
@@ -151,7 +151,7 @@ object CodeBuddyUi : ProviderUi {
                 SectionCard(enterIndex = 1) {
                     SectionLabel("账号")
                     Text(
-                        text = if (global) "还没有国际版账号，先登录" else "还没有国内版账号，先登录",
+                        text = if (global) "还没有国外账号，先登录" else "还没有国内版账号，先登录",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
