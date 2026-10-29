@@ -28,6 +28,7 @@ class RaccoonProviderTest {
 
     private companion object {
         const val GRANT_PATH = "/api/web/desktop/v1/login/points/grant"
+        const val SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
         const val BILLS_PATH = "/api/web/points/v1/bills"
         const val BALANCE_PATH = "/api/web/points/v1/balance"
     }
@@ -276,41 +277,51 @@ class RaccoonProviderTest {
         assertEquals(listOf("data: [DONE]\n\n"), translator.close())
     }
 
-    // ------------------------------------------------------------------ 签到（桌面端登录奖励）
+    // ------------------------------------------------------------------ 签到（每日发放）
 
     @Test
-    fun `签到携带桌面端请求头`() {
-        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000}}}""") { base, captured ->
+    fun `签到打 setting_info 并带桌面端请求头`() {
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":0,"data":{"point_grant_popups":true}}""") { base, captured ->
             RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             val headers = captured()
-            // 官方桌面客户端靠这两个头判定「是桌面端」，缺了上游不发放
+            // 对照 Buddy2api：每日发放靠 GET setting_info 触发，不是 desktop login grant
             assertEquals("desktop-windows", headers["x-client-platform"]?.firstOrNull(), "缺 X-Client-Platform：$headers")
+            assertEquals(RaccoonProvider.CLIENT_VERSION, headers["x-client-version"]?.firstOrNull())
+            assertEquals("zh", headers["x-raccoon-language"]?.firstOrNull(), "官方桌面端会带 X-Raccoon-Language：$headers")
+            assertEquals("office-raccoon/1.0.0", headers["user-agent"]?.firstOrNull())
+        }
+    }
+
+    @Test
+    fun `签到不再打已废弃的桌面登录奖励端点`() {
+        // 那个端点是「桌面端登录奖励」，不是每日领取；打它点了没反应
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":0,"data":{}}""") { base, captured ->
+            RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(
-                headers["x-client-version"]?.firstOrNull()?.startsWith("v") == true,
-                "缺 X-Client-Version（需带 v 前缀）：$headers",
+                captured()["x-client-platform"] != null,
+                "应该已经发出请求",
             )
         }
     }
 
     @Test
-    fun `发放成功时汇报 popup 里的积分`() {
-        val body = """{"code":0,"data":{"granted":true,"popup":{"source":"desktop_login","points":3000,"expire_at":"2026-10-20"}}}"""
-        withUpstreamHeaders(GRANT_PATH, body) { base, _ ->
+    fun `签到成功时汇报到账积分`() {
+        // 靠流水对比判到账：before 无、after 有 300 → 本次领到 300
+        withUpstreamHeaders(
+            SETTING_INFO_PATH,
+            """{"code":0,"data":{"point_grant_popups":true}}""",
+        ) { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
             assertTrue(result.ok, result.message)
-            assertTrue(result.message.contains("3000"), "积分没从 data.popup.points 取：${result.message}")
         }
     }
 
     @Test
-    fun `未发放时不报成签到成功`() {
-        withUpstreamHeaders(GRANT_PATH, """{"code":0,"data":{"granted":false}}""") { base, _ ->
+    fun `上游业务码非 0 时如实报失败`() {
+        withUpstreamHeaders(SETTING_INFO_PATH, """{"code":500,"message":"daily grant failed"}""") { base, _ ->
             val result = RaccoonProvider(host = base).performAction(account(), ACTION_CHECKIN, JsonObject())
-            assertTrue(result.ok, result.message)
-            assertTrue(
-                result.message.contains("未发放"),
-                "上游明确没发积分，不能报成签到成功：${result.message}",
-            )
+            assertFalse(result.ok, "上游明确报错不能算成功：${result.message}")
+            assertTrue(result.message.contains("daily grant failed"), result.message)
         }
     }
 

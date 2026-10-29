@@ -404,48 +404,73 @@ class RaccoonProvider(
     }
 
     /**
-     * 领桌面端登录奖励（`/api/web/desktop/v1/login/points/grant`）。
+     * 领取今日积分（「签到」）。
      *
-     * 上游不是「点一下就加积分」的签到：这笔奖励由服务端判定 `data.granted`，
-     * 而且只认官方桌面客户端——调用必须带 `X-Client-Platform` / `X-Client-Version`，
-     * 否则不发。发成功时积分在 `data.popup.points`（不是 `data.points`）。
+     * 对照 Buddy2api 的 `providers/xiaohuanxiong/quota.py`（实测可用）：
+     * 1. 先拉今天的积分流水，算出今日已到账多少；
+     * 2. GET `/api/web/office/v3/setting_info`——它会触发上游的每日发放，
+     *    响应里 `data.point_grant_popups` / `data.point_grant_toast` 表示确实触发了；
+     * 3. 再拉一次流水对比：变多就是本次领到，没变但已有记录就是今日已领。
+     *
+     * 从前用的是 `desktop/v1/login/points/grant`（桌面端登录奖励，不是每日领取），
+     * 所以点了没反应——这就是「签到不起作用」的根因。
      */
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
         return try {
-            val (status, text) = postJson("$host$PATH_GRANT", "{}", jsonHeaders(credential) + desktopHeaders())
-            if (status !in 200..299) {
-                return ProviderActionResult.failure(extractMessage(text).ifEmpty { "签到失败（HTTP $status）" })
+            val before = todayGrantedPoints(credential)
+            val (status, text) = getJson("$host$PATH_SETTING_INFO", jsonHeaders(credential) + desktopHeaders())
+            val payload = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
+            val code = payload?.get("code")?.takeIf { it.isJsonPrimitive }?.asLong
+            if (status !in 200..299 || (code != null && code != 0L)) {
+                val message = payload?.let { extractMessage(text) }.orEmpty()
+                return ProviderActionResult.failure(
+                    message.ifEmpty { "每日发放失败（HTTP $status）" },
+                )
             }
-            val data = runCatching { JsonParser.parseString(text).asJsonObject.objOrNull("data") }.getOrNull()
-            val granted = data?.boolOrNull("granted") == true
-            val points = data?.objOrNull("popup")?.firstLong("points") ?: 0L
-            val message = extractMessage(text)
-            ProviderActionResult.success(
-                when {
-                    granted && points > 0 -> "签到成功，+$points 积分"
-                    granted -> message.ifEmpty { "签到成功" }
-                    message.isNotEmpty() -> friendlyCheckinResult(message)
-                    else -> "本次未发放积分（可能今日已领取）"
-                },
-            )
+            val after = todayGrantedPoints(credential)
+            val data = payload?.objOrNull("data")
+            val triggered = data?.boolOrNull("point_grant_popups") == true ||
+                data?.boolOrNull("point_grant_toast") == true
+            when {
+                after > before -> ProviderActionResult.success("签到成功，+${after - before} 积分")
+                after > 0 -> ProviderActionResult.success("今日已领取（今日共 +$after 积分）")
+                triggered -> ProviderActionResult.success("已触发每日发放")
+                else -> ProviderActionResult.success("今日积分由服务端自动发放，目前未查到新入账")
+            }
         } catch (e: Exception) {
             ProviderActionResult.failure(e.message ?: "签到失败")
         }
     }
 
-    /**
-     * 上游回执多是英文短词，直接透出对中文用户不友好；认得的翻成中文，
-     * **不认识的原样返回**（不猜、不吞掉上游信息）。
-     */
-    private fun friendlyCheckinResult(raw: String): String {
-        val text = raw.trim()
-        return when (text.lowercase()) {
-            "success", "ok", "true", "succeeded", "successful" -> "签到成功"
-            "already checked in", "already_checkin", "already signed", "already_sign" -> "今日已签到"
-            "not checked in", "not_checkin" -> "今日尚未签到"
-            else -> text
+    /** 今日已到账的正积分合计（按积分流水的 created_at 判日）。 */
+    private fun todayGrantedPoints(credential: Credential): Long {
+        val (status, text) = runCatching {
+            getJson("$host$PATH_BILLS?paging.limit=20&paging.offset=0", jsonHeaders(credential))
+        }.getOrNull() ?: return 0L
+        if (status !in 200..299) return 0L
+        val data = envelopeData(text) ?: return 0L
+        val rows = data.get("items")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: data.get("bills")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: data.get("list")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: return 0L
+        val today = java.time.LocalDate.now()
+        var total = 0L
+        for (element in rows) {
+            val row = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val points = row.get("points")?.takeIf { it.isJsonPrimitive }?.asLong ?: continue
+            if (points <= 0) continue
+            val created = row.get("created_at")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
+            if (created.isEmpty()) continue
+            // 兼容 ISO-8601（带 Z/偏移）与「yyyy-MM-dd HH:mm:ss」两种形态
+            val day = runCatching {
+                java.time.OffsetDateTime.parse(created).toLocalDate()
+            }.recoverCatching {
+                java.time.LocalDateTime.parse(created.replace(' ', 'T')).toLocalDate()
+            }.getOrNull() ?: continue
+            if (day == today) total += points
         }
+        return total
     }
 
     /** 积分流水（`/api/web/points/v1/bills`），最近 [POINTS_BILLS_LIMIT] 条。 */
@@ -581,6 +606,8 @@ class RaccoonProvider(
         putAll(bearerHeaders(credential.accessToken))
         put("User-Agent", CLIENT_UA)
         put("Accept-Language", "zh-Hans")
+        // 官方桌面客户端会带它（Buddy2api 同款），缺了部分接口按非桌面端处理
+        put("X-Raccoon-Language", "zh")
         if (credential.orgCode.isNotEmpty()) put("X-Org-Code", credential.orgCode)
     }
 
@@ -696,18 +723,26 @@ class RaccoonProvider(
         /** 积分流水明细。 */
         const val PATH_BILLS = "/api/web/points/v1/bills"
 
-        /** 桌面客户端标识：上游只给「官方桌面端」发登录奖励，伪装成 Windows 桌面端（与 [CLIENT_UA] 一致）。 */
+        /**
+         * 每日发放触发端点。
+         *
+         * 对照 Buddy2api（`providers/xiaohuanxiong/quota.py`）：它读本机登录后 GET 这个端点，
+         * 响应里 `data.point_grant_popups` / `data.point_grant_toast` 表示触发了每日发放。
+         * 从前我们打的是 `desktop/v1/login/points/grant`——那是**桌面端登录奖励**，不是每日领取，
+         * 这就是用户「签到不起作用」的根因。
+         */
+        const val PATH_SETTING_INFO = "/api/web/office/v3/setting_info"
+
+        /** 桌面客户端标识（与 Buddy2api 一致：office-raccoon/1.0.0 + v1.0.0）。 */
         const val CLIENT_PLATFORM = "desktop-windows"
 
-        const val CLIENT_VERSION = "v1.0.38"
+        const val CLIENT_VERSION = "v1.0.0"
 
         /** 积分明细一次拉取的条数（官方客户端用 20）。 */
         const val POINTS_BILLS_LIMIT = 20
 
-        /** 伪装成官方桌面 Web 客户端的 UA（web 通道的调用方就是它）。 */
-        const val CLIENT_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        /** 伪装成官方桌面客户端的 UA（与 Buddy2api 的 office-raccoon/1.0.0 一致）。 */
+        const val CLIENT_UA = "office-raccoon/1.0.0"
 
         /** 对话默认停止符，与官方 Web 前端一致。 */
         const val DEFAULT_STOP = "<|endofmessage|>"
