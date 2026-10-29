@@ -67,6 +67,16 @@ class LoomyProvider(
                         if (it.reasoning) put("reasoning", "1")
                         if (it.toolCall) put("tool_call", "1")
                         if (it.attachment) put("attachment", "1")
+                        // 倍率内嵌在模型名里（如 "(x6.5)"），见 LoomyModelCatalog.parseRateFromName
+                        if (it.rate != null) {
+                            put("rate", formatRate(it.rate) + "×")
+                            val tag = it.rateTag
+                            if (tag != null) {
+                                put("rateDiscount", formatRate(it.rate) + "×")
+                                put("rateDiscountTag", tag)
+                            }
+                        }
+                        if (it.outputLength > 0) put("maxOutput", it.outputLength.toString())
                     },
                 )
             },
@@ -78,6 +88,14 @@ class LoomyProvider(
     override fun invalidateModelCache() {
         catalog.invalidate()
     }
+
+    /** 倍率格式化：整数不带小数点（1 → `1`），小数最多两位（0.8 → `0.8`，6.5 → `6.5`）。 */
+    private fun formatRate(value: Double): String =
+        if (value == value.toLong().toDouble()) {
+            value.toLong().toString()
+        } else {
+            String.format(java.util.Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
+        }
 
     override fun resolveModel(requested: String): String {
         val model = requested.trim()

@@ -102,18 +102,58 @@ class LoomyModelCatalog(
             val capabilities = item.objOrNull("capabilities")
             val inputModalities = item.objOrNull("modalities")?.arrayOrNull("input")
             val hasImage = inputModalities?.any { it.asString == "image" } == true
+            val rawName = item.str("name").ifEmpty { item.str("displayName").ifEmpty { id } }
+            val parsed = parseRateFromName(rawName)
             result.add(
                 LoomyModel(
                     id = id,
-                    name = item.str("name").ifEmpty { item.str("displayName").ifEmpty { id } },
+                    name = parsed.cleanName,
                     contextLength = context,
                     outputLength = output,
                     reasoning = item.bool("reasoning") || item.bool("supports_reasoning"),
                     toolCall = item.bool("tool_call") || capabilities?.bool("function_calling") == true,
                     attachment = item.bool("attachment") || hasImage,
+                    rate = parsed.rate,
+                    rateTag = parsed.tag,
                 ),
             )
         }
         return result
+    }
+
+    /** 名称解析结果：去掉倍率/活动后缀的干净名字 + 倍率 + 活动文案。 */
+    internal data class ParsedName(val cleanName: String, val rate: Double?, val tag: String?)
+
+    /**
+     * 从模型名称里抽出倍率与活动文案。
+     *
+     * 讯飞没有独立的倍率字段，倍率直接写在 `name` 里，格式有半角/全角两种括号：
+     * ```
+     * "DeepSeek V4.1 Flash(x2.0)"        → "DeepSeek V4.1 Flash", 2.0, null
+     * "Kimi k2.6 （x6.5）"                → "Kimi k2.6", 6.5, null
+     * "Spark-X2.6 正式版(限时免费)(x0.0)" → "Spark-X2.6 正式版", 0.0, "限时免费"
+     * "Hy image 3.5 preview"              → 原样, null, null
+     * ```
+     * 解析失败一律原样返回，不猜。
+     */
+    internal fun parseRateFromName(raw: String): ParsedName {
+        // 全角括号先归一成半角，便于统一匹配
+        val normalized = raw.replace('（', '(').replace('）', ')')
+        val rateMatch = RATE_IN_NAME.find(normalized) ?: return ParsedName(raw, null, null)
+        val value = rateMatch.groupValues[1].toDoubleOrNull()
+            ?: return ParsedName(raw, null, null)
+        // 名字里去掉倍率标记，再把残留的「限时免费」这类活动文案抽出来单独展示
+        val withoutRate = normalized.removeRange(rateMatch.range).trim()
+        val tag = TAG_IN_NAME.find(withoutRate)?.groupValues?.get(1)?.trim()
+        val cleanName = TAG_IN_NAME.replace(withoutRate, "").trim()
+        return ParsedName(cleanName.ifEmpty { raw }, value, tag?.takeIf { it.isNotEmpty() })
+    }
+
+    private companion object {
+        /** 名称里的倍率标记：`(x0.8)` / `(x6.5)`，允许前后有空格。 */
+        val RATE_IN_NAME = Regex("""\(\s*[xX]\s*([0-9]+(?:\.[0-9]+)?)\s*\)""")
+
+        /** 名称里的活动文案：`(限时免费)` / `【限时免费】`。 */
+        val TAG_IN_NAME = Regex("""[\(【]\s*(限时[^\)】]*)\s*[\)】]""")
     }
 }

@@ -486,6 +486,16 @@ private fun ModelRow(
                     }
                 }
             }
+            // 谷歌的模型级剩余额度（quotaInfo.remainingFraction），有才显示
+            val quotaRemaining = extra["quotaRemaining"]?.takeIf { it.isNotBlank() }
+            if (quotaRemaining != null) {
+                val resetAt = extra["quotaResetAt"]?.takeIf { it.isNotBlank() }
+                Text(
+                    text = if (resetAt != null) "额度 $quotaRemaining（$resetAt 重置）" else "额度 $quotaRemaining",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
         }
 
         // 按钮左侧显示延迟：<5000ms 绿色，>=5000ms 橙色，失败/超时 红色

@@ -232,16 +232,34 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 - ⚠️ **agent host 分区域且与 OAuth host 不同**：国内 agent `trae-api-cn.mchost.guru`、国外 agent `trae-api-sg.mchost.guru`。国外版把 agent host 写成 `api.trae.ai` 会让对话与模型目录全部 **404**。
 - `content` 必须是 `[{type:"text",text}]` 数组；`tools[].function.parameters` 必须是 JSON 字符串；`tool_choice` 只认字符串。
 - 流内 `notify_usage.ide_credits` 是真实积分消耗，需回写账号池。
-- **倍率不在上游字段里**：`get_detail_param` 两份独立实现（trae2api-web `FetchModels`、cli2api `catalog.go`）都不解析价格/倍率，所以倍率来自 `ModelRates` **本地参考表**（来源：docs.trae.cn《内置模型限时折扣》，2026-09 抓取）。
-  - 折扣同样来自本地表的 `discounted` / `discountTag`（如「会员5折」「空闲5折」），**没有结束时间**。
-  - 查不到的模型 `rateOf` 返回 null，界面不显示——不编造数字。
+- **倍率有两个来源，优先用上游**：
+  - ✅ **上游下发**：`display_config.display_contact_config` 里，注意它本身是**被转义的 JSON 字符串**，要二次 `parse` 才能取到 `consumption_rate.data.rate`（实测值 `0.7` / `0.8` / `0.3` / `0.0`）。`consumption_rate.enable=false` 视为未启用、不展示。
+  - 上游没给时退回 `ModelRates` **本地参考表**（来源：docs.trae.cn《内置模型限时折扣》，2026-09 抓取），带 `discounted` / `discountTag`（如「会员5折」）。
+  - ⚠️ 历史记录说「上游不返回倍率」是错的——那只看了 `get_detail_param` 的顶层，没展开 `display_config`。
 
 ### 讯飞（Loomy）
 - **鉴权失败是 HTTP 200 + 业务码**（JSON 里 code 字段），不是 4xx。不做业务码判定会把错误 JSON 当正常回复透传。
-- ⚠️ **上游模型接口没有倍率字段**：`/api/v1/models` 只返回 `id` / `name` / `limit{context,output}` / `capabilities` / `modalities`。积分侧只有 `/api/v1/points/records`（流水）与 `team-points/balance`（余额），**没有「每个模型多少倍率」的接口**。所以模型页不显示讯飞倍率，这是上游能力限制，不是漏解析。
+- ⚠️ **倍率内嵌在模型 `name` 里，没有独立字段**：
+  ```
+  "DeepSeek V4.1 Flash(x2.0)"           → 2×
+  "Kimi k2.6 （x6.5）"                   → 6.5×（全角括号也认）
+  "Qwen 3.8 Max (x12.0)"                → 12×
+  "Spark-X2.6 正式版(限时免费)(x0.0)"    → 0×，且「限时免费」是活动文案
+  "Hy image 3.5 preview"                → 无倍率（原样展示）
+  ```
+  - 解析正则：`\(\s*[xX]\s*([0-9]+(?:\.[0-9]+)?)\s*\)`；先把全角 `（）` 归一成半角。
+  - 活动文案用 `[\(【]\s*(限时[^\)】]*)\s*[\)】]` 单独抽出，放到 `rateDiscountTag`。
+  - 名字里去掉倍率与活动文案后再展示（`Spark-X2.6 正式版` 而不是整串）。
 
 ### 谷歌（Antigravity）
-- 模型目录同样**不返回倍率**，界面不显示。
+- **`quotaInfo` 是模型级剩余额度**（此前完全没解析）：
+  ```json
+  "quotaInfo": {"remainingFraction": 1, "resetTime": "2026-11-05T08:42:21Z"}
+  ```
+  - `remainingFraction`：1 = 满额，0.35 = 剩 35%。展示成百分比。
+  - `resetTime`：该额度窗口的重置时刻（UTC ISO-8601），转本地时区展示。
+  - 这是**剩余额度**不是倍率，界面单独一行显示「额度 100%（11月5日 16:42 重置）」。
+- 模型目录**没有积分倍率**概念。
 
 ### 商汤（Raccoon）
 - 登录是网页回调：`/code/authorize?appname=Raccoon&redirect=<回调>`，回调带 `authorization_code`，再 `POST /api/web/auth/v1/login_with_authorization_code` 换 `access_token`(JWT)/`refresh_token`。

@@ -146,7 +146,27 @@ class AntigravityProvider(
                     val displayName = meta?.stringOrNull("displayName").orEmpty().ifEmpty { modelId }
                     // 上游未给 maxTokens 时不填（0 = 界面不展示），不要拿一个常量冒充上下文窗口
                     val contextLength = meta?.longOrNull("maxTokens")?.takeIf { it > 0 } ?: 0L
-                    result.add(ProviderModel(modelId, displayName, contextLength))
+                    val maxOutput = meta?.longOrNull("maxOutputTokens")?.takeIf { it > 0 } ?: 0L
+                    // quotaInfo 是**每个模型的剩余额度**：remainingFraction=1 表示满额，
+                    // resetTime 是该额度窗口的重置时刻（ISO-8601）。上游没给就不展示。
+                    val quota = meta?.objOrNull("quotaInfo")
+                    val remaining = quota?.get("remainingFraction")?.takeIf { it.isJsonPrimitive }
+                        ?.let { runCatching { it.asDouble }.getOrNull() }
+                    val resetAt = quota?.stringOrNull("resetTime")?.let { formatResetTime(it) }
+                    result.add(
+                        ProviderModel(
+                            id = modelId,
+                            name = displayName,
+                            contextWindow = contextLength,
+                            extra = buildMap {
+                                if (maxOutput > 0) put("maxOutput", maxOutput.toString())
+                                if (remaining != null) {
+                                    put("quotaRemaining", formatPercent(remaining))
+                                    if (resetAt != null) put("quotaResetAt", resetAt)
+                                }
+                            },
+                        ),
+                    )
                 }
                 if (result.isNotEmpty()) {
                     result.sortBy { it.id }
@@ -156,6 +176,29 @@ class AntigravityProvider(
         }
         throw IllegalStateException("从云端获取模型失败（HTTP $lastStatus）：${lastBody.take(160)}")
     }
+
+    /** 剩余额度 → 百分比：`1` → `100%`，`0.35` → `35%`。 */
+    private fun formatPercent(fraction: Double): String =
+        "${(fraction * 100).toInt().coerceIn(0, 100)}%"
+
+    /**
+     * 额度重置时刻 →「11月5日 16:42」这种短标签（本地时区）。
+     *
+     * 上游给的是 UTC 的 ISO-8601（如 `2026-11-05T08:42:21Z`），转本地时区展示。
+     * 解析失败返回 null。
+     */
+    private fun formatResetTime(raw: String): String? = runCatching {
+        val instant = java.time.Instant.parse(raw.trim())
+        val local = instant.atZone(java.time.ZoneId.systemDefault())
+        val now = java.time.ZonedDateTime.now()
+        val hh = local.hour.toString().padStart(2, '0')
+        val mm = local.minute.toString().padStart(2, '0')
+        if (local.year == now.year) {
+            "${local.monthValue}月${local.dayOfMonth}日 $hh:$mm"
+        } else {
+            "${local.year}年${local.monthValue}月${local.dayOfMonth}日"
+        }
+    }.getOrNull()
 
     override fun resolveModel(requested: String): String {
         val model = requested.trim().removePrefix("models/").trim()

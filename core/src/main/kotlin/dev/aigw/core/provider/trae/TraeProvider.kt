@@ -106,15 +106,20 @@ class TraeProvider(
         val models = catalog.models(trae)
         return ProviderModelCatalogView(
             models = models.map { model ->
-                // 倍率不是上游字段（get_detail_param 不返回），取自本地维护的 ModelRates 参考表；
-                // 查不到就不写 extra，UI 显示「—」而不是编造数字。
+                // 倍率优先用**上游下发的值**（display_config 里的 consumption_rate.rate）；
+                // 上游没给时才退回本地维护的 ModelRates 参考表（docs.trae.cn 口径）。
+                // 两者都查不到就不写 extra，UI 显示「—」而不是编造数字。
+                val upstreamRate = model.rate
                 val rate = ModelRates.rateOf(model.id)
                 ProviderModel(
                     id = model.id,
                     name = model.name,
                     contextWindow = model.contextWindow,
                     extra = buildMap {
-                        if (rate != null) {
+                        if (upstreamRate != null) {
+                            put("rate", formatUpstreamRate(upstreamRate) + "×")
+                            put("rateSource", "上游")
+                        } else if (rate != null) {
                             put("rate", rate.baseLabel())
                             put("rateSummary", rate.summaryLabel())
                             rate.discountLabel()?.let { put("rateDiscount", it) }
@@ -132,6 +137,14 @@ class TraeProvider(
     override fun invalidateModelCache() {
         for (catalog in catalogs.values) catalog.invalidate()
     }
+
+    /** 上游倍率格式化：整数不带小数点（1 → `1`），小数最多两位（0.7 → `0.7`）。 */
+    private fun formatUpstreamRate(value: Double): String =
+        if (value == value.toLong().toDouble()) {
+            value.toLong().toString()
+        } else {
+            String.format(java.util.Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
+        }
 
     override fun resolveModel(requested: String): String {
         val model = requested.trim()
