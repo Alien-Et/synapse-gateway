@@ -237,6 +237,15 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 - 登录是网页回调：`/code/authorize?appname=Raccoon&redirect=<回调>`，回调带 `authorization_code`，再 `POST /api/web/auth/v1/login_with_authorization_code` 换 `access_token`(JWT)/`refresh_token`。
 - ⚠️ **不要带 `login_source=desktop`**：授权页在 `login_source=desktop` 时走 `office-raccoon://auth/callback?code=…` 自定义 scheme 分支（手机上没有 App 能接，表现为「点授权跳首页、登录不回来」）。
 - 积分：余额 `GET /api/web/points/v1/balance`；流水 `GET /api/web/points/v1/bills`（`data.items[]` 带 `bill_id` / `event_name` / `biz_type` / `points` / `created_at`，**支出是负数**）。
+- **模型目录里有倍率与折扣字段**（`/api/web/llm/v2/model_catalog`，2026-10 实测）：
+  - `billing_multiplier`：**基准倍率**（实测取值 `1` / `0.75` / `0.5` / `0.25` / `0.2`）。
+  - `billing_effective_multiplier`：**当前实际生效倍率**。限免活动期间为 `0`，与基准不同时说明有折扣在生效。
+  - `billing_status`：`normal` / `limited_free`（限免）。
+  - `billing_discounts[]`：折扣数组，元素带 `name`（如「限免至10月31日」）/ `multiplier` / `start_at` / `end_at`。
+  - `billing_category`：`normal` / `lite`（轻量档）。
+  - ⚠️ **`context_window` 与 `max_tokens` 嵌套在 `params` 对象里**（顶层没有）：`params:{"context_window":1000000,"max_tokens":100000}`。只读顶层会让上下文窗口恒为 0、界面显示不出来。
+  - 显示名优先取 `description`（如 `Raccoon-Work`），`name` / `model_name` 其实是模型 id。
+  - 部分模型带 `visible:false`（官方 UI 不展示，但网关照常列出）。
 - ⚠️ **每日赠送积分由服务端自动发放**：免费 300/日、Pro 500/日，每天 00:00 自动发放、当天登录后有效期延长至 7 天。**不存在「点一下加积分」的签到**。
 - ⚠️ **商汤没有积分任务体系**：桌面端的「任务中心」是 Agent 任务（新建/定时任务），积分侧只有 balance / bills / grant 三个端点。
 - 对话端点 `POST /api/web/llm/v2/chat/completions`（v2 是 LiteLLM 的 OpenAI 兼容层，字段名用标准 `max_tokens`；**改成 `max_new_tokens` 会被上游 500 拒**）。响应**真正的 OpenAI 结构被包在 `data` 里**（外层 `{"status":{...}, "data":{...}}`），且 **`delta` 是字符串**（正文片段）不是对象，需逐行翻译回标准 OpenAI SSE。
@@ -250,7 +259,70 @@ Google 对同一个 refresh_token 的高频 token 换新有风控。0.1.53~0.1.5
 
 ---
 
-## 7. 改动守则（给未来的自己和接盘者）
+## 7. 排查方法：怎么找出上游的未知字段
+
+新增展示项（倍率、额度、能力位……）时，第一件事是**看上游到底返回了什么字段名**，不要猜。
+
+### 为什么不能靠猜
+
+名字千奇百怪：商汤的倍率叫 `billing_multiplier`（不是 `rate` / `price` / `multiplier`），
+上下文窗口嵌在 `params.context_window` 里（不在顶层）。猜错的结果是「字段永远读不到、界面永远空白」，
+而且不报错——最难查的一类 bug。
+
+### 打印原始响应的三种方式（按可靠性排序）
+
+| 方式 | 能否读到 | 说明 |
+|---|---|---|
+| `hooks.onLog(...)` | ❌ 难 | App 端日志落进 `EncryptedKeyValueStore`（加密 XML），root 也搜不到明文 |
+| `System.out.println(...)` | ❌ 不行 | Android 上 stdout 被重定向到 `/dev/null`，不进 logcat |
+| **反射调 `android.util.Log.println`** | ✅ 可行 | 唯一可靠的路径，见下 |
+
+### 可直接复用的代码片段
+
+`core` 是纯 JVM 模块，不能直接 `import android.util.Log`，用反射：
+
+```kotlin
+runCatching {
+    val sample = array.joinToString("\n") { el ->
+        val obj = el.takeIf { it.isJsonObject }?.asJsonObject ?: return@joinToString ""
+        obj.entrySet().joinToString(" | ") { (k, v) -> "$k=${v.toString().take(120)}" }
+    }
+    val logClass = Class.forName("android.util.Log")
+    val println = logClass.getMethod(
+        "println",
+        Int::class.javaPrimitiveType,
+        String::class.java,
+        String::class.java,
+    )
+    println.invoke(null, 4 /* INFO */, "MY-DEBUG-TAG", "原始条目：\n$sample")
+}
+```
+
+### 抓日志的完整流程
+
+```sh
+# 1. 清空缓冲，避免被别的日志挤掉
+logcat -c
+
+# 2. 触发一次真实请求（网关在跑的话，直接打接口比点 UI 快）
+curl -s -m 25 http://127.0.0.1:8790/v1/models > /dev/null
+
+# 3. 立刻搜（用 -b all，main 缓冲可能已滚动）
+logcat -d -b all | grep "MY-DEBUG-TAG"
+```
+
+用函数名当 tag（如 `RACCOON-DEBUG`）比通用词好搜，排查完记得**删掉调试代码**。
+
+### 字段确认后的收尾
+
+1. 把真实字段名写进本文档第 6 节的「协议陷阱清单」——下次不用再抓一遍。
+2. 用抓到的真实响应结构补一条单测（`withUpstream(path = ..., body = 真实JSON)`），
+   锁住解析逻辑，避免以后改崩。
+3. 删除调试日志，重新跑 `:core:test` 确认全绿。
+
+---
+
+## 8. 改动守则（给未来的自己和接盘者）
 
 1. **修 bug 前先回答**：这个 bug 在 0.1.39（最后一个全绿版本）存在吗？
    - 不存在 → 是 0.1.39 之后某次改动引入的。**先 git diff 找到引入点，恢复原行为，再考虑要不要保留新特性**。不要在引入 bug 的代码上继续叠补丁。

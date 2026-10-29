@@ -81,6 +81,41 @@ class RaccoonProviderTest {
         }
     }
 
+    @Test
+    fun `模型目录解析倍率与嵌套显存参数`() {
+        // 真实上游结构（2026-10 实测）：倍率在 billing_multiplier / billing_effective_multiplier，
+        // context_window 与 max_tokens 嵌套在 params 里，description 才是给人看的名字。
+        val body = """{"status":{"code":0},"data":{"models":[
+            {"name":"sn-glm-5-3","model_name":"sn-glm-5-3","description":"GLM 5.3",
+             "billing_multiplier":0.75,"billing_effective_multiplier":0.75,
+             "billing_status":"normal","billing_discounts":[],
+             "params":{"context_window":1000000,"max_tokens":100000}},
+            {"name":"sn-deepseek-v4-1-flash-1017","model_name":"sn-deepseek-v4-1-flash-1017",
+             "description":"DeepSeek V4.1 Flash",
+             "billing_multiplier":0.25,"billing_effective_multiplier":0,
+             "billing_status":"limited_free",
+             "billing_discounts":[{"name":"限免至10月31日","multiplier":0}],
+             "params":{"context_window":1000000,"max_tokens":100000}}
+        ]}}"""
+        withUpstream(path = "/api/web/llm/v2/model_catalog", body = body) { base ->
+            val view = RaccoonProvider(host = base).listModels(account())
+            assertEquals(2, view.models.size, view.models.toString())
+
+            val glm = view.models[0]
+            assertEquals("sn-glm-5-3", glm.id)
+            assertEquals("GLM 5.3", glm.name, "应优先用 description 作为显示名")
+            assertEquals(1_000_000L, glm.contextWindow, "context_window 在 params 里，必须读到")
+            assertEquals("0.75×", glm.extra["rate"])
+            assertNull(glm.extra["rateDiscount"], "生效价等于基准价时不应显示折扣")
+
+            val deepseek = view.models[1]
+            assertEquals("0.25×", deepseek.extra["rate"])
+            assertEquals("0×", deepseek.extra["rateDiscount"], "限免时生效倍率是 0")
+            assertEquals("限免至10月31日", deepseek.extra["rateDiscountTag"])
+            assertEquals("100000", deepseek.extra["maxOutput"])
+        }
+    }
+
     // ------------------------------------------------------------------ classify
 
     @Test

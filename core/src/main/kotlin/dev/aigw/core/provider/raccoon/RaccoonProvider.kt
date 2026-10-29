@@ -512,19 +512,57 @@ class RaccoonProvider(
             val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
             val modelId = item.firstString("id", "model", "model_id", "modelId", "name", "code")
             if (modelId.isEmpty() || !seen.add(modelId)) continue
+            // ⚠️ context_window / max_tokens 嵌套在 params 里（顶层没有），
+            // 只读顶层会让上下文窗口一直是 0、界面显示不出来。
+            val params = item.objOrNull("params")
+            val contextWindow = item
+                .firstLong("context_window", "contextWindow", "max_input_tokens", "maxInputTokens", "max_context")
+                .takeIf { it > 0 }
+                ?: params?.firstLong("context_window", "contextWindow", "max_context", "max_input_tokens")
+                ?: 0L
+            val maxOutput = params?.firstLong("max_tokens", "max_output_tokens", "maxOutputTokens") ?: 0L
+
+            // 倍率：billing_multiplier 是基准价，billing_effective_multiplier 是当前实际生效价
+            // （限免活动时为 0，此时 billing_discounts[0].name 给出「限免至10月31日」这类说明）。
+            val baseRate = item.doubleOrNull("billing_multiplier")
+            val effectiveRate = item.doubleOrNull("billing_effective_multiplier")
+            val discountName = item.arrayOrNull("billing_discounts")
+                ?.firstOrNull { it.isJsonObject }?.asJsonObject
+                ?.stringOrNull("name").orEmpty()
+
             result.add(
                 ProviderModel(
                     id = modelId,
-                    name = item.firstString("display_name", "displayName", "title", "name", "model_name")
-                        .ifEmpty { modelId },
-                    contextWindow = item.firstLong(
-                        "context_window", "contextWindow", "max_input_tokens", "maxInputTokens", "max_context",
-                    ),
+                    // description 是给人看的名字（如 Raccoon-Work），name 字段其实是模型 id
+                    name = item.firstString(
+                        "display_name", "displayName", "title", "description", "name", "model_name",
+                    ).ifEmpty { modelId },
+                    contextWindow = contextWindow,
+                    extra = buildMap {
+                        if (baseRate != null && baseRate > 0) put("rate", formatRate(baseRate) + "×")
+                        if (baseRate != null && effectiveRate != null && effectiveRate != baseRate) {
+                            put("rateDiscount", formatRate(effectiveRate) + "×")
+                            if (discountName.isNotEmpty()) put("rateDiscountTag", discountName)
+                        }
+                        if (maxOutput > 0) put("maxOutput", maxOutput.toString())
+                    },
                 ),
             )
         }
         return result
     }
+
+    /** 倍率显示：整数不带小数点（1 → `1`），小数最多两位（0.75 → `0.75`）。 */
+    private fun formatRate(value: Double): String =
+        if (value == value.toLong().toDouble()) {
+            value.toLong().toString()
+        } else {
+            String.format(java.util.Locale.US, "%.2f", value).trimEnd('0').trimEnd('.')
+        }
+
+    /** 读倍率：JSON 里可能是整数 `1` 也可能是小数 `0.75`，非数字（如 "normal"）返回 null。 */
+    private fun JsonObject.doubleOrNull(name: String): Double? =
+        get(name)?.takeIf { it.isJsonPrimitive }?.let { runCatching { it.asDouble }.getOrNull() }
 
     /**
      * 在任意嵌套层级里找「最像模型列表」的数组：元素是对象、且带 id/model/model_id/name 之一。
