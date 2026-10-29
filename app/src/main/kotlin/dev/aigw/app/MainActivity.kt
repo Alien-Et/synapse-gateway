@@ -1,5 +1,6 @@
 package dev.aigw.app
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -7,6 +8,7 @@ import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
@@ -55,6 +57,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.aigw.app.service.GatewayTileService
+import dev.aigw.app.service.QuotaAlertNotifier
 import dev.aigw.app.ui.pushPopSpec
 import dev.aigw.app.ui.tabContentSpec
 import dev.aigw.app.ui.AppUiState
@@ -90,6 +93,31 @@ class MainActivity : ComponentActivity() {
 
     private var viewModel: AppViewModel? = null
 
+    /**
+     * 启动时主动申请通知权限（Android 13+ 是运行时权限，不申请就默认关）。
+     *
+     * 为什么放 Activity 而不是 HomeScreen：额度提醒、常驻通知、实时状态
+     * 都依赖这个权限，而用户不一定从首页进入。放 Activity 层才能保证一打开就申请。
+     */
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            /* 结果无需处理：拒绝后提醒降级为仅震动 */
+        }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (QuotaAlertNotifier.permissionGranted(this)) return
+        // 已经弹过一次且用户明确拒绝（系统不再弹窗）时不再骚扰，
+        // 之后想开可以从「保活」页的「去开启」进去。
+        if (!shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS) &&
+            getPreferences(MODE_PRIVATE).getBoolean(PREF_ASKED_NOTIFICATION, false)
+        ) {
+            return
+        }
+        getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_ASKED_NOTIFICATION, true).apply()
+        runCatching { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+    }
+
     private val gatewayToggledReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             // 磁贴启停后通知界面刷新（磁贴无法直接触达 ViewModel）
@@ -101,6 +129,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         registerGatewayToggledReceiver()
+        // 额度提醒 / 常驻通知 / 实时状态都靠通知权限：打开应用就主动申请
+        requestNotificationPermissionIfNeeded()
         setContent {
             val vm: AppViewModel = viewModel(factory = appViewModelFactory())
             viewModel = vm
@@ -130,6 +160,11 @@ class MainActivity : ComponentActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(gatewayToggledReceiver, filter)
         }
+    }
+
+    private companion object {
+        /** 是否已经弹过一次权限申请（避免反复骚扰）。 */
+        const val PREF_ASKED_NOTIFICATION = "asked_notification_permission"
     }
 
     private fun appViewModelFactory() = object : ViewModelProvider.Factory {
@@ -219,8 +254,12 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
 
                                 is SubPage.CustomProviderEdit -> CustomProviderScreen(
                     existing = state.customProviders.firstOrNull { it.key == page.key },
+                    // 标签校验交给核心层：它才知道内置标签表与其它自定义供应商的名字
+                    validateLabel = { viewModel.validateCustomLabel(it, page.key) },
                     onSave = {
                         viewModel.saveCustomProvider(it)
+                        // 新建完直接进编辑页：那里能继续改地址、获取模型、加 Key，
+                        // 不再落在一个只有「添加账号」按钮的空白页上。
                         subPage = SubPage.ProviderDetail(it.providerId)
                     },
                     onDelete = {

@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 额度耗尽提醒：账号 / 供应商没额度时震动提醒 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Android 16 实时更新（Live Updates）：让「正在处理」通知可被提升为状态栏胶囊/锁屏实时卡片。
          非运行时权限，只需声明；是否真的提升由系统与用户设置决定 -->

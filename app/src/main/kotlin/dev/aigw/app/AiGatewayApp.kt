@@ -7,6 +7,7 @@ import android.content.Context
 import androidx.core.content.getSystemService
 import dev.aigw.app.data.EncryptedKeyValueStore
 import dev.aigw.app.data.LanAddresses
+import dev.aigw.app.service.QuotaAlertNotifier
 import dev.aigw.core.gateway.GatewayEngine
 
 /**
@@ -33,6 +34,12 @@ class AiGatewayApp : Application() {
             spillDir = java.io.File(cacheDir, "call-fulltext"),
         )
         engine = created
+
+        // 额度耗尽提醒：渠道 + 监听器在启动时一次性装好（幂等，重复调用不重复挂）。
+        // 监听器只做「震动 + 通知」，不参与调度。
+        QuotaAlertNotifier.createChannel(this)
+        QuotaAlertNotifier.install(this, created)
+
         getSystemService<NotificationManager>()?.apply {
             createNotificationChannel(
                 NotificationChannel(
