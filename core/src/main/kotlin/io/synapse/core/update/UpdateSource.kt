@@ -128,11 +128,12 @@ object UpdateRepository {
         if (version.isEmpty()) throw IllegalStateException("未找到版本信息")
         val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/Alien-Et/Android-AI-gateway/releases" }
         val notes = obj.str("body").trim()
-        // 发版产物固定命名为 ai-gateway-<version>-release.apk（历史遗留的智能中枢-<version>.apk 也兼容）；
-        // 都对不上就退回最大的 .apk 资产
+        // 发版产物命名为 synapse-<version>-release.apk（更早的历史名字 ai-gateway-<version>-release.apk
+        // 与 智能中枢-<version>.apk 也兼容）；都对不上就退回最大的 .apk 资产
         val assets = obj.arrayOrNull("assets")?.mapNotNull { it.takeIf { a -> a.isJsonObject }?.asJsonObject }.orEmpty()
         val apks = assets.filter { it.str("name").endsWith(".apk", ignoreCase = true) }
-        val pick = apks.firstOrNull { it.str("name") == "ai-gateway-$version-release.apk" }
+        val pick = apks.firstOrNull { it.str("name") == "synapse-$version-release.apk" }
+            ?: apks.firstOrNull { it.str("name") == "ai-gateway-$version-release.apk" }
             ?: apks.firstOrNull { it.str("name") == "智能中枢-$version.apk" }
             ?: apks.maxByOrNull { it.str("size").toLongOrNull() ?: 0L }
         return ReleaseInfo(
