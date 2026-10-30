@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
@@ -182,7 +181,7 @@ fun KeepAliveScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Un
                 if (!opened) {
                     launch(context, KeepAlive.appDetailsIntent(context), "无法打开系统页面")
                 }
-                Toast.makeText(context, KeepAlive.manualHint(Build.MANUFACTURER), Toast.LENGTH_LONG).show()
+                SystemPrompt.alert("后台保活指引", KeepAlive.manualHint(Build.MANUFACTURER))
             }
             Text(
                 text = KeepAlive.manualHint(Build.MANUFACTURER),
@@ -229,7 +228,7 @@ private fun launch(context: Context, intent: Intent, failureMessage: String?): B
         true
     } catch (_: Exception) {
         if (failureMessage != null) {
-            Toast.makeText(context, failureMessage, Toast.LENGTH_SHORT).show()
+            SystemPrompt.toast(failureMessage)
         }
         false
     }

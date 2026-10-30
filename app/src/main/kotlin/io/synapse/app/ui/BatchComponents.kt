@@ -16,6 +16,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
@@ -64,78 +66,34 @@ fun BatchProgressCard(progress: BatchProgressUi) {
 }
 
 /**
- * 批量动作结束后的结果面板：「成功 N 个 / 失败 M 个」+ 每个失败账号的逐条原因。
+ * 批量动作结束后的结果面板：「成功 N 个 / 失败 M 个」+ 每个账号的逐条原因。
  *
- * 之前整批失败会被拼成一条读不完的 Snackbar 字符串；这里改成可滚动的列表，
- * 每个失败账号一行，用户能一眼定位是谁、为什么失败。
+ * 改用**系统原生对话框**（[SystemPrompt.alert]）：主人要求全局提示统一走安卓接口，
+ * 不再用自绘的 Material3 AlertDialog——同一种「结果提示」在系统里应该长同一张脸。
+ *
+ * 原生 AlertDialog 只吃纯文本，所以这里把结果拼成结构化文字：
+ * 先失败项（用户最需要看的），再成功项，每项「账号：结果」。
  */
 @Composable
 fun BatchOutcomeDialog(outcome: BatchOutcome, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("${outcome.title}结果") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Text(
-                        text = "成功 ${outcome.succeeded} 个",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = "失败 ${outcome.failed} 个",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (outcome.failed > 0) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
-                }
-                if (outcome.items.isNotEmpty()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 320.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        outcome.items.forEach { item ->
-                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(
-                                    text = item.account,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                )
-                                // 失败原因可能是多行的操作指引（如「去 Google 验证账号」三步），
-                                // 用 bodySmall + 行距让步骤读起来不挤。
-                                //
-                                // 成功项用主色显示：「今日已签到」和「签到成功」都属于成功，
-                                // 但要让人一眼看出每个账号的具体情况，所以仍然逐条列出，
-                                // 只是颜色区分开，不与失败的红字混在一起。
-                                Text(
-                                    text = item.message,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    lineHeight = MaterialTheme.typography.bodySmall.fontSize * 1.5,
-                                    color = if (item.ok) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                )
-                            }
-                        }
-                    }
-                }
+    val message = remember(outcome) {
+        buildString {
+            append("成功 ${outcome.succeeded} 个，失败 ${outcome.failed} 个")
+            val failed = outcome.items.filter { !it.ok }
+            val ok = outcome.items.filter { it.ok }
+            if (failed.isNotEmpty()) {
+                append("\n\n【失败】")
+                failed.forEach { append("\n${it.account}：${it.message}") }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("知道了") }
-        },
-    )
+            if (ok.isNotEmpty()) {
+                append("\n\n【已完成】")
+                ok.forEach { append("\n${it.account}：${it.message}") }
+            }
+        }
+    }
+    LaunchedEffect(outcome) {
+        SystemPrompt.alert("${outcome.title}结果", message, onDismiss)
+    }
 }
 
 /** 页面级入口：批量结果非空时弹结果面板，为空时什么都不画。 */

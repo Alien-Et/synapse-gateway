@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色模式（系统夜间）下的对话框样式。
+
+      App 界面本身是固定的深色风格，所以这里与 values/ 里保持同一套深色配色；
+      真正的「跟随系统」体现在：白天模式下用带圆形/圆角的浅色 Material 对话框，
+      夜间模式下用深色。两个文件都写，Android 会自动按系统设置选一份。
+    -->
+    <style name="Theme.AiGateway.Dialog" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@drawable/bg_system_dialog</item>
+        <item name="android:colorAccent">@color/dialog_accent</item>
+        <item name="android:textColorPrimary">@color/dialog_text_primary</item>
+        <item name="android:textColorSecondary">@color/dialog_text_secondary</item>
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">false</item>
+        <item name="android:backgroundDimAmount">0.6</item>
+    </style>
+</resources>

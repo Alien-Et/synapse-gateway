@@ -261,13 +261,13 @@ class AntigravityProvider(
         val conn = try {
             open("$quotaBase/$API_VERSION:streamGenerateContent?alt=sse", credential.accessToken, body)
         } catch (e: Exception) {
-            return FailedChatCall(0, NetworkErrorText.describe(e))
+            return FailedChatCall(0, NetworkErrorText.describe(e, NetworkErrorText.hostOf(apiBase)))
         }
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
             conn.disconnect()
-            return FailedChatCall(0, NetworkErrorText.describe(e))
+            return FailedChatCall(0, NetworkErrorText.describe(e, NetworkErrorText.hostOf(apiBase)))
         }
         if (status !in 200..299) {
             val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")

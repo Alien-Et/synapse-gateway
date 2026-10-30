@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  系统 AlertDialog 的窗口背景：深色 + 圆角。
+  直接给 windowBackground 设圆角会让整窗圆角，这是预期效果
+  （系统对话框本身就是一个独立悬浮窗，不是铺满屏幕的 DialogFragment）。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/dialog_bg" />
+    <corners android:radius="20dp" />
+</shape>

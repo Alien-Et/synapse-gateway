@@ -88,7 +88,7 @@ class CodeBuddyProvider(
                 ProviderModelCatalogView(models, fromFallback = false, error = "")
             }
         } catch (e: Exception) {
-            ProviderModelCatalogView(emptyList(), fromFallback = false, error = NetworkErrorText.describe(e))
+            ProviderModelCatalogView(emptyList(), fromFallback = false, error = NetworkErrorText.describe(e, NetworkErrorText.hostOf(chatBase(null))))
         }
     }
 
@@ -135,13 +135,17 @@ class CodeBuddyProvider(
         val conn = try {
             open("${chatBase(credential)}$PATH_CHAT", credential, prepared, chatHeaders(credential, prepared))
         } catch (e: Exception) {
-            return FailedChatCall(0, NetworkErrorText.describe(e))
+            val where = NetworkErrorText.hostOf(chatBase(credential))
+            hooks.onLog("腾讯请求异常：${NetworkErrorText.logText(e, where)}")
+            return FailedChatCall(0, NetworkErrorText.describe(e, where))
         }
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
             conn.disconnect()
-            return FailedChatCall(0, NetworkErrorText.describe(e))
+            val where = NetworkErrorText.hostOf(chatBase(credential))
+            hooks.onLog("腾讯请求异常：${NetworkErrorText.logText(e, where)}")
+            return FailedChatCall(0, NetworkErrorText.describe(e, where))
         }
         if (status !in 200..299) {
             val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
@@ -241,7 +245,7 @@ class CodeBuddyProvider(
             if (!fieldSeen) return CreditInfo(0, known = false, detail = "响应里没有可识别的额度字段")
             CreditInfo(remain, known = true, detail = "周期剩余 $remain")
         } catch (e: Exception) {
-            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e, NetworkErrorText.hostOf(billingBase(null))))
         }
     }
 
@@ -717,7 +721,7 @@ class CodeBuddyProvider(
             }
             parseGrowthTasks(body)
         } catch (e: Exception) {
-            ProviderTaskListView(emptyList(), error = NetworkErrorText.describe(e))
+            ProviderTaskListView(emptyList(), error = NetworkErrorText.describe(e, NetworkErrorText.hostOf(chatBase(null))))
         }
     }
 
@@ -779,7 +783,7 @@ class CodeBuddyProvider(
             if (code == 0L) return ProviderActionResult.success("签到成功")
             ProviderActionResult.failure(message.ifEmpty { "签到没有成功，请稍后再试" })
         } catch (e: Exception) {
-            ProviderActionResult.failure(NetworkErrorText.describe(e))
+            ProviderActionResult.failure(NetworkErrorText.describe(e, NetworkErrorText.hostOf(billingBase(credential))))
         }
     }
 
@@ -974,7 +978,7 @@ class CodeBuddyProvider(
         val (status, text) = try {
             getJson("$base$PATH_AUTH_TOKEN?state=$encoded", authHeaders(base, withBody = false))
         } catch (e: Exception) {
-            return DeviceAuthPoll.Failed(NetworkErrorText.describe(e))
+            return DeviceAuthPoll.Failed(NetworkErrorText.describe(e, NetworkErrorText.hostOf(chatBase(null))))
         }
         if (status !in 200..299) return DeviceAuthPoll.Failed("轮询失败（HTTP $status）：${text.take(160)}")
         val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()

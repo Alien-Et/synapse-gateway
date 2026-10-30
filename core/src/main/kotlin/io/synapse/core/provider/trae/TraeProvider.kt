@@ -204,7 +204,7 @@ class TraeProvider(
                 }
             }
         } catch (e: Exception) {
-            return FailedChatCall(200, NetworkErrorText.describe(e))
+            return FailedChatCall(200, NetworkErrorText.describe(e, regionOfAccount(account).agentHost))
         } finally {
             call.close()
         }
@@ -286,13 +286,18 @@ class TraeProvider(
             if (usage.parsed && usage.limit > 0) {
                 CreditInfo(usage.remain, known = true, detail = "权益包剩余 ${usage.remain} / ${usage.limit}")
             } else {
-                val reason = if (usage.parsed) "上游返回的权益包没有可解析的额度" else "上游未返回可解析的额度"
+                // 面向用户的说法：说清「读不到额度」而不是「权益包没有可解析的额度」这种实现细节。
+                val reason = if (usage.parsed) {
+                    "这个账号的套餐里查询不到额度信息，可稍后重试"
+                } else {
+                    "上游没有返回额度信息，可稍后重试"
+                }
                 CreditInfo(0, known = false, detail = reason)
             }
         } catch (e: TraeHttpException) {
-            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e, regionOfAccount(account).agentHost))
         } catch (e: Exception) {
-            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e, regionOfAccount(account).agentHost))
         }
     }
 
@@ -353,7 +358,7 @@ class TraeProvider(
         } catch (e: TraeHttpException) {
             ProviderActionResult.failure(traeErrorMessage(e))
         } catch (e: Exception) {
-            ProviderActionResult.failure(NetworkErrorText.describe(e))
+            ProviderActionResult.failure(NetworkErrorText.describe(e, regionOfAccount(account).agentHost))
         }
     }
 

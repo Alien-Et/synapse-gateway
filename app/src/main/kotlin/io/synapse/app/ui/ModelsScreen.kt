@@ -1,6 +1,5 @@
 package io.synapse.app.ui
 
-import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -47,6 +46,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -290,7 +290,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             onToggleExposed = { viewModel.toggleModelExposed(model.fullId, it) },
                             onCopy = {
                                 clipboard.setText(AnnotatedString(model.fullId))
-                                Toast.makeText(context, "已复制模型名称：${model.fullId}", Toast.LENGTH_SHORT).show()
+                                SystemPrompt.toast("已复制模型名称：${model.fullId}")
                             },
                             onTest = { viewModel.testModel(model) },
                             onShowFailure = { failureDetail = it },
@@ -309,21 +309,10 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
         }
 
         failureDetail?.let { reason ->
-            AlertDialog(
-                onDismissRequest = { failureDetail = null },
-                title = { Text("测试失败原因") },
-                text = {
-                    Text(
-                        text = reason,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = { failureDetail = null }) { Text("关闭") }
-                },
-            )
+            // 纯提示（无输入、无选择）→ 系统原生对话框
+            LaunchedEffect(reason) {
+                SystemPrompt.alert("测试失败原因", reason) { failureDetail = null }
+            }
         }
     }
 }

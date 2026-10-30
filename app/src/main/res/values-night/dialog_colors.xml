@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 夜间：深色卡片 + 金色主色（与 values/ 同值，保持 App 一致观感） -->
+    <color name="dialog_bg">#1C1D22</color>
+    <color name="dialog_accent">#D4AF37</color>
+    <color name="dialog_text_primary">#F2F3F5</color>
+    <color name="dialog_text_secondary">#B8BCC6</color>
+</resources>

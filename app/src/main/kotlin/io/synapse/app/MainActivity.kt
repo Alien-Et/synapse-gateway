@@ -37,8 +37,6 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,6 +55,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.synapse.app.service.GatewayTileService
+import io.synapse.app.ui.SystemPrompt
 import io.synapse.app.service.QuotaAlertNotifier
 import io.synapse.app.ui.pushPopSpec
 import io.synapse.app.ui.tabContentSpec
@@ -148,9 +147,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 系统级提示（Toast / 原生对话框）需要一个前台 Activity 才能弹；
+        // App 在后台时弹窗会抛 BadTokenException，所以这里登记/注销。
+        SystemPrompt.attach(this)
         // 用户可能刚从 Custom Tabs 的验证页返回：若有待验证账号，自动刷新一次额度。
         // 放 onResume 而不是 onStart，是为了覆盖页面真正可见的时刻（刷新结果能直接看到）。
         viewModel?.onAppForeground()
+    }
+
+    override fun onPause() {
+        SystemPrompt.detach(this)
+        super.onPause()
     }
 
     override fun onDestroy() {
@@ -194,15 +201,15 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
     var tab by remember { mutableStateOf(Tab.Home) }
     var subPage by remember { mutableStateOf<SubPage?>(null) }
 
-    val snackbarHostState = remember { SnackbarHostState() }
+    // 提示统一走系统接口（Toast / 原生对话框），不再用底部 Snackbar。
+    //
+    // 为什么不用 Snackbar：它会压在内容底部、盖住快捷操作按钮，长文案还会撑成好几行。
+    // 而且系统 Toast 与原生对话框本来就与用户习惯的系统提示一致。
     LaunchedEffect(state.notice) {
         if (state.notice.isNotEmpty()) {
-            snackbarHostState.showSnackbar(state.notice)
+            SystemPrompt.show(state.notice)
             viewModel.consumeNotice()
         }
-    }
-    LaunchedEffect(state.busy) {
-        if (state.busy.isNotEmpty()) snackbarHostState.showSnackbar(state.busy)
     }
 
     // 系统返回与页内返回按钮同层级：二级页回它的上级，其余回主 tab
@@ -217,7 +224,6 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             val selectedGold = LocalAppColors.current.goldStart
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {

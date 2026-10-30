@@ -18,6 +18,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -376,60 +377,37 @@ fun AccountTransferScreen(
     // ---------------- 导入结果 ----------------
     if (showResultDialog) {
         result?.let { outcome ->
-            AlertDialog(
-                onDismissRequest = { showResultDialog = false },
-                title = { Text(if (outcome.added.isNotEmpty() || outcome.updated.isNotEmpty()) "导入完成" else "没有任何账号被导入") },
-                text = {
-                    Column {
-                        Text("新增 ${outcome.added.size} 个，覆盖 ${outcome.updated.size} 个，跳过 ${outcome.skipped.size} 个")
-                        if (outcome.createdProviders.isNotEmpty()) {
-                            Text(
-                                text = "\n已创建这些自定义供应商（导入即创建）：\n" +
-                                    outcome.createdProviders.joinToString("\n"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                        if (outcome.restoredProviders.isNotEmpty()) {
-                            Text(
-                                text = "\n已按文件恢复这些供应商的状态（地址/模型/启用）：\n" +
-                                    outcome.restoredProviders.joinToString("\n"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
-                        }
-                        if (outcome.placeholderProviders.isNotEmpty()) {
-                            Text(
-                                text = "其中 " + outcome.placeholderProviders.joinToString("、") +
-                                    " 还没有接口地址（原文件里没带这个信息），" +
-                                    "到供应商详情页补上就完全可用了。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (outcome.unknownProviders.isNotEmpty()) {
-                            Text(
-                                text = "\n无法识别这些账号的供应商，已跳过：\n" +
-                                    outcome.unknownProviders.distinct().joinToString("\n") +
-                                    "\n（自定义标签不存在时会自动创建；出现这条说明它既不是自定义标签，" +
-                                    "本机也没有同名的内置供应商）",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        }
-                        if (outcome.skipped.isNotEmpty()) {
-                            Text(
-                                text = "\n跳过的账号已存在。要覆盖，请打开上方的「覆盖同名账号」。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+            // 纯提示（无输入、无选择）→ 系统原生对话框。
+            // 原生 AlertDialog 只吃纯文本，这里把结构化结果拼成可读的分段文字。
+            val title = if (outcome.added.isNotEmpty() || outcome.updated.isNotEmpty()) "导入完成" else "没有任何账号被导入"
+            val message = remember(outcome) {
+                buildString {
+                    append("新增 ${outcome.added.size} 个，覆盖 ${outcome.updated.size} 个，跳过 ${outcome.skipped.size} 个")
+                    if (outcome.createdProviders.isNotEmpty()) {
+                        append("\n\n已创建这些自定义供应商（导入即创建）：\n")
+                        append(outcome.createdProviders.joinToString("\n"))
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = { showResultDialog = false }) { Text("知道了") }
-                },
-            )
+                    if (outcome.restoredProviders.isNotEmpty()) {
+                        append("\n\n已按文件恢复这些供应商的状态（地址/模型/启用）：\n")
+                        append(outcome.restoredProviders.joinToString("\n"))
+                    }
+                    if (outcome.placeholderProviders.isNotEmpty()) {
+                        append("\n\n其中 " + outcome.placeholderProviders.joinToString("、") +
+                            " 还没有接口地址（原文件里没带这个信息），到供应商详情页补上就完全可用了。")
+                    }
+                    if (outcome.unknownProviders.isNotEmpty()) {
+                        append("\n\n无法识别这些账号的供应商，已跳过：\n")
+                        append(outcome.unknownProviders.distinct().joinToString("\n"))
+                        append("\n（自定义标签不存在时会自动创建；出现这条说明它既不是自定义标签，本机也没有同名的内置供应商）")
+                    }
+                    if (outcome.skipped.isNotEmpty()) {
+                        append("\n\n跳过的账号已存在。要覆盖，请打开上方的「覆盖同名账号」。")
+                    }
+                }
+            }
+            LaunchedEffect(outcome) {
+                SystemPrompt.alert(title, message) { showResultDialog = false }
+            }
         }
     }
 

@@ -3,7 +3,6 @@ package io.synapse.app.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -177,7 +176,7 @@ fun HomeScreen(
             onRefreshCredits = { viewModel.refreshAllCredits() },
             onCopy = { text, message ->
                 clipboard.setText(AnnotatedString(text))
-                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                SystemPrompt.toast(message)
             },
         )
 

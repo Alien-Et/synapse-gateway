@@ -1,6 +1,5 @@
 package io.synapse.app.ui
 
-import android.widget.Toast
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,12 +37,12 @@ fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> 
             SectionLabel("接入地址")
             AddressTile(state.localUrl.ifEmpty { "http://127.0.0.1:${settings.port}/v1" }) {
                 clipboard.setText(AnnotatedString(state.localUrl))
-                Toast.makeText(context, "已复制本机地址", Toast.LENGTH_SHORT).show()
+                SystemPrompt.toast("已复制本机地址")
             }
             state.lanUrls.forEach { url ->
                 AddressTile(url) {
                     clipboard.setText(AnnotatedString(url))
-                    Toast.makeText(context, "已复制局域网地址", Toast.LENGTH_SHORT).show()
+                    SystemPrompt.toast("已复制局域网地址")
                 }
             }
         }
