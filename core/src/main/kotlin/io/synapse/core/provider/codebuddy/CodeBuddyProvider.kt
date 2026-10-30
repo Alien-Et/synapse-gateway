@@ -768,7 +768,7 @@ class CodeBuddyProvider(
             val message = extractMessage(text)
             // 「今天已签到」不是失败：上游用 HTTP 400 + 一句中文表达，
             // 如果按失败处理，用户看到的是一条红字报错，其实今天完全没事。
-            if (message.contains("已签到") || message.contains("already")) {
+            if (isAlreadyCheckedIn(message)) {
                 return ProviderActionResult.success("今日已签到")
             }
             if (status !in 200..299) {
@@ -1369,14 +1369,16 @@ class CodeBuddyProvider(
         return obj.objOrNull("data")
     }
 
-    private fun extractMessage(body: String): String {
-        if (body.isEmpty()) return ""
-        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return ""
-        obj.get("msg")?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
-        obj.objOrNull("error")?.get("message")?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
-        obj.get("message")?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
-        return ""
-    }
+    private fun extractMessage(body: String): String = extractCodeBuddyMessage(body)
+
+    /**
+     * 上游是否在表达「今天已经签到过了」。
+     *
+     * 换账号签到要撞的正是这一句，而各家措辞差别很大：
+     * 「今天已签到，请明天再来」/「今日已领取」/「already checked in」……
+     * 只匹配 `已签到` 会漏掉「已经签到」「今日已完成」这类说法，于是被当成失败。
+     */
+    private fun isAlreadyCheckedIn(message: String): Boolean = isAlreadyCheckedInText(message)
 
     /** 响应体里是否含配额/限频标记词（标记词均为小写）。 */
     private fun matchesQuota(body: String): Boolean {
@@ -1735,6 +1737,54 @@ internal fun JsonObject.firstNumber(vararg keys: String): Double? {
 
 /** 生成一个小写 UUIDv4（幂等键用，每次请求都要全新）。 */
 internal fun uuid4(): String = java.util.UUID.randomUUID().toString()
+
+/**
+ * 从上游响应体里抠出**一句给人看的原因**。
+ *
+ * 与 [describeCodeBuddyBody] 必须保持同一套字段与顺序：两者读的字段不一致，
+ * 会出现「界面能显示原因、逻辑却识别不出原因」的错位——签到那句
+ * 「今天已签到，请明天再来」就是这样被当成失败显示的
+ * （上游把话放在 `error` 字符串字段里，旧实现只认 `error.message` 对象形式）。
+ */
+internal fun extractCodeBuddyMessage(body: String): String {
+    if (body.isEmpty()) return ""
+    val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return ""
+    obj.get("msg")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
+    obj.get("message")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
+    obj.get("desc")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
+    val error = obj.get("error")
+    if (error != null) {
+        if (error.isJsonPrimitive) {
+            runCatching { error.asString }.getOrNull()?.takeIf { it.isNotEmpty() }?.let { return it }
+        } else {
+            obj.objOrNull("error")?.get("message")?.takeIf { it.isJsonPrimitive }
+                ?.asString?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
+    }
+    return ""
+}
+
+/**
+ * 「今天已经签到过了」的各种说法（统一小写后比对）。
+ *
+ * 上游对重复签到多数回 HTTP 400 + 一句中文，措辞并不固定；
+ * 只要命中任一说法，就该按「今日已签到」的成功处理，而不是红字失败。
+ */
+private val CODEBUDDY_CHECKED_IN_MARKERS = listOf(
+    "已签到", "已经签到", "签到过了", "今日已签", "今天已签",
+    "明日再来", "明天再来", "今日已完成", "今日已领取",
+    "already", "checked in", "checked-in",
+    // 英文站点的常见措辞：come back tomorrow / 明天再来
+    "come back tomorrow",
+)
+
+/** 上游这句话是不是在说「今天已经签到过了」。 */
+internal fun isAlreadyCheckedInText(message: String): Boolean {
+    if (message.isEmpty()) return false
+    val text = message.lowercase()
+    return CODEBUDDY_CHECKED_IN_MARKERS.any { text.contains(it) }
+}
+
 
 /**
  * 把上游响应体整理成一句可读的补充说明。

@@ -112,11 +112,19 @@ fun BatchOutcomeDialog(outcome: BatchOutcome, onDismiss: () -> Unit) {
                                 )
                                 // 失败原因可能是多行的操作指引（如「去 Google 验证账号」三步），
                                 // 用 bodySmall + 行距让步骤读起来不挤。
+                                //
+                                // 成功项用主色显示：「今日已签到」和「签到成功」都属于成功，
+                                // 但要让人一眼看出每个账号的具体情况，所以仍然逐条列出，
+                                // 只是颜色区分开，不与失败的红字混在一起。
                                 Text(
                                     text = item.message,
                                     style = MaterialTheme.typography.bodySmall,
                                     lineHeight = MaterialTheme.typography.bodySmall.fontSize * 1.5,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    color = if (item.ok) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
                                 )
                             }
                         }

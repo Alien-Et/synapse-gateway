@@ -224,7 +224,7 @@ data class BatchProgressUi(val done: Int, val total: Int, val current: String)
 
 /** 批量结果里的单个失败账号条目。 */
 @Immutable
-data class BatchItem(val account: String, val message: String)
+data class BatchItem(val account: String, val message: String, val ok: Boolean = false)
 
 /**
  * 一次批量动作的结构化结果：UI 据此展示「成功 N 个 / 失败 M 个」+ 逐条原因，
@@ -1498,22 +1498,40 @@ class AppViewModel(
                 runCatching {
                     val results = block { progress -> onBatchProgress(progress) }
                     val failed = results.filter { !it.ok }
+                    // 成功项也进面板，但有条件：只收**有实质文案**的。
+                    //
+                    // 从前只列失败项，理由是「成功文案千篇一律」。但签到/任务的成功文案
+                    // 恰恰是有价值的差异信息：「签到成功」/「今日已签到」/「+5 积分」——
+                    // 用户在结果面板里就是想知道某个账号到底是「今天又签了一次」还是
+                    // 「早就签过了」。全滤掉会让这两者失去区别（界面只剩一句「成功 3 个」）。
+                    //
+                    // 仍然丢掉真正的空文案（如 Loomy 的无需操作类成功），避免刷屏。
+                    val succeededItems = results.filter { it.ok && it.message.isNotEmpty() }
                     BatchOutcome(
                         title = busyText,
                         succeeded = results.count { it.ok },
                         failed = failed.size,
-                        // 只把失败账号进结果面板：成功账号的文案千篇一律，逐条列出反而淹没真正要看的原因
-                        items = failed.map { BatchItem(it.nickname.ifEmpty { it.uid }, it.message) },
+                        // 失败排前面：那是用户最需要看的内容；成功项跟在后面补充细节。
+                        items = failed.map { BatchItem(it.nickname.ifEmpty { it.uid }, it.message, ok = false) } +
+                            succeededItems.map { BatchItem(it.nickname.ifEmpty { it.uid }, it.message, ok = true) },
                     ) to results
                 }
             }
             _state.value = _state.value.copy(batchProgress = null)
             outcome.fold(
                 { (result, results) ->
-                    if (result.failed > 0) {
+                    // 有失败 → 一定弹窗（那是用户最需要看的）。
+                    // 全部成功 → 只要有明细文案也弹：签到场景下「今日已签到」和
+                    // 「签到成功」是两条不同的事实，只给一句「成功 3 个」等于把它们抹平了。
+                    // 什么都没得说（成功且无文案）时才只给底部轻提示，不打扰。
+                    if (result.failed > 0 || result.items.isNotEmpty()) {
                         _state.value = _state.value.copy(
                             batchOutcome = result,
-                            notice = "${busyText}完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个",
+                            notice = if (result.failed > 0) {
+                                "${busyText}完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个"
+                            } else {
+                                "${busyText}完成：成功 ${result.succeeded} 个"
+                            },
                         )
                     } else {
                         val text = successNotice?.invoke(results)
