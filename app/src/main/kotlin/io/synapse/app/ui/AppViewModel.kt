@@ -75,7 +75,7 @@ private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
 
 /** 项目仓库地址（GitHub）。 */
 // 项目地址指向本仓库
-private const val PROJECT_URL = "https://github.com/Alien-Et/Android-AI-gateway"
+private const val PROJECT_URL = "https://github.com/Alien-Et/synapse-gateway"
 // 上游原作者仓库：只做署名与溯源，检查更新不看它（版本线已经分叉）
 private const val UPSTREAM_URL = "https://github.com/xibai6668/Android-AI-gateway"
 

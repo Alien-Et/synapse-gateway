@@ -92,7 +92,7 @@ Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账�
 
 ### 安装
 
-1. 到 [Releases](https://github.com/Alien-Et/Android-AI-gateway/releases) 下载最新的 `synapse-<版本>-release.apk` 安装。
+1. 到 [Releases](https://github.com/Alien-Et/synapse-gateway/releases) 下载最新的 `synapse-<版本>-release.apk` 安装。
 2. 打开 App，首页点「启动网关服务」；首页显示「运行中」即表示端口已在监听。
 
 ### 接入账号

@@ -86,7 +86,7 @@ fun isNewerVersion(remote: String, local: String): Boolean {
 object UpdateRepository {
 
     // 检查更新只认本仓库：上游原作者的 release 与我们的版本线无关
-    private const val API = "https://api.github.com/repos/Alien-Et/Android-AI-gateway/releases/latest"
+    private const val API = "https://api.github.com/repos/Alien-Et/synapse-gateway/releases/latest"
     private const val UA = "ai-gateway-android"
 
     fun fetchLatest(
@@ -126,7 +126,7 @@ object UpdateRepository {
         val obj = JsonParser.parseString(body).asJsonObject
         val version = obj.str("tag_name").trim().removePrefix("v")
         if (version.isEmpty()) throw IllegalStateException("未找到版本信息")
-        val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/Alien-Et/Android-AI-gateway/releases" }
+        val pageUrl = obj.str("html_url").ifEmpty { "https://github.com/Alien-Et/synapse-gateway/releases" }
         val notes = obj.str("body").trim()
         // 发版产物命名为 synapse-<version>-release.apk（更早的历史名字 ai-gateway-<version>-release.apk
         // 与 智能中枢-<version>.apk 也兼容）；都对不上就退回最大的 .apk 资产
