@@ -131,5 +131,14 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // Custom Tabs：在应用内滑出**系统浏览器**的验证页。
+    //
+    // 为什么不用 WebView：Google OAuth 2.0 政策明确禁止在 embedded user-agent（WebView）
+    // 里显示授权页，会直接返回 disallowed_useragent。Custom Tabs 渲染的是真正的浏览器进程，
+    // 属于 Google 官方认可的做法（其博客把「device browser」列为正确方案，
+    // SFSafariViewController / Custom Tabs 这类也属同一类）。用户体验上仍然是应用内滑出，
+    // 不用切 App，验证完点返回即可自动刷新额度。
+    implementation("androidx.browser:browser:1.8.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

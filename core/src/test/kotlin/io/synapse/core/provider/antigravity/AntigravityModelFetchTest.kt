@@ -109,6 +109,22 @@ class AntigravityModelFetchTest {
     }
 
     @Test
+    fun `lite 模型不会被 flash 兜底规则升级成 high`() {
+        val provider = AntigravityProvider()
+        // 没拉到模型清单时也不能猜错：flash-lite 含 flash，顺序反了就会被改成 flash-high
+        assertEquals("gemini-3.5-flash-lite", provider.resolveModel("gemini-3.5-flash-lite"))
+        assertEquals("gemini-3.1-flash-lite", provider.resolveModel("gemini-3.1-flash-lite"))
+        // 真正的 flash 简写仍然要能升级到 high 版本（别名表负责）
+        assertEquals("gemini-3.8-flash-high", provider.resolveModel("gemini-3.8-flash"))
+    }
+
+    @Test
+    fun `认不出的模型名原样透传而不是被悄悄替换`() {
+        val provider = AntigravityProvider()
+        assertEquals("some-future-model-v9", provider.resolveModel("some-future-model-v9"))
+    }
+
+    @Test
     fun `无账号时不返回模型`() {
         val provider = AntigravityProvider()
         val catalog = provider.listModels(null)

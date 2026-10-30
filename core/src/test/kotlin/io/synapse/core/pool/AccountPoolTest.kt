@@ -38,8 +38,28 @@ class AccountPoolTest {
         assertEquals("b", pool.pick(TRAE)?.uid)
     }
 
-    // ---------------------------------------------------------------- 账号优先级
+    @Test
+    fun `actionUrl 随额度状态一起持久化，重启后仍能一键打开`() {
+        val store = InMemoryKeyValueStore()
+        val pool = newPool(store)
+        pool.upsert(account("a"))
+        pool.updateCredits(
+            TRAE, "a", 0, known = false,
+            detail = "Google 要求验证该账号后才能查询额度",
+            actionHint = "去验证",
+            actionUrl = "https://accounts.google.com/v3/signin/continue?plt=abc",
+        )
+        val status = pool.statuses(TRAE).first { it.uid == "a" }
+        assertEquals("https://accounts.google.com/v3/signin/continue?plt=abc", status.actionUrl)
 
+        // 重建（模拟重启）：链接必须还在，否则恢复后按钮消失、只能让用户再手动刷新
+        val reopened = newPool(store)
+        val reloaded = reopened.statuses(TRAE).first { it.uid == "a" }
+        assertEquals("https://accounts.google.com/v3/signin/continue?plt=abc", reloaded.actionUrl)
+        assertEquals("去验证", reloaded.actionHint)
+    }
+
+    // ---------------------------------------------------------------- 账号优先级
     @Test
     fun `优先级高的账号先用，同级仍按余额`() {
         val pool = newPool()

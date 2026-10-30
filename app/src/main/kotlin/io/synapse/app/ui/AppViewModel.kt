@@ -8,6 +8,7 @@ import android.os.Build
 import android.service.quicksettings.TileService
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -997,6 +998,39 @@ class AppViewModel(
     }.isSuccess
 
     /**
+     * 在应用内打开外部网页（Custom Tabs）。
+     *
+     * 优先走 Custom Tabs：它渲染的是**真正的系统浏览器**，页面在应用内滑动呈现、右上角可回到 App，
+     * 体验上就是「不用切出去」，同时不违反 Google OAuth 对 embedded user-agent 的禁令
+     * （WebView 打开 accounts.google.com 会被 `disallowed_useragent` 拒绝）。
+     *
+     * 设备上没有支持 Custom Tabs 的浏览器时，退回普通 ACTION_VIEW，保证功能不丢。
+     *
+     * @return true 表示已成功拉起（任一方式）
+     */
+    fun openInAppBrowser(url: String, uriString: String = url): Boolean = runCatching {
+        if (!url.startsWith("https://")) return@runCatching false
+        val uri = Uri.parse(uriString)
+        val customTabs = CustomTabsIntent.Builder()
+            .setShowTitle(true)
+            // 验证/登录类页面不需要分享按钮，去掉更清爽
+            .setUrlBarHidingEnabled(true)
+            .build()
+            .apply {
+                // 保留 App 自己的工具栏颜色，视觉上仍是「在应用里」
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        // 没有支持 Custom Tabs 的浏览器时 startActivity 会抛 ActivityNotFoundException，
+        // 与外层 runCatching 一起构成「先试 Custom Tabs、失败再退回普通浏览器」的降级链。
+        try {
+            customTabs.launchUrl(app, uri)
+            true
+        } catch (_: Exception) {
+            openBrowser(url)
+        }
+    }.getOrDefault(false)
+
+    /**
      * 设备授权（WorkBuddy）：浏览器里登录完成后轮询换取 token，最长 5 分钟。
      */
     fun pollDeviceLogin(providerId: String, state: String, region: String = "") {
@@ -1701,8 +1735,7 @@ class AppViewModel(
         viewModelScope.launch { withContext(Dispatchers.IO) { updateStore.setAutoCheck(enabled) } }
     }
 
-    fun openProjectRepo() {
-        if (!openBrowser(PROJECT_URL)) {
+    fun openProjectRepo() {        if (!openBrowser(PROJECT_URL)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开项目地址")
         }
     }
@@ -1718,6 +1751,43 @@ class AppViewModel(
         if (!openBrowser(url)) {
             _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开下载页")
         }
+    }
+
+    /**
+     * 打开「需要用户动手」的验证页面，回来后自动刷新额度。
+     *
+     * 走 Custom Tabs：页面在应用内滑出（真正的系统浏览器进程，符合 Google OAuth 政策），
+     * 用户验证完点左上角返回就回到 App。这里用 `onStart` 记下离开的时刻，
+     * 用户回来时再触发一次额度刷新——不用他手动点「刷新额度」，也不用复制链接。
+     */
+    fun openVerificationPage(providerId: String, uid: String, url: String) {
+        if (!url.startsWith("https://")) {
+            _state.value = _state.value.copy(notice = "验证链接无效，请先点「刷新额度」重新获取")
+            return
+        }
+        if (!openInAppBrowser(url)) {
+            _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开验证页面")
+            return
+        }
+        // 记下「正在等用户验证的账号」：回到前台时据此自动刷新。
+        pendingVerification = providerId to uid
+        _state.value = _state.value.copy(notice = "已完成验证？返回应用会自动刷新额度")
+    }
+
+    /** 等待用户从验证页返回的账号（providerId to uid）；null 表示没有待验证的账号。 */
+    @Volatile
+    private var pendingVerification: Pair<String, String>? = null
+
+    /**
+     * 应用回到前台时调用：如果有刚验证完的账号，自动刷新一次额度。
+     *
+     * 只在「用户确实离开过」时触发（打开浏览器会让 App 进入 stop），
+     * 单纯切前台不会误刷。
+     */
+    fun onAppForeground() {
+        val pending = pendingVerification ?: return
+        pendingVerification = null
+        refreshCredits(pending.first, pending.second)
     }
 
     /** 应用内更新：先并发测速所有线路（GitHub 直连 + 国内镜像），再让最快的线路

@@ -65,6 +65,7 @@ fun ProviderDetailScreen(
             onRenameAccount = { id, uid, nickname -> viewModel.renameAccount(id, uid, nickname) },
             accountApiKeyOf = { id, uid -> viewModel.accountApiKey(id, uid) },
             onRefreshCredits = { id, uid -> viewModel.refreshCredits(id, uid) },
+            onOpenVerification = { id, uid, url -> viewModel.openVerificationPage(id, uid, url) },
             onAction = { id, uid, action, payload -> viewModel.performAction(id, uid, action, payload) },
             onToggleAccount = { id, uid, enabled -> viewModel.setAccountEnabled(id, uid, enabled) },
             onRemoveAccount = { id, uid -> viewModel.removeAccount(id, uid) },

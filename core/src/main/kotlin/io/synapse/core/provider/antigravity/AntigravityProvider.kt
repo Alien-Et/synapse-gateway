@@ -24,6 +24,7 @@ import io.synapse.core.provider.queryParam
 import io.synapse.core.protocol.OpenAiGemini
 import io.synapse.core.util.HttpSupport
 import io.synapse.core.util.arrayOrNull
+import io.synapse.core.util.asObjectOrNull
 import io.synapse.core.util.bodySnippet
 import io.synapse.core.util.longOrNull
 import io.synapse.core.util.newCompletionId
@@ -208,13 +209,21 @@ class AntigravityProvider(
             return fetchedModels?.firstOrNull()?.id ?: "gemini-3.8-flash-high"
         }
         val lower = model.lowercase()
+        // 从云端拿到的模型清单是最权威的：里面有就原样用，绝不按名字瞎猜。
+        // 否则 gemini-4-argon（含 pro）、gemini-3.5-flash-lite（含 flash）这类合法模型名
+        // 会被下面的兜底规则悄悄改写成别的模型，用户选的模型就变了。
+        if (fetchedModels?.any { it.id.equals(model, ignoreCase = true) } == true) {
+            return fetchedModels!!.first { it.id.equals(model, ignoreCase = true) }.id
+        }
         return when {
-            // 先认「列表里真有的模型」：gemini-4-argon 含 pro 子串，若按 contains 判断会被改写成
-            // gemini-pro-agent，用户选的模型就悄悄变了
-            fetchedModels?.any { it.id.equals(model, ignoreCase = true) } == true -> model
+            // flash-lite 必须在 flash 之前判断：两者都含 "flash"，顺序反了 lite 模型
+            // 会被升级成 high 版本（多花额度且不是用户要的模型）
+            lower.contains("lite") -> model
             lower.contains("flash") -> "gemini-3.8-flash-high"
             lower.contains("pro") -> "gemini-pro-agent"
             lower.contains("claude") || lower.contains("sonnet") || lower.contains("opus") -> "claude-sonnet-4-6"
+            // 认不出的名字原样透传：上游若真有这个模型就正常，没有会回 404（客户端入参错误），
+            // 比静默换成另一个模型、让用户以为「用上了」要诚实得多
             else -> model
         }
     }
@@ -308,7 +317,7 @@ class AntigravityProvider(
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
         val credential = parse(account) ?: return null
         val (paidStatus, paidBody) = try {
-            loadPaidCredits(credential.accessToken)
+            loadPaidCredits(credential.accessToken, credential.projectId)
         } catch (e: Exception) {
             // 积分端点失败不代表不能查配额，先降级继续
             return quotaCreditInfo(credential, "订阅未知", prefix = "查询积分失败：${e.message}；")
@@ -323,13 +332,19 @@ class AntigravityProvider(
                 // 403 要按上游给的 reason 分类，不然用户拿着一坨 JSON 不知道该怎么办。
                 val reason = upstreamErrorReason(paidBody)
                 if (paidStatus == 403 && reason == "VALIDATION_REQUIRED") {
-                    // 账号需要人机验证：这是唯一值得用户动手的情况，直接给操作步骤，
-                    // 不再拿同一个 token 去查配额（必然也 403）。
+                    // loadCodeAssist 要验证 → 但额度其实还有另一个来源 retrieveUserQuotaSummary，
+                    // 它是**独立端点**，未必同样拒绝。先真去试一次，能查到就正常展示额度，
+                    // 查不到才让用户去做人机验证——避免「明明能用却显示查不到额度」。
+                    val validationUrl = upstreamValidationUrl(paidBody)
+                    val fallback = quotaCreditInfo(credential, "订阅未知")
+                    if (fallback.known) return fallback
                     return CreditInfo(
                         0,
                         known = false,
+                        // detail 只留一句人话摘要，不写 reason 码和上游原文（完整原因在 actionHint 里）
                         detail = "Google 要求验证该账号后才能查询额度",
-                        actionHint = ACCOUNT_VERIFICATION_REQUIRED,
+                        actionHint = verificationHint(validationUrl),
+                        actionUrl = validationUrl,
                     )
                 }
                 return quotaCreditInfo(
@@ -349,7 +364,7 @@ class AntigravityProvider(
     override fun creditPacks(account: ProviderAccount): List<QuotaPack> {
         val credential = parse(account) ?: return emptyList()
         val assist = try {
-            val (status, body) = loadPaidCredits(credential.accessToken)
+            val (status, body) = loadPaidCredits(credential.accessToken, credential.projectId)
             if (status in 200..299) parsePaidAssist(body) else null
         } catch (_: Exception) {
             null
@@ -466,7 +481,7 @@ class AntigravityProvider(
     // ------------------------------------------------------------------ 登录
 
     override fun buildAuthUrl(): String {
-        val state = UUID.randomUUID().toString().replace("-", "")
+        val state = newState()
         return buildString {
             append(AUTH_ENDPOINT)
             append("?client_id=").append(encode(CLIENT_ID))
@@ -474,15 +489,49 @@ class AntigravityProvider(
             append("&response_type=code")
             append("&scope=").append(encode(SCOPES.joinToString(" ")))
             append("&access_type=offline")
+            // prompt=consent 保证每次都会重新走同意页并下发 refresh_token；
+            // 少了它，已授权过的账号再登录时 Google 可能不再给 refresh_token
             append("&prompt=consent")
+            append("&include_granted_scopes=true")
             append("&state=").append(state)
         }
+    }
+
+    /** 最近一次发起登录的 state（回调时校验，防 CSRF/串号）。 */
+    @Volatile
+    private var pendingState: String = ""
+
+    private fun newState(): String =
+        UUID.randomUUID().toString().replace("-", "").also { pendingState = it }
+
+    /**
+     * 校验回调里的 state 是否与本次发起的一致。
+     *
+     * 不做这一步的话，别人构造好的回调链接（带着他自己的 code）也能被塞进来完成登录，
+     * 属于标准的 OAuth CSRF。为了让「用户手动粘贴回调链接」的老用法仍可用，
+     * 这里只在两端都有值且不一致时才判定失败。
+     */
+    fun verifyState(callbackUrl: String): Boolean {
+        val expected = pendingState
+        if (expected.isEmpty()) return true
+        val actual = queryParam(callbackUrl, "state").orEmpty()
+        if (actual.isEmpty()) return false
+        return actual == expected
     }
 
     override fun exchangeCode(code: String): ProviderAccount {
         val tokens = exchangeCodeForTokens(code)
         val email = fetchEmail(tokens.accessToken)
         val projectId = fetchProjectId(tokens.accessToken)
+        // 首次换 token 就必须有 refresh_token：Google 只在 `access_type=offline` 且用户
+        // 真正点了「同意」时才下发。拿不到的话账号一小时后必然过期、只能重新登录，
+        // 静默存下来只会让用户过一阵莫名其妙地「登录失效」——这里直接让登录失败并说清楚原因。
+        if (tokens.refreshToken.isEmpty()) {
+            throw IllegalStateException(
+                "Google 未下发 refresh_token：请在授权页面点「允许」并授予离线访问权限后重试" +
+                    "（若已授权过，先到 accounts.google.com 移除本应用的访问权限再登录）",
+            )
+        }
         val credential = Credential(
             accessToken = tokens.accessToken,
             refreshToken = tokens.refreshToken,
@@ -610,16 +659,39 @@ class AntigravityProvider(
      * - base 固定 `daily-cloudcode-pa`；
      * - loadCodeAssist 的 metadata **只带 ideType=ANTIGRAVITY**（不带 platform/pluginType）。
      */
-    private fun loadPaidCredits(accessToken: String): Pair<Int, String> {
-        val payload = JsonObject().apply {
+    private fun loadPaidCredits(accessToken: String, projectId: String = ""): Pair<Int, String> {
+        // loadCodeAssist 认 project：带上它，上游才会按该 project 的订阅返回 paidTier。
+        // 不带时部分账号会直接回 403 VALIDATION_REQUIRED（拿不到任何 tier 信息）。
+        var payload = JsonObject().apply {
             add("metadata", JsonObject().apply { addProperty("ideType", "ANTIGRAVITY") })
+            if (projectId.isNotEmpty()) addProperty("cloudaicompanionProject", projectId)
         }.toString()
-        return postJson(
+        var result = postJson(
             "$quotaBase/$API_VERSION:loadCodeAssist",
             accessToken,
             payload,
             userAgent = userAgent(),
         )
+        // 带 project 被拒（常见于 project 已被回收/未授权）时，退回不带 project 的形态再试一次：
+        // 这样至少还能读到 currentTier（免费版），不至于一条额度信息都拿不到。
+        if (result.first == 403 && projectId.isNotEmpty()) {
+            payload = JsonObject().apply {
+                add("metadata", JsonObject().apply { addProperty("ideType", "ANTIGRAVITY") })
+            }.toString()
+            val retry = postJson(
+                "$quotaBase/$API_VERSION:loadCodeAssist",
+                accessToken,
+                payload,
+                userAgent = userAgent(),
+            )
+            if (retry.first in 200..299) result = retry
+        }
+        // 额度查不出来时最需要的是「上游到底说了什么」，否则只能对着「验证账号」这句猜。
+        // 只在非 2xx 时上报（不含 token），便于排查 403/429 的具体 reason。
+        if (result.first !in 200..299) {
+            hooks.onLog("Antigravity 额度查询失败 HTTP ${result.first}：${result.second.take(400)}")
+        }
+        return result
     }
 
     /**
@@ -634,12 +706,66 @@ class AntigravityProvider(
      * ```
      * 解析不出来返回空串（按未知 403 处理）。
      */
+    /**
+     * 组装「需要验证账号」的提示文案。
+     *
+     * 有上游给的 `validation_url` 就用它（点开直达该账号验证页），
+     * 没有才退回「自己去 accounts.google.com」的通用指引。
+     *
+     * 链接本身由 [CreditInfo.actionUrl] 单独承载、交给界面渲染成按钮，
+     * 所以这里不再把 URL 拼进文案——否则用户会看到一大段无法点击的地址，
+     * 既占地方又诱导他去复制粘贴（这正是要做弹窗/按钮的原因）。
+     */
+    private fun verificationHint(validationUrl: String): String =
+        if (validationUrl.isEmpty()) {
+            ACCOUNT_VERIFICATION_REQUIRED
+        } else {
+            "需要先验证这个 Google 账号：点下面的按钮即可打开验证页，验证通过后会自动刷新额度。"
+        }
+
     private fun upstreamErrorReason(body: String): String {
         val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return ""
         val details = obj.objOrNull("error")?.arrayOrNull("details") ?: return ""
         for (element in details) {
             val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
             item.stringOrNull("reason")?.takeIf { it.isNotEmpty() }?.let { return it }
+        }
+        return ""
+    }
+
+    /**
+     * 从 `VALIDATION_REQUIRED` 的错误体里取 Google 给的验证信息。
+     *
+     * 上游把能直接完成验证的地址放在 `details[].metadata` 里，且给得很完整：
+     * ```json
+     * "metadata": {
+     *   "validation_error_message": "Verify your account to continue.",
+     *   "validation_url_link_text": "Verify your account",
+     *   "validation_url": "https://accounts.google.com/v3/signin/continue?plt=...",
+     *   "validation_learn_more_url": "https://support.google.com/accounts?p=al_alert"
+     * }
+     * ```
+     * 引导用户自己去 accounts.google.com 首页找验证入口是绕远路——直接给出这个链接最省事，
+     * 而且它带着本次会话的上下文，点开就是该账号的验证页。
+     *
+     * `links[]`（google.rpc.Help）里也有一条同样的验证链接，作为 metadata 缺失时的兜底。
+     */
+    private fun upstreamValidationUrl(body: String): String {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return ""
+        val details = obj.objOrNull("error")?.arrayOrNull("details") ?: return ""
+        for (element in details) {
+            val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val url = item.objOrNull("metadata")?.stringOrNull("validation_url").orEmpty()
+            if (url.startsWith("https://")) return url
+        }
+        // 兜底：google.rpc.Help 的 links[] 里可能也带同一条验证链接
+        for (element in details) {
+            val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val links = item.arrayOrNull("links") ?: continue
+            for (link in links) {
+                val url = link.asObjectOrNull()?.stringOrNull("url").orEmpty()
+                if (url.startsWith("https://accounts.google.com/")) return url
+            }
         }
         return ""
     }
@@ -793,8 +919,11 @@ class AntigravityProvider(
      * 仍然只把 401 当登录失效，403/5xx 继续下一个端点。
      */
     private fun loadQuotaSummary(accessToken: String, projectId: String): Pair<Int, String> {
-        // 只有用默认域名时才走完整端点链；显式传了 base（单测的假上游）就只打它
-        val bases = if (quotaBase == QUOTA_BASE) listOf(quotaBase) + QUOTA_FALLBACK_BASES else listOf(quotaBase)
+        // 只有用默认域名时才走完整端点链；显式传了 base（单测的假上游）就只打它。
+        // 注意 QUOTA_FALLBACK_BASES **本身已含 production 且排第一**：这里再拼一个
+        // listOf(quotaBase) + … 会把同一个域名问两遍（同样的请求体、同样的结果），
+        // 空转一轮还要多消耗一次上游配额查询。
+        val bases = if (quotaBase == QUOTA_BASE) QUOTA_FALLBACK_BASES else listOf(quotaBase)
         // 两种请求体都试：带 project 的完整形态，与空体（#3501 常见于 project 授权校验失败）
         val payloads = LinkedHashSet<String>().apply {
             if (projectId.isNotEmpty()) {
@@ -806,9 +935,14 @@ class AntigravityProvider(
         // 已收集到的 groups：组名 → buckets（同组同 bucketId 只保留第一份）
         val merged = LinkedHashMap<String, MutableList<JsonObject>>()
         var sawOk = false
+        // 已经打过的 URL：不同 base 可能落到同一端点（历史上 production 被重复列入端点链），
+        // 去重保证同一个端点不重复请求，只做真实存在的降级。
+        val tried = HashSet<String>()
         for (base in bases) {
+            val url = "$base/$API_VERSION:retrieveUserQuotaSummary"
+            if (url in tried) continue
+            tried.add(url)
             for (payload in payloads) {
-                val url = "$base/$API_VERSION:retrieveUserQuotaSummary"
                 val result = postJson(url, accessToken, payload, userAgent = userAgent())
                 if (result.first == 401) return result
                 if (result.first !in 200..299) {
@@ -878,8 +1012,10 @@ class AntigravityProvider(
         val (status, body) = try {
             loadQuotaSummary(credential.accessToken, credential.projectId)
         } catch (e: Exception) {
+            hooks.onLog("Antigravity 配额查询异常：${e.message}")
             return CreditInfo(0, known = false, detail = "${prefix}查询配额失败：${e.message}")
         }
+        hooks.onLog("Antigravity retrieveUserQuotaSummary → HTTP $status：${body.take(1200)}")
         if (status == 401) {
             return CreditInfo(0, known = false, detail = "登录状态已失效，需要重新登录")
         }
@@ -890,12 +1026,14 @@ class AntigravityProvider(
             // 才报 403 VALIDATION_REQUIRED —— 只在上面那个分支判断是不够的。
             val quotaReason = upstreamErrorReason(body)
             if (status == 403 && quotaReason == "VALIDATION_REQUIRED") {
+                val validationUrl = upstreamValidationUrl(body)
                 return CreditInfo(
                     0,
                     known = false,
                     // detail 只留一句人话摘要，不写 reason 码——完整原因在 actionHint 里已经说清楚了
                     detail = "$prefix$tierLabel · Google 要求验证该账号后才能查询配额",
-                    actionHint = ACCOUNT_VERIFICATION_REQUIRED,
+                    actionHint = verificationHint(validationUrl),
+                    actionUrl = validationUrl,
                 )
             }
             val hint = if (status == 403) "（非登录失效，是上游对客户端/账号的授权校验）" else ""
@@ -1116,6 +1254,17 @@ class AntigravityProvider(
          * 面向普通用户，只说「做什么」，不出现 reason 码、状态码、JSON 这些技术细节——
          * 那些放 detail 里给排查用。
          */
+        /**
+         * 上游 403 `VALIDATION_REQUIRED` 的操作指引。
+         *
+         * 这**不是**登录失效、也不是网关的问题：Google 判定该账号需要完成一次人机验证，
+         * 没验证完之前 `cloudcode-pa.googleapis.com` 一律拒绝（对话与额度查询都会 403）。
+         *
+         * 优先给出上游随错误一起下发的验证链接：点开就是该账号的验证页，
+         * 比让用户自己去 accounts.google.com 找入口可靠得多。
+         *
+         * 面向普通用户，只说「做什么」，不出现 reason 码、状态码、JSON 这些技术细节。
+         */
         const val ACCOUNT_VERIFICATION_REQUIRED =
             "需要先在 Google 官网验证这个账号：\n" +
                 "1. 用浏览器打开 accounts.google.com 并登录该账号\n" +
@@ -1157,6 +1306,9 @@ class AntigravityProvider(
          *
          * 2026-10 起 `daily-` 会返回残缺的 200（只剩部分组/窗口），完整的 5h + weekly 只在
          * production 上；把 daily 放前面会让 5 小时窗口彻底消失（多个项目同踩此坑）。
+         *
+         * 注意：这个列表**就是配额查询的完整端点链**（production 在第一位），调用方不要再
+         * 在前面拼一个 QUOTA_BASE，否则 production 会被问两遍。
          */
         val QUOTA_FALLBACK_BASES = listOf(
             "https://daily-cloudcode-pa.googleapis.com",

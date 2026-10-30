@@ -33,6 +33,15 @@ data class CreditInfo(
      * 为空表示没有额外操作建议。
      */
     val actionHint: String = "",
+    /**
+     * 需要用户动手时，可直接打开的操作链接（如 Google 的 `validation_url`）。
+     *
+     * 有这个字段时，界面会把它渲染成一个「一键去验证」按钮，用 Custom Tabs 在应用内打开
+     * ——用户不用复制链接、不用切 App。为空表示该提示没有配套链接，只能按文字自己操作。
+     *
+     * 只接受 https 链接：这里的内容来自上游响应，绝不能让它变成可执行的任意 scheme。
+     */
+    val actionUrl: String = "",
 )
 
 /** provider 专属动作的结果。 */

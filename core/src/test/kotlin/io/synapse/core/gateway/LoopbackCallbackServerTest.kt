@@ -34,7 +34,7 @@ class LoopbackCallbackServerTest {
     @Test
     fun `收到回调时把完整链接交给处理器并返回结果页`() {
         val received = AtomicReference("")
-        val server = LoopbackCallbackServer(0, "/authorize") { url ->
+        val server = LoopbackCallbackServer("127.0.0.1", 0, "/authorize") { url ->
             received.set(url)
             "<html><body>登录成功</body></html>"
         }
@@ -55,7 +55,7 @@ class LoopbackCallbackServerTest {
     @Test
     fun `其它路径不会被当成回调`() {
         var called = false
-        val server = LoopbackCallbackServer(0, "/authorize") {
+        val server = LoopbackCallbackServer("127.0.0.1", 0, "/authorize") {
             called = true
             "ok"
         }
@@ -70,9 +70,25 @@ class LoopbackCallbackServerTest {
     }
 
     @Test
+    fun `处理器抛异常时也要给浏览器一个失败页`() {
+        val server = LoopbackCallbackServer("127.0.0.1", 0, "/oauth-callback") {
+            throw IllegalStateException("换 token 失败")
+        }
+        server.startServer()
+        try {
+            val (status, body) = get(server.listeningPort, "/oauth-callback?code=abc")
+            assertEquals(200, status, "不能把异常直接丢给浏览器当连接错误")
+            assertTrue(body.contains("登录失败"), body)
+            assertTrue(body.contains("换 token 失败"), body)
+        } finally {
+            server.stop()
+        }
+    }
+
+    @Test
     fun `没有 query 时也能收到回调`() {
         val received = AtomicReference("")
-        val server = LoopbackCallbackServer(0, "/oauth-callback") { url ->
+        val server = LoopbackCallbackServer("127.0.0.1", 0, "/oauth-callback") { url ->
             received.set(url)
             "ok"
         }

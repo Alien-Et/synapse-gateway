@@ -715,7 +715,7 @@ class GatewayEngine(
             pool.updateCredits(providerId, uid, 0, false, reason)
             return CreditRefreshResult(providerId, uid, account.nickname, 0, false, reason)
         }
-        pool.updateCredits(providerId, uid, info.balance, info.known, info.detail, info.actionHint)
+        pool.updateCredits(providerId, uid, info.balance, info.known, info.detail, info.actionHint, info.actionUrl)
         if (info.known) {
             log("额度刷新 $providerId/${account.nickname.ifEmpty { uid }}：${info.balance}（${info.detail}）")
         } else {
@@ -1303,16 +1303,34 @@ class GatewayEngine(
     }
 
     private fun startCallbackServer(port: Int, path: String, handler: (String) -> String) {
-        val server = try {
-            LoopbackCallbackServer(port, path) { url ->
-                val html = handler(url)
-                // 先让响应写完再关端口，否则浏览器会看到连接被重置
-                stopCallbackServerSoon()
-                html
-            }.also { it.startServer() }
-        } catch (e: Exception) {
-            throw IllegalStateException("无法监听本地回调端口 $port：${e.message}")
+        // 监听地址按 IPv4 → IPv6 依次尝试：只绑 IPv4 时，某些设备的浏览器把 localhost
+        // 先解析成 ::1，第一次连接就 refused，用户只看到「无法访问此网站」。
+        var lastError: Exception? = null
+        var started: LoopbackCallbackServer? = null
+        for (host in LoopbackCallbackServer.HOSTS) {
+            val candidate = try {
+                // handler 可能因为参数缺失/换 token 失败而返回失败页；那种情况**不能关端口**，
+                // 否则用户点「重试登录」或刷新页面就再也连不上了。只有真正登录成功才释放。
+                LoopbackCallbackServer(host, port, path) { url ->
+                    val outcome = handler(url)
+                    if (isSuccessPage(outcome)) stopCallbackServerSoon()
+                    outcome
+                }.also { it.startServer() }
+            } catch (e: Exception) {
+                lastError = e
+                continue
+            }
+            started = candidate
+            break
         }
+        val server = started ?: throw IllegalStateException(
+            "无法监听本地回调端口 $port" +
+                if (LoopbackCallbackServer.isPortAvailable(port).not()) {
+                    "：端口已被其它程序占用（请关闭占用该端口的应用后重试）"
+                } else {
+                    "：${lastError?.message ?: "未知原因"}"
+                },
+        )
         callbackServer = server
         log("已监听本地回调 http://127.0.0.1:$port$path")
         // 用户长时间不完成登录时释放端口，避免一直占着
@@ -1323,8 +1341,20 @@ class GatewayEngine(
                 runCatching { server.stop() }
                 log("浏览器登录超时，已释放回调端口 $port")
             }
-        }.start()
+        }.apply {
+            isDaemon = true
+            start()
+        }
     }
+
+    /**
+     * 结果页是否代表「登录真的成功了」。
+     *
+     * 只有成功才允许关端口：失败页留在浏览器里，用户刷新/重试时端口仍在监听。
+     * 判据用结果页标题约定（[resultPage] 生成），避免 handler 额外改签名。
+     */
+    private fun isSuccessPage(html: String): Boolean = html.contains(SUCCESS_PAGE_MARKER)
+
 
     private fun stopCallbackServerSoon() {
         val server = callbackServer ?: return
@@ -1406,8 +1436,27 @@ class GatewayEngine(
     fun completeOAuth(providerId: String, callbackUrl: String): LoginOutcome {
         val support = registry.get(providerId) as? LoopbackOAuthSupport
             ?: return LoginOutcome(LoginState.FAILED, error = "该供应商不支持 OAuth 登录")
+        // Google 在用户拒绝授权/账号被限制时会回调 ?error=access_denied，而不是给 code。
+        // 不先看 error 的话，用户只会看到一句「回调里没有 code 参数」，完全不知道发生了什么。
+        val error = io.synapse.core.provider.queryParam(callbackUrl, "error")
+        if (!error.isNullOrEmpty()) {
+            val description = io.synapse.core.provider.queryParam(callbackUrl, "error_description")
+            val reason = description?.takeIf { it.isNotEmpty() } ?: when (error) {
+                "access_denied" -> "你取消了授权，或该账号不允许此应用访问"
+                "invalid_client" -> "客户端配置有问题"
+                "redirect_uri_mismatch" -> "回调地址与注册的不一致"
+                else -> ""
+            }
+            logWarn("OAuth 授权被拒（$providerId）：$error ${description.orEmpty()}")
+            return LoginOutcome(LoginState.FAILED, error = "授权未完成（$error）${if (reason.isEmpty()) "" else "：$reason"}")
+        }
         val code = io.synapse.core.provider.queryParam(callbackUrl, "code")
             ?: return LoginOutcome(LoginState.FAILED, error = "回调里没有 code 参数")
+        // state 校验：Google 一定会原样回传，对不上说明这个回调不是本次登录发出的
+        if (support is AntigravityProvider && !support.verifyState(callbackUrl)) {
+            logWarn("OAuth 回调 state 不匹配（$providerId），已拒绝")
+            return LoginOutcome(LoginState.FAILED, error = "回调校验失败（state 不匹配），请重新发起登录")
+        }
         return try {
             adopt(providerId, support.exchangeCode(code), "登录")
         } catch (e: Exception) {
@@ -2011,14 +2060,25 @@ class GatewayEngine(
 
     // ------------------------------------------------------------------ 日志
 
+    /**
+     * 额外日志出口（App 层接 logcat 用）。
+     *
+     * 排查上游问题时，UI 的「记录」页只能看到窗口期内容、还要来回切页面；
+     * 接上这里后 `adb logcat -s SynapseGateway` 就能看到包括上游原始响应在内的全部日志。
+     */
+    @Volatile
+    var logSink: ((String) -> Unit)? = null
+
     internal fun log(text: String) {
         requestLog.info(text)
         onLog(text)
+        logSink?.invoke(text)
     }
 
     internal fun logWarn(text: String) {
         requestLog.warn(text)
         onLog(text)
+        logSink?.invoke(text)
     }
 
     internal fun logError(text: String) {
@@ -2087,10 +2147,15 @@ class GatewayEngine(
     }
 }
 
+/** 成功结果页里的约定标记：只有带它的页面才允许关闭回调端口。 */
+internal const val SUCCESS_PAGE_MARKER = "data-login-result=\"ok\""
+
 /** 登录回调结果页（在系统浏览器里展示）。 */
 private fun resultPage(ok: Boolean, who: String, error: String): String {
     val title = if (ok) "登录成功" else "登录失败"
     val message = if (ok) "账号 $who 已添加，可以关闭本页并返回应用。" else error.ifEmpty { "请回到应用重试" }
+    // 成功页带约定标记，回调服务据此决定「可以关端口了」；失败页不带，端口继续留着让用户重试
+    val marker = if (ok) " $SUCCESS_PAGE_MARKER" else ""
     return """
         <!doctype html>
         <html lang="zh-CN"><head><meta charset="utf-8">
@@ -2104,7 +2169,7 @@ private fun resultPage(ok: Boolean, who: String, error: String): String {
           h1{font-size:1.25rem;margin:0 0 .75rem}
           p{font-size:.95rem;line-height:1.6;color:#5a5f66;margin:0}
         </style></head>
-        <body><div class="card"><h1>$title</h1><p>$message</p></div></body></html>
+        <body><div class="card"$marker><h1>$title</h1><p>$message</p></div></body></html>
     """.trimIndent()
 }
 

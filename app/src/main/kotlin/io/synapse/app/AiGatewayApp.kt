@@ -35,6 +35,11 @@ class AiGatewayApp : Application() {
         )
         engine = created
 
+        // 把引擎内部日志同时镜像到 logcat（tag=SynapseGateway）。
+        // UI 的「记录」页只保留窗口期内的条目，排查「额度查不出来」这类问题时
+        // 用 logcat 就能直接看到上游返回的原始 JSON，不用来回切页面。
+        created.logSink = { text -> android.util.Log.i(LOG_TAG, text) }
+
         // 额度耗尽提醒：渠道 + 监听器在启动时一次性装好（幂等，重复调用不重复挂）。
         // 监听器只做「震动 + 通知」，不参与调度。
         QuotaAlertNotifier.createChannel(this)
@@ -68,6 +73,7 @@ class AiGatewayApp : Application() {
 
     companion object {
         const val CHANNEL_ID = "aigw"
+        private const val LOG_TAG = "SynapseGateway"
 
         /** 实时状态通知渠道（Android 16 Live Updates 走这里）。 */
         const val LIVE_CHANNEL_ID = "aigw_live"

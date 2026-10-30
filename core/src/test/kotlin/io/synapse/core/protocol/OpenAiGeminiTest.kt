@@ -58,6 +58,38 @@ class OpenAiGeminiTest {
     }
 
     @Test
+    fun `stop 传字符串也归一成数组`() {
+        val body = """{"messages":[{"role":"user","content":"hi"}],"stop":"END"}"""
+        val config = OpenAiGemini.toGeminiRequest(body).getAsJsonObject("generationConfig")
+        val stops = config.getAsJsonArray("stopSequences")
+        assertEquals(1, stops.size())
+        assertEquals("END", stops[0].asString)
+    }
+
+    @Test
+    fun `max_completion_tokens 与字符串形式的 max_tokens 都认`() {
+        val legacy = """{"messages":[{"role":"user","content":"hi"}],"max_tokens":"128"}"""
+        assertEquals(
+            128,
+            OpenAiGemini.toGeminiRequest(legacy).getAsJsonObject("generationConfig")
+                .get("maxOutputTokens").asInt,
+        )
+        val modern = """{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":256}"""
+        assertEquals(
+            256,
+            OpenAiGemini.toGeminiRequest(modern).getAsJsonObject("generationConfig")
+                .get("maxOutputTokens").asInt,
+        )
+        // max_tokens 优先于 max_completion_tokens
+        val both = """{"messages":[{"role":"user","content":"hi"}],"max_tokens":64,"max_completion_tokens":256}"""
+        assertEquals(
+            64,
+            OpenAiGemini.toGeminiRequest(both).getAsJsonObject("generationConfig")
+                .get("maxOutputTokens").asInt,
+        )
+    }
+
+    @Test
     fun `tools 转成 functionDeclarations 并剥离不支持的 schema 字段`() {
         val body = """
             {"messages":[{"role":"user","content":"hi"}],

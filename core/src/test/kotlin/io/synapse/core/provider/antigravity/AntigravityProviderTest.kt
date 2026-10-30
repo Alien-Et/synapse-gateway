@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -235,7 +236,133 @@ class AntigravityProviderTest {
         assertTrue(received.paths.none { it == "/token" }, "窗口应被夹到 5 分钟：${received.paths}")
     }
 
+    @Test
+    fun `首次换 token 没拿到 refresh_token 时登录失败并提示原因`() = withUpstream(
+        mapOf(
+            "/token" to (200 to """{"access_token":"a","expires_in":3600}"""),
+            "/v1internal:loadCodeAssist" to (200 to """{"cloudaicompanionProject":"p"}"""),
+        ),
+    ) { base, _ ->
+        val provider = AntigravityProvider(apiBase = base, quotaBase = base, tokenEndpoint = "$base/token")
+        val error = runCatching { provider.exchangeCode("code") }
+        assertTrue(error.isFailure, "缺少 refresh_token 必须登录失败，不能静默存一个一小时后失效的账号")
+        assertTrue(
+            error.exceptionOrNull()!!.message!!.contains("refresh_token"),
+            error.exceptionOrNull()!!.message,
+        )
+    }
+
+    @Test
+    fun `loadCodeAssist 带 project 请求，被拒时退回不带 project 的形态`() {
+        withUpstream({ _, _, body ->
+            // 带 project 一律 403 VALIDATION_REQUIRED，不带则给免费版
+            if (body.contains("cloudaicompanionProject")) {
+                403 to """{"error":{"code":403,"details":[{"reason":"VALIDATION_REQUIRED"}]}}"""
+            } else {
+                200 to """{"currentTier":{"id":"free-tier","name":"Free"}}"""
+            }
+        }) { base, received ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertTrue(
+                received.bodies.any { it.contains("cloudaicompanionProject") },
+                "应先带 project 查询：${received.bodies}",
+            )
+            assertTrue(received.bodies.size >= 2, "被拒后应退回不带 project 再试")
+            assertTrue(info.detail.contains("免费版"), info.detail)
+        }
+    }
+
+    @Test
+    fun `loadCodeAssist 403 时不直接放弃，仍会尝试配额接口`() {
+        // 两个端点都拒绝时才报验证；只要配额接口能给出数据就正常展示
+        withUpstream(
+            mapOf(
+                CREDITS_PATH to (403 to """{"error":{"code":403,"details":[{"reason":"VALIDATION_REQUIRED"}]}}"""),
+                QUOTA_PATH to (200 to quotaBody(quotaGroup("Gemini Models", "weekly_limit", "0.6"))),
+            ),
+        ) { base, received ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertTrue(
+                received.paths.any { it == QUOTA_PATH },
+                "403 后必须真的去问配额端点：${received.paths}",
+            )
+            assertTrue(info.known, "配额查得到就不该报失败：${info.detail}")
+            assertEquals(60L, info.balance)
+        }
+    }
+
+    @Test
+    fun `VALIDATION_REQUIRED 时把上游的 validation_url 直接给用户`() {
+        val body = """
+            {"error":{"code":403,"status":"PERMISSION_DENIED",
+              "message":"Verify your account to continue.",
+              "details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+                "reason":"VALIDATION_REQUIRED",
+                "domain":"cloudcode-pa.googleapis.com",
+                "metadata":{"validation_url":"https://accounts.google.com/v3/signin/continue?plt=AKgnabc"}}]}}
+        """.trimIndent()
+        withUpstream(both(403, body)) { base, _ ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertFalse(info.known)
+            // 文案里不该再出现裸 URL：链接交给 actionUrl 渲染成按钮，
+            // 否则用户会看到一大段不能点的地址，又去复制粘贴。
+            assertFalse(
+                info.actionHint.contains("https://"),
+                "actionHint 不该再塞裸链接（改由 actionUrl 承载）：${info.actionHint}",
+            )
+            assertTrue(info.actionHint.contains("验证"), info.actionHint)
+            // 结构化字段：UI 靠它渲染「一键去验证」按钮（Custom Tabs 打开）
+            assertEquals(
+                "https://accounts.google.com/v3/signin/continue?plt=AKgnabc",
+                info.actionUrl,
+                "actionUrl 必须原样带出，UI 才能一键打开",
+            )
+        }
+    }
+
+    @Test
+    fun `metadata 缺失时从 google_rpc_Help 的 links 里取验证链接`() {
+        // 真实响应里同时带 ErrorInfo(metadata) 与 Help(links) 两处，取不到 metadata 时要能退回 links
+        val body = """
+            {"error":{"code":403,"details":[
+              {"@type":"type.googleapis.com/google.rpc.ErrorInfo",
+               "reason":"VALIDATION_REQUIRED"},
+              {"@type":"type.googleapis.com/google.rpc.Help",
+               "links":[{"description":"Verify your account",
+                         "url":"https://accounts.google.com/v3/signin/continue?plt=fromHelp"}]}]}}
+        """.trimIndent()
+        withUpstream(both(403, body)) { base, _ ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertEquals(
+                "https://accounts.google.com/v3/signin/continue?plt=fromHelp",
+                info.actionUrl,
+                "应能从 Help.links 兜底取到验证链接",
+            )
+        }
+    }
+
+    @Test
+    fun `没有 validation_url 时退回通用验证指引`() {
+        val body = """{"error":{"code":403,"details":[{"reason":"VALIDATION_REQUIRED"}]}}"""
+        withUpstream(both(403, body)) { base, _ ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertTrue(info.actionHint.contains("accounts.google.com"), info.actionHint)
+            // 没有链接就必须留空，否则 UI 会渲染出一个点了没反应（或打开空地址）的按钮
+            assertEquals("", info.actionUrl, "没有 validation_url 时 actionUrl 必须为空")
+        }
+    }
+
     // ------------------------------------------------------- Google One 积分
+
+    @Test
+    fun `配额端点链里同一域名不会被重复请求`() = withUpstream(
+        mapOf(QUOTA_PATH to (200 to quotaBody(quotaGroup("Gemini Models", "weekly_limit", "0.9")))),
+    ) { base, received ->
+        // 假上游只有一个域名，端点链去重后配额端点应当只被问一次
+        AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())
+        val quotaHits = received.paths.count { it == QUOTA_PATH }
+        assertTrue(quotaHits <= 2, "同一端点被重复请求：$quotaHits 次，${received.paths}")
+    }
 
     @Test
     fun `creditInfo 解析数字金额`() = withUpstream(both(200, paidCreditsBody("45.7"))) { base, _ ->

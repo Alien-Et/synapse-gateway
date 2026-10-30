@@ -176,16 +176,21 @@ object OpenAiGemini {
         }
 
         val generationConfig = JsonObject()
-        obj.get("max_tokens")?.takeIf { it.isJsonPrimitive }?.asInt?.let {
-            generationConfig.addProperty("maxOutputTokens", it)
-        }
+        // 新版 OpenAI SDK 发 max_completion_tokens（与 max_tokens 同义），只认旧名会把它静默丢掉。
+        // 字符串形态（部分客户端发 "100"）也要按数字解析，否则 asInt 直接抛异常。
+        (obj.longOrNull("max_tokens") ?: obj.longOrNull("max_completion_tokens"))
+            ?.takeIf { it > 0 }
+            ?.let { generationConfig.addProperty("maxOutputTokens", it) }
         obj.get("temperature")?.takeIf { it.isJsonPrimitive }?.asDouble?.let {
             generationConfig.addProperty("temperature", it)
         }
         obj.get("top_p")?.takeIf { it.isJsonPrimitive }?.asDouble?.let {
             generationConfig.addProperty("topP", it)
         }
-        obj.arrayOrNull("stop")?.let { generationConfig.add("stopSequences", it) }
+        // stop：OpenAI 允许字符串或数组两种形态。直接拿 arrayOrNull 时，客户端发字符串
+        // （`"stop":"END"`）会被静默丢掉、发 null 也能被容忍；但若整段直接 add，字符串形态
+        // 就会把非法结构塞给上游。这里统一归一成字符串数组（Gemini 只认 stopSequences: []）。
+        stopSequencesOf(obj)?.takeIf { it.size() > 0 }?.let { generationConfig.add("stopSequences", it) }
         if (generationConfig.size() > 0) request.add("generationConfig", generationConfig)
 
         obj.arrayOrNull("tools")?.let { tools -> toGeminiTools(tools)?.let { request.add("tools", it) } }
@@ -232,7 +237,23 @@ object OpenAiGemini {
         if (mode == "NONE") request.remove("tools")
     }
 
-    /** OpenAI reasoning_effort → Gemini thinkingConfig（与 CLIProxyAPI 一致）。 */
+    /** OpenAI `stop` 归一成数组：支持 `"END"` 与 `["END","STOP"]` 两种写法，缺省/非法返回 null。 */
+    private fun stopSequencesOf(source: JsonObject): JsonArray? {
+        val stop = source.get("stop")?.takeIf { !it.isJsonNull } ?: return null
+        return when {
+            stop.isJsonArray -> JsonArray().apply {
+                stop.asJsonArray.forEach { element ->
+                    if (element.isJsonPrimitive) add(element.asString)
+                }
+            }
+            stop.isJsonPrimitive -> JsonArray().apply { add(stop.asString) }
+            else -> null
+        }
+    }
+
+    /**
+     * OpenAI reasoning_effort → Gemini thinkingConfig（与 CLIProxyAPI 一致）。
+     */
     private fun applyThinkingConfig(source: JsonObject, request: JsonObject) {
         val effort = source.stringOrNull("reasoning_effort")?.trim()?.lowercase() ?: return
         if (effort.isEmpty()) return

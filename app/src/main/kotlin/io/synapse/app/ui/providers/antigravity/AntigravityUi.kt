@@ -4,7 +4,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material3.Button
@@ -71,12 +73,22 @@ object AntigravityUi : ProviderUi {
                     color = accent.copy(alpha = 0.10f),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        text = status.actionHint,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = accent,
-                        modifier = Modifier.padding(12.dp),
-                    )
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = status.actionHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = accent,
+                        )
+                        // 有配套链接时给一个一键入口：Custom Tabs 在应用内打开验证页，
+                        // 用户不用复制链接、不用切 App；返回后 MainActivity.onResume 会自动刷新额度。
+                        if (status.actionUrl.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            Button(
+                                onClick = { actions.onOpenVerification(id, status.uid, status.actionUrl) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("去验证（在应用内打开）") }
+                        }
+                    }
                 }
             }
             if (packs.isEmpty()) {

@@ -146,6 +146,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 用户可能刚从 Custom Tabs 的验证页返回：若有待验证账号，自动刷新一次额度。
+        // 放 onResume 而不是 onStart，是为了覆盖页面真正可见的时刻（刷新结果能直接看到）。
+        viewModel?.onAppForeground()
+    }
+
     override fun onDestroy() {
         runCatching { unregisterReceiver(gatewayToggledReceiver) }
         viewModel = null

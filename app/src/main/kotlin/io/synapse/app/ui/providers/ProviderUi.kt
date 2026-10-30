@@ -42,6 +42,13 @@ class ProviderUiActions(
     val onImport: (providerId: String, raw: String) -> Unit = { _, _ -> },
     /** 刷新额度；uid 为空表示刷新该供应商全部账号。 */
     val onRefreshCredits: (providerId: String, uid: String?) -> Unit = { _, _ -> },
+    /**
+     * 打开「需要用户动手」的验证页面（Custom Tabs，在应用内滑出）。
+     *
+     * 典型场景：Google 返回 403 VALIDATION_REQUIRED 并附 `validation_url`。
+     * 用户验证完关掉页面回到 App，会自动触发一次额度刷新——全程不用复制链接、不用切 App。
+     */
+    val onOpenVerification: (providerId: String, uid: String, url: String) -> Unit = { _, _, _ -> },
     /** 执行供应商专属动作（签到、兑换码等）。 */
     val onAction: (providerId: String, uid: String, action: String, payload: JsonObject) -> Unit = { _, _, _, _ -> },
     /** 调整账号使用优先级（↑/↓）：排在前面的先用，同级仍按余额。 */
