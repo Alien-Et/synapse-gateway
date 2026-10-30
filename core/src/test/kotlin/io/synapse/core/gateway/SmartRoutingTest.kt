@@ -401,4 +401,69 @@ class SmartRoutingTest {
         assertEquals("trae", candidates.single().providerId)
         assertEquals("cn", candidates.single().region, "区域约束应保留")
     }
+
+    /**
+     * 腾讯 / 字节的国内与国外**共用同一个 providerId**，中文标签不同但英文 id 相同。
+     *
+     * 这里锁住三件事，防止两边串号：
+     * ① 选号永远只在同区域里挑，哪怕另一个区域有更多余额；
+     * ② 本区域账号余额全为 0 时，降级轮仍只在**同区域**降级，不得跨区；
+     * ③ 标签指向的区域一个账号都没有时，路由直接作废（不静默走到"没有可用账号"）。
+     */
+    @Test
+    fun `国内与国外共用 providerId 时绝不跨区串号`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(RegionStubProvider("codebuddy", listOf("cn", "global")))
+        // 国内号：余额 0（会被 skipEmptyCredits 挡掉）；国外号：余额充足
+        engine.pool.upsert(ProviderAccount("codebuddy", "acct-1-cn", "国内号", "{}"))
+        engine.pool.upsert(ProviderAccount("codebuddy", "acct-2-global", "国外号", "{}"))
+        engine.pool.updateCredits("codebuddy", "acct-1-cn", 0L, known = true)
+        engine.pool.updateCredits("codebuddy", "acct-2-global", 100L, known = true)
+
+        // ① 腾讯国内：只能挑到国内号（即便它余额是 0、国外号有 100）
+        assertEquals(
+            "acct-1-cn",
+            engine.pickAccount("codebuddy", region = "cn")?.uid,
+            "腾讯国内只能选国内账号",
+        )
+        assertEquals(
+            "acct-2-global",
+            engine.pickAccount("codebuddy", region = "global")?.uid,
+            "腾讯国外只能选国外账号",
+        )
+        // ② 降级轮（skipEmptyCredits=true）也只在同区域降级
+        assertEquals(
+            "acct-1-cn",
+            engine.pickAccount("codebuddy", region = "cn", skipEmptyCredits = true)?.uid,
+            "余额全空时也只在本区域降级，绝不跨到国外号",
+        )
+
+        // ③ 只登录了国外号时，「腾讯国内/x」必须直接路由失败，而不是静默失败
+        val engine2 = GatewayEngine(InMemoryKeyValueStore())
+        engine2.registry.register(RegionStubProvider("codebuddy", listOf("cn", "global")))
+        engine2.pool.upsert(ProviderAccount("codebuddy", "acct-2-global", "国外号", "{}"))
+        assertEquals(null, engine2.resolveRoute("腾讯国内/glm-5.2"), "该区域没有账号时标签应作废")
+        assertEquals("global", engine2.resolveRoute("腾讯国外/glm-5.2")?.region, "有账号的区域照常路由")
+    }
+
+    /** 字节（trae）与腾讯结构相同，一并锁住。 */
+    @Test
+    fun `字节国内与字节国外同样不跨区`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.registry.register(RegionStubProvider("trae", listOf("cn", "global")))
+        engine.pool.upsert(ProviderAccount("trae", "t-1-cn", "字节国内号", "{}"))
+        engine.pool.upsert(ProviderAccount("trae", "t-2-global", "字节国外号", "{}"))
+        engine.pool.updateCredits("trae", "t-1-cn", 1L, known = true)
+        engine.pool.updateCredits("trae", "t-2-global", 999L, known = true)
+
+        assertEquals("字节国内", engine.routeLabel("trae", "cn"))
+        assertEquals("字节国外", engine.routeLabel("trae", "global"))
+        assertEquals("cn", engine.resolveRoute("字节国内/x")?.region)
+        assertEquals("global", engine.resolveRoute("字节国外/x")?.region)
+        assertEquals(
+            "t-1-cn",
+            engine.pickAccount("trae", region = "cn")?.uid,
+            "字节国内绝不能挑到国外号（即便国外号余额更高）",
+        )
+    }
 }

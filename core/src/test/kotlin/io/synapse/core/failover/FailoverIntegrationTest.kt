@@ -318,11 +318,11 @@ class FailoverIntegrationTest {
 
         val server = GatewayHttpServer(engine, "127.0.0.1", 0).apply { start(0, true) }
         try {
-            val (status, _) = post(server.listeningPort, "腾讯国内/m")
-            // 熔断只影响「这家暂时不接活」，不会改发别家 → 直接失败
-            assertTrue(status >= 500, "熔断中应直接失败，实际 $status")
-            assertEquals(0, p1Calls, "处于熔断状态的 p1 应直接被跳过，不发起任何物理网络调用")
-            assertEquals(0, p2Calls, "熔断不应导致改发 p2")
+            val (_, _) = post(server.listeningPort, "腾讯国内/m")
+            // 新语义：熔断期间只要同家还有账号，就先让它们顶上继续跑
+            // （这里 p1 的桩返回空回复，所以会被重试多次，但**它确实被调用了**）。
+            assertTrue(p1Calls > 0, "熔断期间同家的账号仍应被换上来继续尝试")
+            assertEquals(0, p2Calls, "熔断不应导致改发 p2（标签只绑定一家）")
         } finally {
             server.stop()
         }

@@ -145,6 +145,7 @@ object QuotaAlertNotifier {
             QuotaAlert.Level.PROVIDER_EXHAUSTED,
             QuotaAlert.Level.ALL_ACCOUNTS_DISABLED,
             QuotaAlert.Level.MODEL_UNAVAILABLE,
+            QuotaAlert.Level.PROVIDER_CIRCUIT_OPEN,
             -> longArrayOf(0, 300, 180, 300)
         }
         runCatching {
@@ -185,7 +186,13 @@ object QuotaAlertNotifier {
             QuotaAlert.Level.MODEL_UNAVAILABLE -> {
                 // 同家账号全都试过了，该模型被上游限制住。告诉用户「换哪个模型」。
                 title = "${alert.providerName} 的 ${alert.model} 暂不可用"
-                text = "已试过同供应商所有账号：${alert.reason}。换个模型或稍后重试"
+                text = "${alert.reason}。换个模型或稍后重试"
+                priority = NotificationCompat.PRIORITY_MAX
+            }
+            QuotaAlert.Level.PROVIDER_CIRCUIT_OPEN -> {
+                // 熔断隔离 + 同家无号可换。必须把「等多久」和「换供应商」两条路都说出来。
+                title = "${alert.providerName} 暂时熔断，已无账号可换"
+                text = "${alert.reason}。可等待恢复后重试，或改用其它供应商的模型"
                 priority = NotificationCompat.PRIORITY_MAX
             }
         }

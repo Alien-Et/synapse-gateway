@@ -63,4 +63,16 @@ class ProviderCircuitBreaker(
     }
 
     fun currentState(): BreakerState = state.get()
+
+    /**
+     * 熔断已打开时还剩多少毫秒恢复；未打开或半开时返回 0。
+     *
+     * 只用于给用户看「大概多久能恢复」，不参与状态机本身——
+     * 真正的开合仍由 [allowRequest] / [recordFailure] 决定。
+     */
+    fun remainingOpenMs(): Long {
+        if (state.get() != BreakerState.OPEN) return 0L
+        val elapsed = nowMillis() - lastStateChangeTime.get()
+        return (config().openDurationMs - elapsed).coerceAtLeast(0L)
+    }
 }
