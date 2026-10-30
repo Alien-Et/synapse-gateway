@@ -459,11 +459,46 @@ class GatewayEngine(
         // 值未变时短路：避免每次保存都重建所有 provider 内部客户端
         if (updated == settings) return
         val oldCapacity = settings.requestLogCapacity
+        // 绑定地址与端口只在 start() 那一刻读取，所以这两项变更必须重启服务才生效。
+        // 否则用户打开「同时监听局域网」后，界面显示已开启、也给出了局域网地址，
+        // 实际 socket 仍只绑在 127.0.0.1 上，别的设备根本连不进来。
+        val bindingChanged = updated.exposeLan != settings.exposeLan || updated.port != settings.port
+        val previous = settings
         settings = updated
         settingsRepository.save(updated)
         if (updated.requestLogCapacity != oldCapacity) requestLog.resize(updated.requestLogCapacity)
         reconfigureProviders()
+        if (bindingChanged) restartIfRunning(previous)
     }
+
+    /**
+     * 绑定参数（端口 / 是否监听局域网）变化后重启服务，让新配置真正生效。
+     *
+     * 只在服务确实运行时重启：没启动时什么都不做，避免用户改个端口就把网关拉起来。
+     * 重启失败（如新端口被占用）不吞错，向上抛给调用方提示用户。
+     */
+    private fun restartIfRunning(previous: GatewaySettings) {
+        synchronized(lifecycleLock) {
+            if (server == null) return
+            val created = GatewayHttpServer(this, bindHost(), settings.port)
+            try {
+                // 先在潜在的新端口上起新实例；成功后再停旧的，避免中间出现「两个都没起」的空窗
+                created.start(0, false)
+            } catch (e: Exception) {
+                // 新端口起不来（如被占用）：旧的还活着，配置回滚到实际生效的旧值，
+                // 避免界面显示端口 A、实际监听端口 B 这种长期不一致
+                settings = previous
+                settingsRepository.save(previous)
+                throw IllegalStateException("端口 ${previous.port} 不可用，已保持原配置：${e.message}", e)
+            }
+            server?.stop()
+            server = created
+            log("网关已重启，监听 ${created.listeningAddress()}")
+        }
+    }
+
+    /** 当前设置对应的绑定地址：null 表示监听全部网卡。 */
+    private fun bindHost(): String? = if (settings.exposeLan) null else "127.0.0.1"
 
     fun providerSettings(id: String): ProviderSettings =
         providerSettingsCache.getOrPut(id) { settingsRepository.loadProvider(id) }
@@ -494,8 +529,7 @@ class GatewayEngine(
     fun start() {
         synchronized(lifecycleLock) {
             if (server != null) return
-            val host = if (settings.exposeLan) null else "127.0.0.1"
-            val created = GatewayHttpServer(this, host, settings.port)
+            val created = GatewayHttpServer(this, bindHost(), settings.port)
             created.start(0, false)
             server = created
             log("网关已启动，监听 ${created.listeningAddress()}")
@@ -515,7 +549,15 @@ class GatewayEngine(
 
     fun localUrl(): String = "http://127.0.0.1:${settings.port}/v1"
 
-    fun lanUrls(): List<String> = lanAddressProvider.lanAddresses().map { "http://$it:${settings.port}/v1" }
+    /**
+     * 局域网接入地址。
+     *
+     * 只有真的监听全部网卡（exposeLan=true）时才给出地址：否则服务只绑 127.0.0.1，
+     * 把 192.168.x.x 这种地址显示出来只会误导用户 —— 复制到别的设备上必然连不通。
+     */
+    fun lanUrls(): List<String> =
+        if (!settings.exposeLan) emptyList()
+        else lanAddressProvider.lanAddresses().map { "http://$it:${settings.port}/v1" }
 
     fun status(): GatewayStatus = GatewayStatus(
         running = isRunning(),

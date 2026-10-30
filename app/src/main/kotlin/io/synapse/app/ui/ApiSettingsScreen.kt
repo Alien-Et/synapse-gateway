@@ -96,7 +96,7 @@ fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> 
                     viewModel.notice("端口需要在 1024~65535 之间")
                 } else {
                     viewModel.updateSettings(settings.copy(port = parsed, apiKey = apiKey.trim()))
-                    viewModel.notice("已保存；端口改动需重启服务生效")
+                    viewModel.notice("已保存")
                 }
             }
         }

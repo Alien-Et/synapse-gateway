@@ -763,8 +763,15 @@ class AppViewModel(
 
     fun updateSettings(updated: GatewaySettings) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { engine.updateSettings(updated) }
+            // 端口/局域网开关变更会让核心层重启服务，新端口被占用时会抛异常。
+            // 这里必须接住：既不能让协程炸掉整个 App，也要把原因告诉用户。
+            val error = withContext(Dispatchers.IO) {
+                runCatching { engine.updateSettings(updated) }.exceptionOrNull()
+            }
             refresh()
+            if (error != null) {
+                notice(error.message ?: "设置保存失败")
+            }
         }
     }
 
