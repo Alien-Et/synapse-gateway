@@ -5,6 +5,7 @@ import io.synapse.core.util.bool
 import io.synapse.core.util.long
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.str
+import io.synapse.core.util.NetworkErrorText
 
 /**
  * 模型目录：从 `GET /api/v1/models` 拉取（需要 session）。
@@ -73,11 +74,11 @@ class LoomyModelCatalog(
             }
         } catch (e: LoomyApiException) {
             fromFallback = true
-            lastError = e.message ?: "拉取模型列表失败"
+            lastError = NetworkErrorText.describe(e)
             cached ?: emptyList()
         } catch (e: Exception) {
             fromFallback = true
-            lastError = e.message ?: "拉取模型列表失败"
+            lastError = NetworkErrorText.describe(e)
             cached ?: emptyList()
         }
     }

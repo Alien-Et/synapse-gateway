@@ -22,6 +22,7 @@ import io.synapse.core.util.HttpSupport
 import io.synapse.core.util.arrayOrNull
 import io.synapse.core.util.bodySnippet
 import io.synapse.core.util.objOrNull
+import io.synapse.core.util.NetworkErrorText
 import java.net.HttpURLConnection
 
 /**
@@ -77,13 +78,13 @@ class CustomProvider(
         val conn = try {
             openConnection(chatUrl(config.baseUrl), key, openAiBody, "POST")
         } catch (e: Exception) {
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
             conn.disconnect()
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         if (status !in 200..299) {
             val body = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")

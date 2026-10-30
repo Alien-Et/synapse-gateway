@@ -27,6 +27,7 @@ import io.synapse.core.provider.queryParam
 import io.synapse.core.provider.requestedModelOf
 import io.synapse.core.store.KeyValueStore
 import io.synapse.core.util.newCompletionId
+import io.synapse.core.util.NetworkErrorText
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -203,7 +204,7 @@ class TraeProvider(
                 }
             }
         } catch (e: Exception) {
-            return FailedChatCall(200, e.message ?: "读取上游流失败")
+            return FailedChatCall(200, NetworkErrorText.describe(e))
         } finally {
             call.close()
         }
@@ -272,7 +273,7 @@ class TraeProvider(
     override fun classify(status: Int, body: String): UpstreamError {
         val kind = TraeErrors.fromStatus(status, body)
         val exception = TraeHttpException(status, kind, body, TraeErrors.extractCode(body))
-        return UpstreamError(kind.toErrorKind(), exception.message ?: "上游错误", exception.upstreamCode)
+        return UpstreamError(kind.toErrorKind(), NetworkErrorText.describe(exception), exception.upstreamCode)
     }
 
     // ------------------------------------------------------------------ 额度 / 动作
@@ -289,9 +290,9 @@ class TraeProvider(
                 CreditInfo(0, known = false, detail = reason)
             }
         } catch (e: TraeHttpException) {
-            CreditInfo(0, known = false, detail = e.message ?: "刷新额度失败")
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
         } catch (e: Exception) {
-            CreditInfo(0, known = false, detail = e.message ?: "刷新额度失败")
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
         }
     }
 
@@ -352,7 +353,7 @@ class TraeProvider(
         } catch (e: TraeHttpException) {
             ProviderActionResult.failure(traeErrorMessage(e))
         } catch (e: Exception) {
-            ProviderActionResult.failure(e.message ?: "签到失败")
+            ProviderActionResult.failure(NetworkErrorText.describe(e))
         }
     }
 
@@ -518,7 +519,8 @@ internal fun ensureDeviceIds(account: TraeAccount): TraeAccount {
 internal fun traeErrorMessage(e: TraeHttpException): String = when (e.upstreamCode) {
     9074L -> "签到被拒：设备指纹未通过校验，去账号详情点「重新生成」后重试"
     4001L -> "模型或客户端版本不被上游接受（可在供应商设置里上调版本号）"
-    else -> e.message ?: "上游错误"
+    // 上游业务错误：优先给可读文案；拿不到再退回网络异常翻译（含超时/连不上等）。
+    else -> e.message?.takeIf { it.isNotBlank() } ?: NetworkErrorText.describe(e)
 }
 
 internal fun TraeErrorKind.toErrorKind(): ErrorKind = when (this) {

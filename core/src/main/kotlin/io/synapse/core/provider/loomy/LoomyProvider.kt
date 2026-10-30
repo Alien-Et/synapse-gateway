@@ -26,6 +26,7 @@ import io.synapse.core.provider.SmsLoginSupport
 import io.synapse.core.provider.StreamFailureChatCall
 import io.synapse.core.provider.StreamingChatCall
 import io.synapse.core.provider.UpstreamError
+import io.synapse.core.util.NetworkErrorText
 
 /**
  * Loomy（讯飞）免费积分通道。
@@ -154,7 +155,7 @@ class LoomyProvider(
     override fun classify(status: Int, body: String): UpstreamError {
         val kind = LoomyErrors.fromStatus(status, body)
         val exception = LoomyApiException(status, kind, body, LoomyErrors.extractCode(body))
-        return UpstreamError(kind.toErrorKind(), exception.message ?: "上游错误")
+        return UpstreamError(kind.toErrorKind(), NetworkErrorText.describe(exception))
     }
 
     // ------------------------------------------------------------------ 额度 / 动作
@@ -185,9 +186,9 @@ class LoomyProvider(
                 },
             )
         } catch (e: LoomyApiException) {
-            CreditInfo(0, known = false, detail = e.message ?: "刷新积分失败")
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
         } catch (e: Exception) {
-            CreditInfo(0, known = false, detail = e.message ?: "刷新积分失败")
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
         }
     }
 
@@ -249,7 +250,7 @@ class LoomyProvider(
                 },
             )
         } catch (e: Exception) {
-            ProviderTaskListView(emptyList(), error = e.message ?: "拉取任务列表失败")
+            ProviderTaskListView(emptyList(), error = NetworkErrorText.describe(e))
         }
     }
 
@@ -301,7 +302,7 @@ class LoomyProvider(
                             .onSuccess { result ->
                                 done.add("${task.title}（${if (result.alreadyCompleted) "此前已完成" else "已完成"}）")
                             }
-                            .onFailure { e -> failed.add("${task.title}（${e.message ?: "失败"}）") }
+                            .onFailure { e -> failed.add("${task.title}（${NetworkErrorText.describe(e)}）") }
                     }
                     val message = buildString {
                         if (done.isNotEmpty()) append(done.joinToString("；"))
@@ -316,9 +317,9 @@ class LoomyProvider(
                 else -> ProviderActionResult.unsupported(action)
             }
         } catch (e: LoomyApiException) {
-            ProviderActionResult.failure(e.message ?: "操作失败")
+            ProviderActionResult.failure(NetworkErrorText.describe(e))
         } catch (e: Exception) {
-            ProviderActionResult.failure(e.message ?: "操作失败")
+            ProviderActionResult.failure(NetworkErrorText.describe(e))
         }
     }
 

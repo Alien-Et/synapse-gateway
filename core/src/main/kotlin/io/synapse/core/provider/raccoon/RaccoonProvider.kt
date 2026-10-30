@@ -44,6 +44,7 @@ import io.synapse.core.util.newCompletionId
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.randomHex
 import io.synapse.core.util.stringOrNull
+import io.synapse.core.util.NetworkErrorText
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -89,7 +90,7 @@ class RaccoonProvider(
             }
         } catch (e: Exception) {
             hooks.onLog("小浣熊拉取模型目录失败：${e.message ?: "未知错误"}")
-            ProviderModelCatalogView(emptyList(), fromFallback = false, error = e.message ?: "拉取模型失败")
+            ProviderModelCatalogView(emptyList(), fromFallback = false, error = NetworkErrorText.describe(e))
         }
     }
 
@@ -112,13 +113,13 @@ class RaccoonProvider(
         val conn = try {
             openChatConnection(credential, body)
         } catch (e: Exception) {
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
             conn.disconnect()
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         // 优先用 v2（桌面客户端通道，与能用的反代实现一致）；v1 只在 v2 不存在时回退。
         if (status == 404) {
@@ -126,13 +127,13 @@ class RaccoonProvider(
             val fallback = try {
                 open("$host$PATH_CHAT_V1", body, chatHeaders(credential))
             } catch (e: Exception) {
-                return FailedChatCall(0, e.message ?: "连接失败")
+                return FailedChatCall(0, NetworkErrorText.describe(e))
             }
             val v1Status = try {
                 fallback.responseCode
             } catch (e: Exception) {
                 fallback.disconnect()
-                return FailedChatCall(0, e.message ?: "连接失败")
+                return FailedChatCall(0, NetworkErrorText.describe(e))
             }
             return finishChat(fallback, v1Status, streaming, model)
         }
@@ -268,7 +269,7 @@ class RaccoonProvider(
                 ?: return CreditInfo(0, known = false, detail = "响应里没有积分字段（键：${data.keySet().joinToString(",")}）")
             CreditInfo(points, known = true, detail = "可用积分 $points")
         } catch (e: Exception) {
-            CreditInfo(0, known = false, detail = e.message ?: "查询积分失败")
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
         }
     }
 
@@ -439,7 +440,7 @@ class RaccoonProvider(
                 else -> ProviderActionResult.failure("今日未发放新积分（小浣熊每日积分由服务端自动发放，无需点击签到）")
             }
         } catch (e: Exception) {
-            ProviderActionResult.failure(e.message ?: "签到失败")
+            ProviderActionResult.failure(NetworkErrorText.describe(e))
         }
     }
 

@@ -30,6 +30,7 @@ import io.synapse.core.util.longOrNull
 import io.synapse.core.util.newCompletionId
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.stringOrNull
+import io.synapse.core.util.NetworkErrorText
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -79,7 +80,7 @@ class AntigravityProvider(
             val fetched = try {
                 fetchAvailableModels(parsed)
             } catch (e: Exception) {
-                lastErr = e.message ?: "拉取失败"
+                lastErr = NetworkErrorText.describe(e)
                 null
             }
             if (!fetched.isNullOrEmpty()) {
@@ -129,7 +130,7 @@ class AntigravityProvider(
             val (status, text) = try {
                 postJson(url, credential.accessToken, payload, connectTimeout = 8_000, readTimeout = 12_000)
             } catch (e: Exception) {
-                lastBody = e.message ?: "连接失败"
+                lastBody = NetworkErrorText.describe(e)
                 continue
             }
             lastStatus = status
@@ -260,13 +261,13 @@ class AntigravityProvider(
         val conn = try {
             open("$quotaBase/$API_VERSION:streamGenerateContent?alt=sse", credential.accessToken, body)
         } catch (e: Exception) {
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
             conn.disconnect()
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         if (status !in 200..299) {
             val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")

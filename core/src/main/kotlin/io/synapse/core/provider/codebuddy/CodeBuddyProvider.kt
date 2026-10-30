@@ -40,6 +40,7 @@ import io.synapse.core.util.firstString
 import io.synapse.core.util.jwtClaim
 import io.synapse.core.util.jwtClaimLong
 import io.synapse.core.util.longOrNull
+import io.synapse.core.util.NetworkErrorText
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.str
 import java.net.HttpURLConnection
@@ -87,7 +88,7 @@ class CodeBuddyProvider(
                 ProviderModelCatalogView(models, fromFallback = false, error = "")
             }
         } catch (e: Exception) {
-            ProviderModelCatalogView(emptyList(), fromFallback = false, error = e.message ?: "拉取模型失败")
+            ProviderModelCatalogView(emptyList(), fromFallback = false, error = NetworkErrorText.describe(e))
         }
     }
 
@@ -134,13 +135,13 @@ class CodeBuddyProvider(
         val conn = try {
             open("${chatBase(credential)}$PATH_CHAT", credential, prepared, chatHeaders(credential, prepared))
         } catch (e: Exception) {
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         val status = try {
             conn.responseCode
         } catch (e: Exception) {
             conn.disconnect()
-            return FailedChatCall(0, e.message ?: "连接失败")
+            return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         if (status !in 200..299) {
             val errorBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
@@ -240,7 +241,7 @@ class CodeBuddyProvider(
             if (!fieldSeen) return CreditInfo(0, known = false, detail = "响应里没有可识别的额度字段")
             CreditInfo(remain, known = true, detail = "周期剩余 $remain")
         } catch (e: Exception) {
-            CreditInfo(0, known = false, detail = e.message ?: "查询额度失败")
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
         }
     }
 
@@ -716,7 +717,7 @@ class CodeBuddyProvider(
             }
             parseGrowthTasks(body)
         } catch (e: Exception) {
-            ProviderTaskListView(emptyList(), error = e.message ?: "拉取任务列表失败")
+            ProviderTaskListView(emptyList(), error = NetworkErrorText.describe(e))
         }
     }
 
@@ -762,27 +763,23 @@ class CodeBuddyProvider(
     private fun checkin(account: ProviderAccount): ProviderActionResult {
         val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
         return try {
-            val (status, text) = postJson(
-                "${billingBase(credential)}$PATH_CHECKIN",
-                credential,
-                "{}",
-                billingHeaders(credential),
-            )
+            val url = "${billingBase(credential)}$PATH_CHECKIN"
+            val (status, text) = postJson(url, credential, "{}", billingHeaders(credential))
+            val message = extractMessage(text)
+            // 「今天已签到」不是失败：上游用 HTTP 400 + 一句中文表达，
+            // 如果按失败处理，用户看到的是一条红字报错，其实今天完全没事。
+            if (message.contains("已签到") || message.contains("already")) {
+                return ProviderActionResult.success("今日已签到")
+            }
             if (status !in 200..299) {
-                return ProviderActionResult.failure(
-                    failure("签到", endpoint(credential), "${billingBase(credential)}$PATH_CHECKIN", status, text),
-                )
+                hooks.onLog("签到失败（HTTP $status）：$url" + describeBody(text))
+                return ProviderActionResult.failure(failure("签到", endpoint(credential), url, status, text))
             }
             val code = runCatching { JsonParser.parseString(text).asJsonObject.get("code")?.asLong }.getOrNull() ?: -1L
             if (code == 0L) return ProviderActionResult.success("签到成功")
-            val message = extractMessage(text)
-            if (message.contains("已签到") || message.contains("already")) {
-                ProviderActionResult.success("今日已签到")
-            } else {
-                ProviderActionResult.failure(message.ifEmpty { "签到失败（code=$code）" })
-            }
+            ProviderActionResult.failure(message.ifEmpty { "签到没有成功，请稍后再试" })
         } catch (e: Exception) {
-            ProviderActionResult.failure(e.message ?: "签到失败")
+            ProviderActionResult.failure(NetworkErrorText.describe(e))
         }
     }
 
@@ -829,7 +826,10 @@ class CodeBuddyProvider(
                     null,
                     refreshHeaders(credential),
                 )
-                if (status !in 200..299) return refreshFailed(uid, nowSeconds, "HTTP $status" + describeBody(text))
+                if (status !in 200..299) {
+                    hooks.onLog("刷新凭证失败（HTTP $status）" + describeBody(text))
+                    return refreshFailed(uid, nowSeconds, httpStatusHint(status))
+                }
                 val data = refreshEnvelopeData(text)
                     ?: return refreshFailed(uid, nowSeconds, "响应不是预期信封" + describeBody(text))
                 // 走 credentialOf 而不是逐字段 get("accessToken")：上游两个站点用过 camelCase 与
@@ -974,7 +974,7 @@ class CodeBuddyProvider(
         val (status, text) = try {
             getJson("$base$PATH_AUTH_TOKEN?state=$encoded", authHeaders(base, withBody = false))
         } catch (e: Exception) {
-            return DeviceAuthPoll.Failed(e.message ?: "轮询失败")
+            return DeviceAuthPoll.Failed(NetworkErrorText.describe(e))
         }
         if (status !in 200..299) return DeviceAuthPoll.Failed("轮询失败（HTTP $status）：${text.take(160)}")
         val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull()
@@ -1219,8 +1219,36 @@ class CodeBuddyProvider(
      *
      * 只报状态码无法定位（同一个 500 可能来自完全不同的原因），所以原文一律带出来。
      */
-    private fun failure(prefix: String, endpoint: Endpoint, url: String, status: Int, body: String): String =
-        "$prefix（${endpoint.label} $url）HTTP $status" + describeBody(body).ifEmpty { "（响应体为空）" }
+    /**
+     * 拼一条**给用户看**的失败说明。
+     *
+     * 以前会把 `（国内 https://www.codebuddy.cn/v2/billing/meter/daily-checkin）HTTP 400`
+     * 整串显示在弹窗里：那条 URL 对用户完全没意义，还把真正的关键信息（「今天已签到」）
+     * 挤到第二屏。
+     *
+     * 现在只保留三样东西：**动作** + **中文原因** + **可执行的下一步**。
+     * 完整 URL 与状态码降级到 `hooks.onLog`（排查用），界面不再展示。
+     */
+    private fun failure(prefix: String, endpoint: Endpoint, url: String, status: Int, body: String): String {
+        val detail = describeBody(body).removePrefix("：")
+        val region = endpoint.label
+        // 已经有可读原因：直接给「签到：今天已签到，请明天再来」
+        if (detail.isNotEmpty()) return "$prefix：$detail"
+        // 没有可读原因：按状态码给一句能指导行动的话
+        return "$prefix：" + httpStatusHint(status, region)
+    }
+
+    /** 状态码 → 一句能指导用户行动的中文（不再把 `HTTP 5xx` 原样甩给用户）。 */
+    private fun httpStatusHint(status: Int, region: String = ""): String {
+        val where = if (region.isEmpty()) "" else "（$region）"
+        return when (status) {
+            401, 403 -> "账号凭证已失效，请重新登录"
+            404 -> "该接口不存在$where，可能上游已调整"
+            429 -> "请求太频繁，请稍后再试"
+            in 500..599 -> "上游服务异常，请稍后再试"
+            else -> "上游返回了异常状态$where"
+        }
+    }
 
     private fun userResourceBody(): String {
         val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
