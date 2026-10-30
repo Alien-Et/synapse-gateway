@@ -5,6 +5,18 @@ import java.util.Locale
 /** 千分位计数（如 1,234,567）。 */
 fun formatCount(value: Long): String = String.format(Locale.US, "%,d", value)
 
+/**
+ * 余额/积分缩写：12500 → 12.5K、3800000 → 3.8M。
+ *
+ * 拓扑里的账号节点只有一行高，四位以上数字会把名字挤没，所以过万就缩写；
+ * 一万以内给原值——那个量级用户是要精确看的。
+ */
+fun formatCredits(value: Long): String = when {
+    value >= 1_000_000L -> String.format(Locale.US, "%.1fM", value / 1_000_000.0)
+    value >= 10_000L -> String.format(Locale.US, "%.1fK", value / 1_000.0)
+    else -> value.toString()
+}
+
 /** 人类友好缩写：3.82M / 276.6K。 */
 fun formatTokens(tokens: Long): String = when {
     tokens >= 1_000_000_000L -> String.format(Locale.US, "%.2fB", tokens / 1_000_000_000.0)
