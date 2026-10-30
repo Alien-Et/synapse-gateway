@@ -342,6 +342,68 @@ class AntigravityProviderTest {
     }
 
     @Test
+    fun `许可证类 403 会自动调 onboardUser 开通并重试配额`() {
+        // 官方客户端登录后会走 onboardUser 开通许可，我们之前漏了这步，
+        // 所以「没有有效许可证」的账号会一直卡在 403。
+        val licenseBody = """
+            {"error":{"code":403,"status":"PERMISSION_DENIED",
+              "message":"You do not have a valid license of this product. Please contact your administrator to request a license."}}
+        """.trimIndent()
+        // 开通之后才给额度：用「是否已开通」而不是调用计数判断，
+        // 因为 loadQuotaSummary 会对端点链 + 多种请求体发多次请求。
+        var onboarded = false
+        withUpstream({ path, _, _ ->
+            when {
+                path.contains("onboardUser") -> {
+                    onboarded = true
+                    200 to """{"done":true}"""
+                }
+                path.contains("retrieveUserQuotaSummary") ->
+                    if (!onboarded) 403 to licenseBody
+                    else 200 to quotaBody(quotaGroup("Gemini Models", "weekly_limit", "0.7"))
+                else -> 403 to licenseBody
+            }
+        }) { base, received ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertTrue(
+                received.paths.any { it.contains("onboardUser") },
+                "必须尝试开通许可：${received.paths}",
+            )
+            assertTrue(info.known, "开通后应拿到额度：${info.detail}")
+            assertEquals(70L, info.balance)
+        }
+    }
+
+    @Test
+    fun `开通也失败时给一句人话，并把官方申请许可链接做成按钮`() {
+        val licenseBody = """
+            {"error":{"code":403,"status":"PERMISSION_DENIED",
+              "message":"You do not have a valid license of this product.",
+              "details":[{"@type":"type.googleapis.com/google.rpc.Help",
+                "links":[{"description":"Learn more",
+                          "url":"https://cloud.google.com/gemini/docs/codeassist/request-license"}]}]}}
+        """.trimIndent()
+        withUpstream({ _, _, _ -> 403 to licenseBody }) { base, _ ->
+            val info = AntigravityProvider(apiBase = base, quotaBase = base).creditInfo(account())!!
+            assertFalse(info.known)
+            assertTrue(
+                info.actionHint.contains("没有开通") || info.actionHint.contains("许可"),
+                "应给出可理解的原因说明：${info.actionHint}",
+            )
+            assertFalse(
+                info.detail.contains("You do not have a valid license"),
+                "detail 不该塞上游英文原文：${info.detail}",
+            )
+            // 上游给了官方申请许可页，就做成可点按钮给用户
+            assertEquals(
+                "https://cloud.google.com/gemini/docs/codeassist/request-license",
+                info.actionUrl,
+                "应把官方申请许可链接交给界面渲染成按钮",
+            )
+        }
+    }
+
+    @Test
     fun `没有 validation_url 时退回通用验证指引`() {
         val body = """{"error":{"code":403,"details":[{"reason":"VALIDATION_REQUIRED"}]}}"""
         withUpstream(both(403, body)) { base, _ ->

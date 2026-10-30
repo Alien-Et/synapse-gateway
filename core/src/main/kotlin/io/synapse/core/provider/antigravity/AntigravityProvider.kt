@@ -347,6 +347,10 @@ class AntigravityProvider(
                         actionUrl = validationUrl,
                     )
                 }
+                // 许可证类 403：不是验证问题，直接交给额度端点处理（那边会自动 tryOnboardUser）
+                if (paidStatus == 403 && isLicenseError(paidBody)) {
+                    return quotaCreditInfo(credential, "订阅未知")
+                }
                 return quotaCreditInfo(
                     credential,
                     "订阅未知",
@@ -695,6 +699,82 @@ class AntigravityProvider(
     }
 
     /**
+     * 尝试为账号开通 Code Assist 许可（`onboardUser`）。
+     *
+     * 上游有两类 403 容易混：
+     * - `VALIDATION_REQUIRED`（要人机验证）——用户去验证即可；
+     * - `LICENSE_REQUIRED` / message 为 "You do not have a valid license of this product"
+     *   ——账号还没被开通这个产品的许可。官方客户端在首次登录后会自动走一遍
+     *   `loadCodeAssist` → `onboardUser` 完成开通，我们只做了前者，所以这类账号会一直
+     *   卡在 403 上。这里补上开通步骤。
+     *
+     * 用官方客户端同样的免费层级（free-tier）开通；已开通的账号调它是幂等的。
+     * 真正能否使用仍由上游决定（账号被管理员限制时开通也会失败），所以只做 best-effort，
+     * 失败不抛异常，交回调用方按原错误展示。
+     */
+    private fun tryOnboardUser(accessToken: String, projectId: String): Boolean {
+        val payload = JsonObject().apply {
+            addProperty("tierId", "free-tier")
+            add("metadata", JsonObject().apply { addProperty("ideType", "ANTIGRAVITY") })
+            if (projectId.isNotEmpty()) addProperty("cloudaicompanionProject", projectId)
+        }.toString()
+        val (status, body) = try {
+            postJson("$quotaBase/$API_VERSION:onboardUser", accessToken, payload, userAgent = userAgent())
+        } catch (e: Exception) {
+            hooks.onLog("Antigravity 开通许可请求异常：${e.message}")
+            return false
+        }
+        hooks.onLog("Antigravity onboardUser → HTTP $status：${body.take(300)}")
+        // 开通是长操作：上游可能先回 200 + done=false（后台排队），这里只认明确成功
+        if (status !in 200..299) return false
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return false
+        return obj.get("done")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true
+    }
+
+    /**
+     * 从 `google.rpc.Help.links[]` 里取第一条链接。
+     *
+     * 上游对不同的失败会给不同的「了解更多」地址：
+     * - 验证类：`accounts.google.com/v3/signin/continue?...`（验证页）
+     * - 许可类：`cloud.google.com/gemini/docs/codeassist/request-license`（申请许可说明）
+     *
+     * 直接用它比我们自己写死文案更准，上游改地址也不用跟。
+     */
+    private fun upstreamHelpUrl(body: String): String {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return ""
+        val details = obj.objOrNull("error")?.arrayOrNull("details") ?: return ""
+        for (element in details) {
+            val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+            val links = item.arrayOrNull("links") ?: continue
+            for (link in links) {
+                val url = link.asObjectOrNull()?.stringOrNull("url").orEmpty()
+                if (url.startsWith("https://")) return url
+            }
+        }
+        return ""
+    }
+
+    /**
+     * 判断 403 是否属于「账号没有该产品的许可」。
+     *
+     * 与 `VALIDATION_REQUIRED`（要人机验证）区别对待：这条是**账号开通状态**问题，
+     * 网关可以自己调 onboardUser 解决，不需要用户去 Google 官网做任何事。
+     * 上游的原文是 "You do not have a valid license of this product"。
+     *
+     * ⚠️ 必须**先排除 VALIDATION_REQUIRED**：验证类错误的 message 里也可能出现
+     * "license" 字样（"believe you are receiving this message as an error..."），
+     * 判定顺序反了会把「要人机验证」误当成「要开通许可」，用户永远等不到验证入口。
+     */
+    private fun isLicenseError(body: String): Boolean {
+        val reason = upstreamErrorReason(body).uppercase()
+        if (reason == "VALIDATION_REQUIRED") return false
+        if (reason.contains("LICENSE")) return true
+        val message = upstreamErrorMessage(body)
+        return message.contains("valid license", ignoreCase = true) ||
+            message.contains("license of this product", ignoreCase = true)
+    }
+
+    /**
      * 从上游错误响应里取 `error.details[].reason`。
      *
      * Google 的 403 会把具体原因放在 `details[]` 的 `google.rpc.ErrorInfo` 里：
@@ -705,6 +785,9 @@ class AntigravityProvider(
      *               "domain":"cloudcode-pa.googleapis.com"}]}}
      * ```
      * 解析不出来返回空串（按未知 403 处理）。
+     *
+     * 需要用户动手的是 `VALIDATION_REQUIRED`（人机验证）；
+     * `LICENSE_REQUIRED` 一类是账号没开通产品许可，网关可自行调 onboardUser 处理。
      */
     /**
      * 组装「需要验证账号」的提示文案。
@@ -1009,11 +1092,26 @@ class AntigravityProvider(
 
     /** 无积分可显示时，账号卡片余额取最紧窗口的剩余百分比，detail 标注订阅层级。 */
     private fun quotaCreditInfo(credential: Credential, tierLabel: String, prefix: String = ""): CreditInfo {
-        val (status, body) = try {
+        var (status, body) = try {
             loadQuotaSummary(credential.accessToken, credential.projectId)
         } catch (e: Exception) {
             hooks.onLog("Antigravity 配额查询异常：${e.message}")
             return CreditInfo(0, known = false, detail = "${prefix}查询配额失败：${e.message}")
+        }
+        // 许可证类 403：账号还没开通 Code Assist 许可。官方客户端登录后会自动走
+        // onboardUser，我们之前只做了 loadCodeAssist，所以这类账号会一直卡住。
+        // 这里补上开通并重试一次——成功就完全不用用户动手。
+        if (status == 403 && isLicenseError(body)) {
+            if (tryOnboardUser(credential.accessToken, credential.projectId)) {
+                runCatching { loadQuotaSummary(credential.accessToken, credential.projectId) }
+                    .getOrNull()
+                    ?.let { retried ->
+                        if (retried.first in 200..299) {
+                            status = retried.first
+                            body = retried.second
+                        }
+                    }
+            }
         }
         hooks.onLog("Antigravity retrieveUserQuotaSummary → HTTP $status：${body.take(1200)}")
         if (status == 401) {
@@ -1037,6 +1135,18 @@ class AntigravityProvider(
                 )
             }
             val hint = if (status == 403) "（非登录失效，是上游对客户端/账号的授权校验）" else ""
+            // 许可证类 403 说不清「怎么办」，直接给一句人话，别把英文 JSON 丢给用户
+            if (status == 403 && isLicenseError(body)) {
+                val helpUrl = upstreamHelpUrl(body)
+                return CreditInfo(
+                    0,
+                    known = false,
+                    detail = "$prefix$tierLabel · 这个 Google 账号还没有开通 Gemini Code Assist 许可",
+                    actionHint = LICENSE_REQUIRED_HINT,
+                    // 上游给了官方申请许可的说明页就用它（Custom Tabs 一键打开）
+                    actionUrl = helpUrl,
+                )
+            }
             return CreditInfo(
                 0,
                 known = false,
@@ -1271,6 +1381,20 @@ class AntigravityProvider(
                 "2. 按页面提示完成验证（可能需要手机号或辅助邮箱）\n" +
                 "3. 验证通过后回到这里点「刷新额度」\n" +
                 "账号密码没问题，不需要在网关里重新登录。"
+
+        /**
+         * 账号没有产品许可时的指引。
+         *
+         * 这条**不需要用户跑 Google 官网做验证**——网关会自动尝试 onboardUser 开通。
+         * 只有自动开通也失败（账号确实被管理员限制、或该账号本身没有资格）时才展示，
+         * 所以文案要说清「这件事多半不是你能在浏览器里点两下解决的」。
+         */
+        const val LICENSE_REQUIRED_HINT =
+            "这个账号还没有开通 Gemini Code Assist 许可，网关已自动尝试开通但没成功。\n" +
+                "常见原因：\n" +
+                "1. 用的是 Workspace/学校账号，管理员没有为它开启 Gemini 权限\n" +
+                "2. 该地区或该账号暂时没有免费额度\n" +
+                "点下面的按钮可以查看官方申请许可的说明；或换一个个人 Google 账号后再回来刷新额度。"
 
         const val CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
         // 这是 Google 为「已安装应用」（installed-app）OAuth 客户端下发的公开 client_secret：
