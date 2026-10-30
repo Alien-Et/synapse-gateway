@@ -1,6 +1,7 @@
 package io.synapse.app.ui
 
 import android.widget.Toast
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.unit.dp
@@ -70,21 +71,37 @@ fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> 
 
         SectionCard(enterIndex = 2) {
             SectionLabel("API Key")
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = { apiKey = it },
-                label = { Text("网关鉴权 Key（留空表示不校验）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("无 Key 调用", modifier = Modifier.weight(1f))
+                Column(Modifier.weight(1f)) {
+                    Text("无 Key 调用")
+                    Text(
+                        if (settings.allowNoKey) "客户端不必填 Key，任何设备都能直接调用" else "客户端必须带上下面的 Key",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Switch(
                     checked = settings.allowNoKey,
                     onCheckedChange = { viewModel.updateSettings(settings.copy(allowNoKey = it)) },
+                )
+            }
+            // 允许无 Key 调用时，Key 填了也不会被校验 —— 与其留一个误导人的输入框，
+            // 不如直接藏起来；关掉开关再显示。
+            if (!settings.allowNoKey) {
+                OutlinedTextField(
+                    value = apiKey,
+                    onValueChange = { apiKey = it },
+                    label = { Text("网关鉴权 Key") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "留空则任何 Key 都能通过校验，建议填写一个",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

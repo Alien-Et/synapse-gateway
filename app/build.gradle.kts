@@ -36,8 +36,8 @@ android {
         applicationId = "io.synapse.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 300
-        versionName = "3.0.0"
+        versionCode = 302
+        versionName = "3.0.2"
     }
 
     buildFeatures {
@@ -60,7 +60,7 @@ android {
         // 因此本地 debug / 本地 release / CI release 三种包签名完全一致，可互相覆盖升级。
         if (hasReleaseKeystore) {
             create("unified") {
-                storeFile = file(keystoreValue("storeFile"))
+                storeFile = rootProject.file(keystoreValue("storeFile"))
                 storePassword = keystoreValue("storePassword")
                 keyAlias = keystoreValue("keyAlias")
                 keyPassword = keystoreValue("keyPassword")

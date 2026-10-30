@@ -59,6 +59,26 @@ class LanExposureTest {
     }
 
     @Test
+    fun `端口不变只切局域网开关也能重启成功`() {
+        // 这是最容易翻车的场景：新旧实例抢同一个端口。
+        // 曾经用「先起新再停旧」，结果新实例必然 EADDRINUSE，开关根本切不动。
+        val port = freePort()
+        engine.updateSettings(engine.settings().copy(exposeLan = false, port = port))
+        engine.start()
+        assertTrue(canConnect(port), "初始应监听 $port")
+
+        engine.updateSettings(engine.settings().copy(exposeLan = true))
+        assertTrue(engine.isRunning(), "切到局域网后服务应仍在运行")
+        assertTrue(engine.settings().exposeLan)
+        assertTrue(canConnect(port), "同一端口上应仍可访问")
+
+        engine.updateSettings(engine.settings().copy(exposeLan = false))
+        assertTrue(engine.isRunning(), "切回仅本机后服务应仍在运行")
+        assertTrue(!engine.settings().exposeLan)
+        assertTrue(canConnect(port), "同一端口上应仍可访问")
+    }
+
+    @Test
     fun `服务未启动时改设置不会把网关拉起来`() {
         engine.updateSettings(engine.settings().copy(exposeLan = true, port = freePort()))
         assertTrue(!engine.isRunning(), "只是改个开关，不应该顺带启动服务")

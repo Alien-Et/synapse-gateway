@@ -480,18 +480,35 @@ class GatewayEngine(
     private fun restartIfRunning(previous: GatewaySettings) {
         synchronized(lifecycleLock) {
             if (server == null) return
+
+            // 端口没变（只切了「监听局域网」）时，新实例要绑的正是旧实例占着的那个端口，
+            // 「先起新再停旧」在这里必然 EADDRINUSE —— 所以只能先停后起。
+            // 端口变了则反过来：先在新端口起好，再停旧的，避免中间一段谁都连不上。
+            val samePort = previous.port == settings.port
+            if (samePort) {
+                server?.stop()
+                server = null
+            }
+
             val created = GatewayHttpServer(this, bindHost(), settings.port)
             try {
-                // 先在潜在的新端口上起新实例；成功后再停旧的，避免中间出现「两个都没起」的空窗
                 created.start(0, false)
             } catch (e: Exception) {
-                // 新端口起不来（如被占用）：旧的还活着，配置回滚到实际生效的旧值，
-                // 避免界面显示端口 A、实际监听端口 B 这种长期不一致
+                // 起不来：配置回滚到实际生效的旧值，避免界面显示 A、实际监听 B。
                 settings = previous
                 settingsRepository.save(previous)
+                if (samePort) {
+                    // 旧实例已经被停掉了，尽力把它按旧设置拉回来，别让网关就此消失
+                    runCatching {
+                        val restored = GatewayHttpServer(this, bindHost(), previous.port)
+                        restored.start(0, false)
+                        server = restored
+                    }
+                }
                 throw IllegalStateException("端口 ${previous.port} 不可用，已保持原配置：${e.message}", e)
             }
-            server?.stop()
+
+            if (!samePort) server?.stop()
             server = created
             log("网关已重启，监听 ${created.listeningAddress()}")
         }
