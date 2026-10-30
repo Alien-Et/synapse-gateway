@@ -28,16 +28,16 @@ fun keystoreValue(key: String): String =
         ?: error("缺少签名配置 $key：请检查根目录 keystore.properties")
 
 android {
-    namespace = "dev.aigw.app"
+    namespace = "io.synapse.app"
     compileSdk = 36
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
-        applicationId = "dev.aigw.app"
+        applicationId = "io.synapse.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 202
-        versionName = "2.23.2"
+        versionCode = 203
+        versionName = "2.23.3"
     }
 
     buildFeatures {

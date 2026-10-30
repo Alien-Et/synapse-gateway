@@ -1,4 +1,4 @@
-# AI 聚合网关
+# 智能中枢
 
 > **原作者**：[xibai6668](https://github.com/xibai6668) · 原仓库：[Android-AI-gateway](https://github.com/xibai6668/Android-AI-gateway)
 >
@@ -13,6 +13,9 @@
 ![TargetSdk](https://img.shields.io/badge/targetSdk-36-blue)
 
 Android 上运行的本地 AI 模型聚合网关：把多家私有 AI 服务账号统一翻译成 OpenAI 兼容接口，暴露在 `http://127.0.0.1:8790/v1`。
+
+> **包名变更**：从 2.23.3 起应用包名由 `dev.aigw.app` 改为 `io.synapse.app`（显示名「智能中枢」）。
+> 两者在系统中视为不同应用，**旧版的配置与账号不会自动迁移**，需重新导入。
 
 任何支持 OpenAI 协议的客户端（Cline、Cherry Studio、Continue、curl 脚本……）都能直接接上手机里的所有账号额度。
 
@@ -262,7 +265,7 @@ usage/...                         # 用量统计
 
 ### 本地构建
 
-本地构建产出 debug 包，包名与 release 一致（`dev.aigw.app`），可原地覆盖升级、配置不丢：
+本地构建产出 debug 包，包名与 release 一致（`io.synapse.app`），可原地覆盖升级、配置不丢：
 
 ```sh
 ./gradlew :app:assembleDebug --console=plain   # 出 debug 包
@@ -270,7 +273,7 @@ usage/...                         # 用量统计
 ./gradlew :cli:installDist --console=plain     # 命令行工具，产出 cli/build/install/aigw/bin/aigw
 ```
 
-- 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `dev.aigw.app`，与 release 相同）。
+- 产物：`app/build/outputs/apk/debug/app-debug.apk`（包名 `io.synapse.app`，与 release 相同）。
 - 版本号硬编码在 `app/build.gradle.kts`（`versionCode` / `versionName`）；改后必须重新构建。
 - 本地**不产 release 包**：release 由云端 GitHub Actions 在**推送 `v*` 标签时**构建并发版。日常 push 分支不会触发任何云端构建。
 - 注意：debug 包用 AGP 默认 debug key 签名，与云端 release keystore 签名不同；在已装 release 版的设备上覆盖安装需 root（`pm install -r`）或卸载重装。

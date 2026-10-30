@@ -1,0 +1,68 @@
+package io.synapse.core.gateway
+
+import io.synapse.core.provider.ProviderRegistry
+import io.synapse.core.provider.antigravity.AntigravityProvider
+import io.synapse.core.provider.codebuddy.CodeBuddyProvider
+import io.synapse.core.provider.loomy.LoomyProvider
+import io.synapse.core.provider.raccoon.RaccoonProvider
+import io.synapse.core.provider.trae.TraeConstants
+import io.synapse.core.provider.trae.TraeProvider
+import io.synapse.core.provider.trae.TraeVersion
+
+/**
+ * 内置供应商的登记处。
+ *
+ * 新增一个内置供应商时，只在这里加一行 `register(...)`，网关与其它 provider 都不需要改。
+ */
+internal fun registerBuiltinProviders(engine: GatewayEngine) {
+    val registry: ProviderRegistry = engine.registry
+
+    registry.register(
+        TraeProvider(
+            store = engine.store(),
+            version = {
+                val settings = engine.providerSettings(TraeProvider.ID)
+                TraeVersion(
+                    ideVersion = settings.option("ideVersion", "0.1.52"),
+                    ideVersionCode = settings.option("ideVersionCode", "20260811"),
+                )
+            },
+            defaultModel = {
+                engine.providerSettings(TraeProvider.ID).defaultModel
+                    .ifEmpty { TraeConstants.DEFAULT_CONFIG_NAME }
+            },
+            hooks = engine.hooks,
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        LoomyProvider(
+            defaultModel = { engine.providerSettings(LoomyProvider.ID).defaultModel },
+            nowMillis = { engine.now() },
+            hooks = engine.hooks,
+        ),
+    )
+
+    registry.register(
+        AntigravityProvider(
+            hooks = engine.hooks,
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        CodeBuddyProvider(
+            region = { engine.providerSettings(CodeBuddyProvider.ID).option("region", CodeBuddyProvider.REGION_CN) },
+            nowMillis = { engine.now() },
+            hooks = engine.hooks,
+        ),
+    )
+
+    registry.register(
+        RaccoonProvider(
+            hooks = engine.hooks,
+            nowMillis = { engine.now() },
+        ),
+    )
+}

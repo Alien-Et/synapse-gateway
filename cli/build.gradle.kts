@@ -23,5 +23,5 @@ dependencies {
 application {
     // 生成的可执行脚本名（./gradlew :cli:installDist 后为 bin/aigw），与帮助文本、文档中的命令名一致。
     applicationName = "aigw"
-    mainClass.set("dev.aigw.cli.MainKt")
+    mainClass.set("io.synapse.cli.MainKt")
 }
