@@ -42,17 +42,17 @@ class UpdateRepositoryTest {
     }
 
     @Test
-    fun `新命名产物能被优先选中`() {
+    fun `英文命名产物能被优先选中`() {
         val json = """
             {
               "tag_name": "v3.0.0",
-              "html_url": "https://github.com/Alien-Et/Android-AI-gateway/releases/tag/v3.0.0",
+              "html_url": "https://example.com",
               "body": "",
               "assets": [
                 {"name": "checksums.txt", "size": 120,
                  "browser_download_url": "https://example.com/checksums.txt"},
-                {"name": "智能中枢-3.0.0.apk", "size": 2000,
-                 "browser_download_url": "https://example.com/智能中枢-3.0.0.apk"},
+                {"name": "ai-gateway-3.0.0-release.apk", "size": 2000,
+                 "browser_download_url": "https://example.com/ai-gateway-3.0.0-release.apk"},
                 {"name": "other.apk", "size": 9999,
                  "browser_download_url": "https://example.com/other.apk"}
               ]
@@ -60,27 +60,27 @@ class UpdateRepositoryTest {
         """.trimIndent()
         val info = UpdateRepository.parse(json)
         // 即使 other.apk 更大，也必须优先选中按约定命名的那一份
-        assertEquals("https://example.com/智能中枢-3.0.0.apk", info.apkUrl)
+        assertEquals("https://example.com/ai-gateway-3.0.0-release.apk", info.apkUrl)
         assertEquals(2000L, info.apkSize)
     }
 
     @Test
-    fun `旧命名产物仍然兼容`() {
+    fun `中文命名产物仍然兼容`() {
         val json = """
             {
-              "tag_name": "v2.23.0",
+              "tag_name": "v3.0.0",
               "html_url": "https://example.com",
               "body": "",
               "assets": [
-                {"name": "ai-gateway-2.23.0-release.apk", "size": 1800,
-                 "browser_download_url": "https://example.com/ai-gateway-2.23.0-release.apk"},
+                {"name": "智能中枢-3.0.0.apk", "size": 1800,
+                 "browser_download_url": "https://example.com/智能中枢-3.0.0.apk"},
                 {"name": "bigger.apk", "size": 9999,
                  "browser_download_url": "https://example.com/bigger.apk"}
               ]
             }
         """.trimIndent()
         val info = UpdateRepository.parse(json)
-        assertEquals("https://example.com/ai-gateway-2.23.0-release.apk", info.apkUrl)
+        assertEquals("https://example.com/智能中枢-3.0.0.apk", info.apkUrl)
     }
 
     @Test
