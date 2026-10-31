@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -24,6 +25,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -45,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +60,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import io.synapse.app.ui.theme.WarningAmber
@@ -97,34 +104,47 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
 
     // ---------------- 自动滚屏 ----------------
     // 规则（主人要求）：
-    // - 用户没往上翻 → 新日志来了自动跟到底部；
+    // - 用户没往上翻 → 新日志来了自动跟到最新；
     // - 用户上滑查看历史 → 停在他看的位置，上方继续追加但不抢滚动；
-    // - 用户往下滑回底部 → 自动恢复跟屏。
+    // - 用户滑回顶部 → 自动恢复跟屏。
     //
-    // 用「是否已回到底部」作为唯一信号，不用固定像素阈值：
-    // 日志条目高度差很大（折叠/展开），固定阈值不可靠。
+    // ⚠️ 方向：RequestLog 用 addFirst，**最新一条在 index 0（顶部）**，
+    // 所以「跟最新」= 停在顶部，不是滚到底部。
     //
-    // ⚠️ 方向很重要：RequestLog 用 addFirst，**最新一条在 index 0（顶部）**。
-    // 所以「跟最新」= 停在顶部，而不是滚到底部。
-    // 之前写成「滚到最后一项」，结果每次进来都跳去最旧那条，和直觉完全相反。
+    // ⚠️ 曾经的关键 bug：之前用「第一条是否贴顶（offset >= -4）」来判断用户有没有离开，
+    // 但新日志插入会让列表整体上移，插入瞬间 index 0 的 offset 是负数，
+    // 于是被误判成「用户滑走了」，userScrolledAway 被永久置为 true —— 从此再也不自动滚，
+    // 表现就是「日志不再自动堆叠/自动滚屏」。
+    //
+    // 现在改成两个独立信号：
+    // 1. [userDragged]：只有**手指真的拖动过**才算用户离开（程序滚动不算）；
+    // 2. 滚回顶部（firstVisibleItemIndex == 0）就恢复跟屏。
     var userScrolledAway by remember(tab) { mutableStateOf(false) }
-    val atTop by remember {
-        derivedStateOf {
-            val info = listState.layoutInfo
-            val first = info.visibleItemsInfo.firstOrNull() ?: return@derivedStateOf true
-            first.index == 0 && first.offset >= -4
+
+    // 只有用户拖拽才会置位：用 nestedScroll 拿用户手势，避开程序滚动的干扰。
+    val dragWatcher = remember(listState) {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(available: androidx.compose.ui.geometry.Offset, source: androidx.compose.ui.input.nestedscroll.NestedScrollSource): androidx.compose.ui.geometry.Offset {
+                // 手指向下拉（available.y > 0）= 想看更新的内容，不算离开
+                // 手指向上推（available.y < 0）= 往下翻历史，算离开
+                if (source == androidx.compose.ui.input.nestedscroll.NestedScrollSource.UserInput && available.y < 0) {
+                    userScrolledAway = true
+                }
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
         }
     }
-    // 一旦回到顶部就恢复跟屏
-    LaunchedEffect(atTop) {
-        if (atTop) userScrolledAway = false
-    }
-    // 正在滚动且不在顶部 → 用户主动离开了最新日志
+
+    // 回到顶部（index 0 且基本贴顶）就恢复跟屏。这里放宽到 -32：插入动画期间
+    // 首条会有小幅负偏移，太紧会导致「刚恢复又被判离开」，来回抖动。
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress }
-            .collect { scrolling ->
-                if (scrolling && !atTop) userScrolledAway = true
-            }
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val first = info.visibleItemsInfo.firstOrNull()
+            first != null && first.index == 0 && first.offset >= -32
+        }.collect { atTop ->
+            if (atTop) userScrolledAway = false
+        }
     }
 
     val calls = remember(state.calls, filter) {
@@ -246,16 +266,27 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
 
-        // 新日志是插入到 index 0 的，所以「保持最新可见」= 保持在顶部。
-        // 用条数作触发器：只在真多了一条时才动，不会每帧抢滚动。
+        // 新日志插入到 index 0 → 「保持最新可见」= 停在顶部。
+        //
+        // ⚠️ 时序是关键：新条目是**这一帧之后**才真正加入布局的。
+        // 若在 LaunchedEffect(条数) 里立刻 scrollToItem(0)，那时 LazyColumn 的
+        // 子项还没扩容，滚到 0 等于原地不动，而 LaunchedEffect 之后不会再触发，
+        // 于是表现为「日志不自动滚动」。这里显式等一帧（withFrameNanos）再滚。
         LaunchedEffect(tab, if (tab == LogTab.Calls) calls.size else logs.size) {
-            if (!userScrolledAway && listState.layoutInfo.totalItemsCount > 0) {
-                listState.animateScrollToItem(0)
+            if (userScrolledAway) return@LaunchedEffect
+            withFrameNanos { }                                  // 等新条目进入布局
+            if (listState.layoutInfo.totalItemsCount > 0) {
+                listState.scrollToItem(0)
             }
         }
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth().scrollFade(listState),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .scrollFade(listState)
+                // 监听用户拖拽：只有手指真的往下翻历史才停止自动跟屏
+                .nestedScroll(dragWatcher),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -333,6 +364,7 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             .padding(vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        // 第一行：模型名 + 状态徽章（这是卡片的主标题，必须放在最上面）
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 // 模型名缺失（旧记录或异常写入路径）时给明确占位；纯空白串同样回落，
@@ -344,6 +376,35 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
                 modifier = Modifier.weight(1f),
             )
             StatusBadge(record.status)
+        }
+        // 第二行：只有**成功**的请求才显示 `路由🏷️ 账号🏷️` 或 `故障转移🏷️ 账号🏷️`。
+        //
+        // 判定口径（主人定的）：**看区域，不看换了几个号**。
+        // - 请求指定国内、最终跑在国内号上 → 路由（哪怕中途换过几个国内号）；
+        // - 请求指定国内、最终跑在国外号上 → 故障转移。
+        //
+        // 失败时不显示这一行：结论是「都不行」，没有「最终账号」可言，
+        // 所有试过的账号统一由下方「故障🏷️ 账号🏷️」列表呈现——两处都列会重复。
+        val ok = record.status == CallStatus.SUCCESS
+        val finalName = record.finalAccount.ifEmpty { record.accountNickname.ifEmpty { record.accountUid } }
+        if (ok && finalName.isNotEmpty()) {
+            val tone = MaterialTheme.colorScheme.primary
+            // 区域不同 = 故障转移；两边都有值时才比较（非区域型供应商两个都是空串 → 路由）
+            val crossRegion = record.routeRegion.isNotEmpty() &&
+                record.finalAccountRegion.isNotEmpty() &&
+                record.routeRegion != record.finalAccountRegion
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                TagPill(
+                    text = if (crossRegion) "故障转移" else "路由",
+                    tone = if (crossRegion) MaterialTheme.colorScheme.tertiary else tone,
+                    dot = false,
+                )
+                TagPill(text = finalName, tone = tone, dot = true)
+            }
         }
         Text(
             text = buildString {
@@ -375,8 +436,34 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             if (record.pointsConsumed > 0) {
                 MetricChip("积分", record.pointsConsumed.toString(), MaterialTheme.colorScheme.secondary)
             }
-            if (record.accountNickname.isNotEmpty()) {
-                MetricChip("账号", record.accountNickname, MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        // 出过故障的账号：试过但没成的那些（可能多个），单独一行标红。
+        // 与上方「最终账号」互补 —— 上方的标签告诉你这次落在谁身上，
+        // 这里告诉你路上折了谁，排查「为什么被限流」时一眼就能对上。
+        // 失败时把**所有**尝试过的账号都列成故障（包括最后那个）：
+        // 全部都不行的时候，「哪个成功了」根本不存在，区分它反而让人困惑。
+        val failedAccounts = when {
+            // 成功：只列出「试过但没成」的（不含最终成功的那个）
+            record.status == CallStatus.SUCCESS ->
+                record.attemptedAccounts.filter { it != finalName && it.isNotEmpty() }
+            // 失败：列出所有试过的账号
+            record.attemptedAccounts.isNotEmpty() ->
+                record.attemptedAccounts.filter { it.isNotEmpty() }
+            // 兜底：老记录没有 attemptedAccounts，退回单个账号，别让失败卡片一片空白
+            finalName.isNotEmpty() -> listOf(finalName)
+            else -> emptyList()
+        }
+        if (failedAccounts.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                failedAccounts.forEach { name ->
+                    // 「故障🏷️ 账号🏷️」：两个标签紧挨着，读起来是一句话
+                    TagPill(text = "故障", tone = MaterialTheme.colorScheme.error, dot = false)
+                    TagPill(text = name, tone = MaterialTheme.colorScheme.error, dot = true)
+                }
             }
         }
         if (record.error.isNotEmpty()) {
@@ -388,6 +475,41 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
                 overflow = TextOverflow.Ellipsis,
             )
         }
+    }
+}
+
+/**
+ * 状态胶囊：路由 / 故障转移 / 账号 / 故障。
+ *
+ * 与 [MetricChip] 的区别：这个是「一句话标签」，不强调数值，
+ * 所以字号用 labelMedium（MetricChip 是 labelSmall 等宽数字，专给指标用）。
+ */
+@Composable
+private fun TagPill(text: String, tone: Color, dot: Boolean) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(tone.copy(alpha = 0.12f))
+            .padding(horizontal = 9.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (dot) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(tone),
+            )
+        }
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = tone,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

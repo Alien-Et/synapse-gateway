@@ -70,6 +70,13 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
             config = failover.modelCooldown,
             onOpenEdit = { editTarget = ResilienceEditTarget.ModelCooldown },
         )
+        Spacer(Modifier.height(4.dp))
+        CrossRegionComponent(
+            enabled = failover.crossRegionFailover,
+            onToggle = { on ->
+                viewModel.updateFailoverSettings(state.failover.copy(crossRegionFailover = on))
+            },
+        )
 
         Spacer(Modifier.height(8.dp))
         Text(
@@ -181,6 +188,44 @@ private fun ModelCooldownComponent(config: ModelCooldownConfig, onOpenEdit: () -
         ParamRow("冷却上限", "${config.maxCooldownMs / 1000} 秒")
         Spacer(Modifier.height(4.dp))
         OutlineActionButton("修改模型级冷却") { onOpenEdit() }
+    }
+}
+
+/**
+ * 国内外互通开关。
+ *
+ * 腾讯、字节各有国内与国外两个站点，各自一整池账号。默认**开启**：
+ * 某个区域账号全部不可用时，会顺延到另一个区域继续跑——它们本来就是
+ * 同一家供应商、能力相同，只是站点不同。
+ *
+ * 关闭后回到「区域是硬约束」：国内请求只在国内账号里换号，绝不跨到国外。
+ */
+@Composable
+private fun CrossRegionComponent(enabled: Boolean, onToggle: (Boolean) -> Unit) {
+    SectionLabel("国内外互通")
+    SectionCard(enterIndex = 4) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("故障转移可跨区域", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = if (enabled) "已开启：本区域账号不可用时，会顺延到另一区域的账号" else "已关闭：只在本区域账号内换号",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onToggle)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "仅对区分国内 / 国外的供应商有效（腾讯、字节）。" +
+                "优先仍然使用你指定的区域，只有该区域一个可用账号都没有时才跨区。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

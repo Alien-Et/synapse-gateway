@@ -25,6 +25,50 @@ data class CallRecord(
     val model: String,
     val accountUid: String,
     val accountNickname: String,
+    /**
+     * 本次请求**尝试过的所有账号**（按尝试顺序，去重）。
+     *
+     * 换号是本网关的核心能力，一次失败请求往往试过好几个号：
+     * 「该模型在所有候选账号上都不可用」如果不列出具体是哪几个号，
+     * 用户根本不知道是哪些账号撞了墙。界面据此在日志卡片上打多个账号标签。
+     *
+     * 只存昵称（没有昵称时用 uid 兜底）——uid 对用户没有意义，且可能过长。
+     */
+    val attemptedAccounts: List<String> = emptyList(),
+
+    /**
+     * 最终成功 / 结束在哪个账号上（昵称，没有则 uid）。
+     *
+     * 与 [attemptedAccounts] 一起用来区分两种状态：
+     * - **路由**：第一次选中的号就成功了（[didFailover] = false）；
+     * - **故障转移**：换过号才成功（或全都失败），界面标「故障转移」。
+     */
+    val finalAccount: String = "",
+
+    /**
+     * 本次请求是否发生过换号（故障转移）。
+     *
+     * true 表示中途有账号失败、换到别的号才结束；false 表示一次就成。
+     * 界面据此在账号标签前显示「路由」或「故障转移」。
+     */
+    val didFailover: Boolean = false,
+
+    /**
+     * 请求**指定**的区域（`cn` / `global`；非区域型供应商为空串）。
+     *
+     * 与 [finalAccountRegion] 一起判断「路由」还是「故障转移」：
+     * 同区域 = 路由，跨区域 = 故障转移。
+     */
+    val routeRegion: String = "",
+
+    /**
+     * 最终落在哪个区域的账号（`cn` / `global`；无法判定时为空串）。
+     *
+     * 主人定的判定口径：**看区域而不是看换了几个号**——
+     * 国内请求最终跑在国内号上（哪怕中途换过几个国内号）仍然算「路由」；
+     * 只有跨到另一个区域才算「故障转移」。
+     */
+    val finalAccountRegion: String = "",
     val streaming: Boolean,
     val status: CallStatus,
     val httpStatus: Int,
@@ -308,6 +352,14 @@ class CallLogStore(
                     model = obj.get("model")?.asString.orEmpty(),
                     accountUid = obj.get("accountUid")?.asString.orEmpty(),
                     accountNickname = obj.get("accountNickname")?.asString.orEmpty(),
+                    finalAccount = obj.get("finalAccount")?.asString.orEmpty(),
+                    didFailover = obj.get("didFailover")?.asBoolean ?: false,
+                    routeRegion = obj.get("routeRegion")?.asString.orEmpty(),
+                    finalAccountRegion = obj.get("finalAccountRegion")?.asString.orEmpty(),
+                    attemptedAccounts = obj.getAsJsonArray("attemptedAccounts")
+                        ?.mapNotNull { runCatching { it.asString }.getOrNull() }
+                        ?.filter { it.isNotEmpty() }
+                        ?: emptyList(),
                     streaming = obj.get("streaming")?.asBoolean ?: false,
                     status = runCatching { CallStatus.valueOf(obj.get("status")?.asString.orEmpty()) }
                         .getOrDefault(CallStatus.FAILED),
@@ -442,6 +494,16 @@ private fun CallRecord.toJson(): JsonObject = JsonObject().apply {
     addProperty("model", model)
     addProperty("accountUid", accountUid)
     addProperty("accountNickname", accountNickname)
+    if (finalAccount.isNotEmpty()) addProperty("finalAccount", finalAccount)
+    if (didFailover) addProperty("didFailover", true)
+    if (routeRegion.isNotEmpty()) addProperty("routeRegion", routeRegion)
+    if (finalAccountRegion.isNotEmpty()) addProperty("finalAccountRegion", finalAccountRegion)
+    // 老记录没有这个数组 → 读回时为空列表，界面回落到单账号标签，不会报错
+    if (attemptedAccounts.isNotEmpty()) {
+        add("attemptedAccounts", com.google.gson.JsonArray().apply {
+            attemptedAccounts.forEach { add(it) }
+        })
+    }
     addProperty("streaming", streaming)
     addProperty("status", status.name)
     addProperty("httpStatus", httpStatus)

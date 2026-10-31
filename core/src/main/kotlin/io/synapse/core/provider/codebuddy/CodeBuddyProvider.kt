@@ -188,18 +188,35 @@ class CodeBuddyProvider(
             // 死账号被反复选中、用户持续收到「请求被上游拒绝」。其余五家都这么映射。
             status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA
-            // 429 分两种：业务码 6004 是**该模型**超限（换号无用，换模型立刻可用），
-            // 其余 429（无业务码/账号级限流）才按可退避的限流处理。
-            status == 429 -> if (businessCode(body) == CODE_MODEL_LIMITED) ErrorKind.MODEL_LIMIT else ErrorKind.SOFT_RATE
+            // 429 分两种：业务码 6004 **或**「该模型频率超限」文案，是**该模型**超限；
+            // 其余 429（账号级限流）才按可退避的限流处理。
+            status == 429 -> if (isModelLimited(body)) ErrorKind.MODEL_LIMIT else ErrorKind.SOFT_RATE
             status == 404 -> ErrorKind.NOT_FOUND
             status in 500..599 -> ErrorKind.SERVER
-            businessCode(body) == CODE_MODEL_LIMITED -> ErrorKind.MODEL_LIMIT
+            isModelLimited(body) -> ErrorKind.MODEL_LIMIT
             matchesQuota(body) -> ErrorKind.QUOTA
             matchesSessionDead(body) -> ErrorKind.SESSION_DEAD
             status in 400..499 -> ErrorKind.CLIENT
             else -> ErrorKind.CLIENT
         }
         return UpstreamError(kind, message.ifEmpty { "上游 HTTP $status" + bodySnippet(body) })
+    }
+
+    /**
+     * 是不是「该模型频率超限」。
+     *
+     * 上游并不总是带业务码 6004：实测 `usage exceeds frequency limit, but don't worry,
+     * your usage will reset at ...` 这种回包可能没有 code 字段。只认 6004 会把它
+     * 误判成账号级限流（SOFT_RATE），于是网关只在**同一个号**上退避重试，不会换号——
+     * 而这类限制恰恰是**按账号算的**，换个号立刻就能用。
+     *
+     * 注意匹配顺序：`usage exceeds frequency limit` 先于普通限流判断，
+     * 否则会被 SOFT_RATE 抢先。
+     */
+    private fun isModelLimited(body: String): Boolean {
+        if (businessCode(body) == CODE_MODEL_LIMITED) return true
+        val lower = body.lowercase()
+        return MODEL_LIMITED_MARKERS.any { lower.contains(it) }
     }
 
     /** 取响应体里的业务码；取不到/非数字返回 null。 */
@@ -1414,6 +1431,21 @@ class CodeBuddyProvider(
 
         /** 业务码：该模型已超限（换号无用，换模型立刻可用）。 */
         const val CODE_MODEL_LIMITED = 6004L
+
+        /**
+         * 「该模型频率超限」的文案标记（统一小写后比对）。
+         *
+         * 上游不一定带 6004 业务码，但这句话是稳定的：
+         * `usage exceeds frequency limit, but don't worry, your usage will reset at ...`
+         * 命中即按模型级限制处理——**先换同家其它账号**，而不是在同一个号上退避重试。
+         */
+        private val MODEL_LIMITED_MARKERS = listOf(
+            "usage exceeds frequency limit",
+            "frequency limit",
+            "rate limit exceeded for this model",
+            "该模型已超限",
+            "模型使用频率",
+        )
 
         /** 刷新失败后的冷却秒数：期间不再重打上游刷新端点。 */
         const val REFRESH_COOLDOWN_SECONDS = 60L

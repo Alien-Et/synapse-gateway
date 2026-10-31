@@ -220,6 +220,22 @@ class GatewayHttpServer(
         // （从前一律 503 no_healthy_account，额度耗尽/凭证失效也报「没有可用账号」）
         val failureKinds = ArrayList<io.synapse.core.provider.ErrorKind>()
         val routeErrors = ArrayList<String>()
+        // 逐账号的失败明细：`账号名：原因`。最终报错要把「是哪个账号出问题」说出来，
+        // 否则用户看到「该模型在所有候选账号上都不可用」却不知道具体是哪几个号撞墙。
+        val accountErrors = ArrayList<String>()
+        // 最后一次真正打上游的账号：整体失败时把它写进调用记录，
+        // 否则失败卡片上只有「失败」两个字，看不出是哪个号挂的。
+        var lastAccountUid = ""
+        var lastAccountNickname = ""
+        // 本次请求试过的所有账号（按顺序、去重）：日志卡片据此打多个账号标签，
+        // 否则「所有候选账号都不可用」看不出到底试了哪几个号。
+        val attemptedAccountNames = LinkedHashSet<String>()
+        // 请求指定的区域 + 最终账号所在区域：界面据此区分「路由 / 故障转移」。
+        // 口径是**看区域**，不是看换了几个号（同区域换号仍算路由）。
+        val routeRegion = primaryRoute.region.orEmpty()
+        var finalAccountRegion = routeRegion
+        val regionAwareProvider = engine.registry.get(primaryRoute.providerId)
+            as? io.synapse.core.provider.RegionAwareSupport
         val failoverCfg = engine.failoverSettings()
         if (engine.verboseLogging()) {
             log("收到请求 /v1/chat/completions：model=$requestedModel stream=$streaming，已解析路由 ${primaryRoute.providerId}/${primaryRoute.model}")
@@ -259,6 +275,14 @@ class GatewayHttpServer(
 
             val tried = HashSet<String>()
             var attempt = 0
+            // 本轮换号重试是否已经给供应商记过一次失败。
+            //
+            // ★ 熔断是**供应商级**信号，不是账号级：
+            // 从前每次账号级失败都 cb.recordFailure()，于是「3 个号各错 2 次」= 6 次，
+            // 直接越过阈值（默认 5）把整家冻住 —— 明明还有健康的号。
+            // 现在只在**整轮所有号都试完仍失败**时才计一次，账号级问题靠账号自己的
+            // 模型冷却/禁用来表达。
+            var providerFailureCounted = false
             var providerLastError = ""
             val maxAttempts = if (failoverCfg.enabled) failoverCfg.retry.maxAttempts else settings.maxRotate.coerceAtLeast(1)
 
@@ -270,9 +294,12 @@ class GatewayHttpServer(
                 // 所以这里先看看是不是个别账号把熔断计数顶上去的：
                 // 只要同家还有没试过的号，就让它们顶上继续试。
                 val breakerRemainingMs = cb.remainingOpenMs()
+                // 熔断时的「还有没有号可换」同样要尊重「国内外互通」开关：
+                // 开启时可以把另一个区域的号捞进来，关闭时只看本区域。
                 val alt = engine.pickAccount(
                     providerId, tried, currentRoute.region,
                     skipEmptyCredits = true, model = resolvedModel,
+                    allowCrossRegion = failoverCfg.crossRegionFailover,
                 )
                 if (alt != null) {
                     breakerAccountOverride = alt
@@ -295,8 +322,12 @@ class GatewayHttpServer(
                             routeLabelOf(currentRoute.providerId, currentRoute.region),
                             "熔断",
                             requestedModel,
-                            "连续失败被熔断，约 ${waitSec}s 后自动恢复；同供应商下已无其它可用账号，" +
-                                "建议稍等片刻重试，或改用其它供应商的模型",
+                            if (failoverCfg.crossRegionFailover)
+                                "连续失败被熔断，约 ${waitSec}s 后自动恢复；同供应商所有区域的账号都不可用，" +
+                                    "建议稍等片刻重试，或改用其它供应商的模型"
+                            else
+                                "连续失败被熔断，约 ${waitSec}s 后自动恢复；本区域已无其它可用账号" +
+                                    "（可在设置里开启「国内外互通」跨区使用），或改用其它供应商的模型",
                         ),
                         QuotaAlert.Level.PROVIDER_CIRCUIT_OPEN,
                     )
@@ -310,13 +341,20 @@ class GatewayHttpServer(
             // 1b. 模型级冷却（**按账号**）：某个号刚才撞了「该模型已超限」，
             // 只在那个号上冷却。其它号可能完全正常，所以这里不整家跳过，
             // 而是交给选号逻辑自动换到没被冷却的号。
+            //
+            // ⚠️ 判定范围必须和选号一致：开启「国内外互通」时，本区域号全冷却了
+            // 还能跨区继续跑，所以这里也要按**全供应商**统计，否则会出现
+            // 「国外只有一个号被冷却 → 整家被判定全冷却 → 连国内号都一起废掉」。
             val coolingUids = engine.modelCooldownOf().coolingAccounts(providerId, resolvedModel)
-            val regionUsableCount = engine.usableAccountCount(providerId, resolvedModel, currentRoute.region)
-            if (regionUsableCount <= 0 && engine.isModelFullyCooling(providerId, resolvedModel, currentRoute.region)) {
-                // 同供应商所有可用账号都在冷却：换号已经无意义，明确告诉用户「等多久 / 换供应商」
+            val crossRegion = failoverCfg.crossRegionFailover
+            val scopeRegion = if (crossRegion) null else currentRoute.region
+            val usableCount = engine.usableAccountCount(providerId, resolvedModel, scopeRegion)
+            if (usableCount <= 0 && engine.isModelFullyCooling(providerId, resolvedModel, scopeRegion)) {
+                // 范围内所有可用账号都在冷却：换号已经无意义，明确告诉用户「等多久 / 换供应商」
                 val remainMs = engine.cooldownRemainingMs(providerId, resolvedModel)
                 val waitSec = (remainMs / 1000).coerceAtLeast(1)
-                val skipReason = "$providerId/$resolvedModel(同家账号全部冷却中，约 ${waitSec}s 后恢复)"
+                val scopeLabel = if (crossRegion) "" else "本区域"
+                val skipReason = "$providerId/$resolvedModel(同家${scopeLabel}账号全部冷却中，约 ${waitSec}s 后恢复)"
                 log("模型 [$resolvedModel] 在 [$providerId] 的所有可用账号都在冷却，跳过此候选...")
                 routeErrors.add(skipReason)
                 engine.quotaAlerts.emit(
@@ -350,6 +388,7 @@ class GatewayHttpServer(
                 // 所以这里不会因为一份过时的 0 而完全选不出人。
                 var picked = engine.pickAccount(
                     currentRoute.providerId, tried, currentRoute.region, skipEmptyCredits = true, model = resolvedModel,
+                    allowCrossRegion = failoverCfg.crossRegionFailover,
                 )
                 // 熔断期间选定的「顶班」账号：本轮直接用它，试过就作废，之后回到正常轮换
                 if (picked == null) {
@@ -362,9 +401,9 @@ class GatewayHttpServer(
                     // 若池中有可用账号（如单账号或全部账号已轮过一轮），清空已试列表允许继续完成剩余重试配额。
                     // 这一轮**不再跳过空额度账号**：能走到这里说明额度正常的号已经试过或被排除，
                     // 剩下的就是「记录里是 0，但可能已充值/已重置」的号——让上游给出真实答案。
-                    if (engine.pickAccount(currentRoute.providerId, emptySet(), currentRoute.region, model = resolvedModel) != null) {
+                    if (engine.pickAccount(currentRoute.providerId, emptySet(), currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover) != null) {
                         tried.clear()
-                        picked = engine.pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel)
+                        picked = engine.pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover)
                     }
                 }
                 if (picked == null) {
@@ -387,6 +426,12 @@ class GatewayHttpServer(
                     break
                 }
                 tried += picked.uid
+                lastAccountUid = picked.uid
+                lastAccountNickname = picked.nickname
+                attemptedAccountNames += picked.nickname.ifEmpty { picked.uid }
+                if (regionAwareProvider != null) {
+                    finalAccountRegion = regionAwareProvider.regionOf(picked) ?: routeRegion
+                }
 
                 // 上游并发闸门：在发起上游调用前取许可，会话结束后释放；取不到时本次换号重试不再尝试该账号
                 val gateHandle = engine.concurrencyGate.tryAcquire("${currentRoute.providerId}/${picked.uid}")
@@ -504,6 +549,7 @@ class GatewayHttpServer(
                         log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${failure.message}")
                         // 凭证失效是账号级问题，不代表供应商故障，不计入熔断
                         providerLastError = failure.message
+                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
                         failureKinds.add(ErrorKind.SESSION_DEAD)
                         finishActiveRequest()
                         gateHandle.release()
@@ -524,13 +570,14 @@ class GatewayHttpServer(
                             currentRoute.providerId, account.uid, resolvedModel, cooldownMs,
                         )
                         val hasUntried = engine
-                            .pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel) != null
+                            .pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover) != null
                         if (hasUntried) {
                             log(
                                 "模型级限流（${currentRoute.providerId}/${account.nickname.ifEmpty { account.uid }}），" +
                                     "已冷却该号并换同家其它账号重试：${failure.message}",
                             )
                             providerLastError = failure.message
+                            accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
                             lastHttpStatus = call.status
                             failureKinds.add(ErrorKind.MODEL_LIMIT)
                             finishActiveRequest()
@@ -552,6 +599,7 @@ class GatewayHttpServer(
                             QuotaAlert.Level.MODEL_UNAVAILABLE,
                         )
                         providerLastError = failure.message
+                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
                         lastHttpStatus = call.status
                         failureKinds.add(ErrorKind.MODEL_LIMIT)
                         finishActiveRequest()
@@ -559,9 +607,13 @@ class GatewayHttpServer(
                         break
                     }
                     // 到这里才是上游侧错误：计入熔断与健康指标
-                    cb.recordFailure()
+                    if (!providerFailureCounted) {
+                        providerFailureCounted = true
+                        cb.recordFailure()
+                    }
                     pMetrics.record(false, elapsed, failure.kind.name)
                     providerLastError = failure.message
+                    accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
                     failureKinds.add(failure.kind)
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", call.errorBody)
                     finishActiveRequest()
@@ -574,9 +626,13 @@ class GatewayHttpServer(
                     val err = call.errorBody.ifEmpty { "连接上游失败（请检查网络连接或代理设置）" }
                     call.close()
                     lastHttpStatus = 0
-                    cb.recordFailure()
+                    if (!providerFailureCounted) {
+                        providerFailureCounted = true
+                        cb.recordFailure()
+                    }
                     pMetrics.record(false, elapsed, "network_status_0")
                     providerLastError = err
+                    accountErrors += "${account.nickname.ifEmpty { account.uid }}：$err"
                     failureKinds.add(ErrorKind.NETWORK)
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", err)
                     finishActiveRequest()
@@ -622,6 +678,7 @@ class GatewayHttpServer(
                             log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${error.message}")
                         }
                         providerLastError = error.message
+                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
                         failureKinds.add(error.kind)
                         // 不可恢复错误：直接退出当前供应商重试，迅速切换下一家候选
                         finishActiveRequest()
@@ -637,13 +694,14 @@ class GatewayHttpServer(
                             currentRoute.providerId, account.uid, resolvedModel, cooldownMs,
                         )
                         val hasUntried = engine
-                            .pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel) != null
+                            .pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover) != null
                         if (hasUntried) {
                             log(
                                 "模型级限流（${currentRoute.providerId}/${account.nickname.ifEmpty { account.uid }}），" +
                                     "已冷却该号并换同家其它账号重试：${error.message}",
                             )
                             providerLastError = error.message
+                            accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
                             lastHttpStatus = call.status
                             failureKinds.add(error.kind)
                             finishActiveRequest()
@@ -662,6 +720,7 @@ class GatewayHttpServer(
                             QuotaAlert.Level.MODEL_UNAVAILABLE,
                         )
                         providerLastError = error.message
+                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
                         lastHttpStatus = call.status
                         failureKinds.add(error.kind)
                         finishActiveRequest()
@@ -689,10 +748,11 @@ class GatewayHttpServer(
                         // 而不是反复换号再错一遍。
                         val hasCreditAccount = engine.pickAccount(
                             currentRoute.providerId, tried, currentRoute.region, skipEmptyCredits = true,
+                            allowCrossRegion = failoverCfg.crossRegionFailover,
                         ) != null
                         // 还有别的号没试过（即使额度也是 0，但没试过）→ 还能再试一把
                         val hasUntriedAccount = engine
-                            .pickAccount(currentRoute.providerId, tried, currentRoute.region) != null
+                            .pickAccount(currentRoute.providerId, tried, currentRoute.region, allowCrossRegion = failoverCfg.crossRegionFailover) != null
 
                         val continuesInProvider = hasCreditAccount || hasUntriedAccount
                         engine.quotaAlerts.emit(
@@ -706,6 +766,7 @@ class GatewayHttpServer(
                         )
                         // 不计熔断：额度不足是账号级问题，换号后同家仍可正常服务
                         providerLastError = error.message
+                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
                         lastHttpStatus = call.status
                         failureKinds.add(error.kind)
                         finishActiveRequest()
@@ -716,9 +777,13 @@ class GatewayHttpServer(
                     }
 
                     // 剩余为上游侧可重试错误（5xx/429/网络/404）：计入熔断与健康指标
-                    cb.recordFailure()
+                    if (!providerFailureCounted) {
+                        providerFailureCounted = true
+                        cb.recordFailure()
+                    }
                     pMetrics.record(false, elapsed, "http_${call.status}")
                     providerLastError = error.message
+                    accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
                     lastHttpStatus = call.status
                     failureKinds.add(error.kind)
                     finishActiveRequest()
@@ -731,7 +796,10 @@ class GatewayHttpServer(
                 if (aggregated != null && OpenAiSseAggregator.isEmptyCompletion(aggregated)) {
                     val elapsed = System.currentTimeMillis() - attemptStart
                     call.close()
-                    cb.recordFailure()
+                    if (!providerFailureCounted) {
+                        providerFailureCounted = true
+                        cb.recordFailure()
+                    }
                     pMetrics.record(false, elapsed, "empty_completion")
                     log("${currentRoute.providerId} 返回了零内容回复，已尝试其他账号或供应商")
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", aggregated)
@@ -753,7 +821,13 @@ class GatewayHttpServer(
                     // 非流式包 SSE：上游响应已读入内存，许可与在途打点在这里一起收尾
                     finishActiveRequest()
                     gateHandle.release()
-                    return streamResponse(sse, call, currentRoute.providerId, transparentModel, account.uid, account.nickname, startedAt, body, call.status)
+                    return streamResponse(
+                        sse, call, currentRoute.providerId, transparentModel, account.uid, account.nickname,
+                        startedAt, body, call.status,
+                        attemptedAccounts = attemptedAccountNames.toList(),
+                        routeRegion = routeRegion,
+                        finalAccountRegion = finalAccountRegion,
+                    )
                 }
 
                 if (streaming) {
@@ -761,7 +835,10 @@ class GatewayHttpServer(
                     if (stream == null) {
                         val elapsed = System.currentTimeMillis() - attemptStart
                         call.close()
-                        cb.recordFailure()
+                        if (!providerFailureCounted) {
+                            providerFailureCounted = true
+                            cb.recordFailure()
+                        }
                         pMetrics.record(false, elapsed, "stream_null")
                         providerLastError = "上游未返回流"
                         failureKinds.add(ErrorKind.SERVER)
@@ -782,6 +859,9 @@ class GatewayHttpServer(
                             gateHandle.release()
                             engine.activeRequests.finish(activeId)
                         },
+                        attemptedAccounts = attemptedAccountNames.toList(),
+                        routeRegion = routeRegion,
+                        finalAccountRegion = finalAccountRegion,
                     )
                 }
 
@@ -792,7 +872,13 @@ class GatewayHttpServer(
                     }
                     finishActiveRequest()
                     gateHandle.release()
-                    return aggregatedResponse(aggregated, currentRoute.providerId, transparentModel, account.uid, account.nickname, startedAt, body, call.status)
+                    return aggregatedResponse(
+                        aggregated, currentRoute.providerId, transparentModel, account.uid, account.nickname,
+                        startedAt, body, call.status,
+                        routeRegion = routeRegion,
+                        finalAccountRegion = finalAccountRegion,
+                        attemptedAccounts = attemptedAccountNames.toList(),
+                    )
                 }
 
                 call.close()
@@ -830,12 +916,20 @@ class GatewayHttpServer(
                 "总数 ${summary.total}，可用 ${summary.usable}，停用 ${summary.disabled}"
             }.getOrDefault(""),
         )
-        // 对客消息 = 「真实主因 + 逐家原因」：agent 端能直接看出是额度、凭证还是网络，
-        // 而不用去猜一句笼统的「没有可用账号」
-        val reason = if (allErrors.isEmpty()) mappedFailure.headline else "${mappedFailure.headline}；$allErrors"
+        // 对客消息 = 「真实主因 + 逐家原因 + 逐账号原因」：
+        // agent 端能直接看出是额度、凭证还是网络；主人也能一眼看到**具体哪个账号**撞了墙。
+        //
+        // 账号明细单独成段：像「该模型在所有候选账号上都不可用」这种主因完全不提账号，
+        // 光看这句话根本不知道是哪个号被上游限了。明细里每条都是「账号名：原因」。
+        val accountDetail = if (accountErrors.isEmpty()) "" else accountErrors.distinct().joinToString("；")
+        val reason = buildString {
+            append(if (allErrors.isEmpty()) mappedFailure.headline else "${mappedFailure.headline}；$allErrors")
+            if (accountDetail.isNotEmpty()) append("｜涉及账号：$accountDetail")
+        }
         if (engine.verboseLogging()) {
             log("全部尝试完毕返回 ${mappedFailure.status}（${mappedFailure.code}）：已试供应商 [${triedProviders.joinToString(", ")}]")
             routeErrors.forEachIndexed { index, error -> log("  原因 ${index + 1}：$error") }
+            accountErrors.distinct().forEachIndexed { index, detail -> log("  账号 ${index + 1}：$detail") }
         } else {
             log("全部供应商尝试完毕，返回 ${mappedFailure.status}（${mappedFailure.code}）：$reason")
         }
@@ -843,8 +937,13 @@ class GatewayHttpServer(
         // 未真正发起过上游请求（如无可用账号）就不记，避免污染调用记录。
         if (attemptedUpstream) {
             recordCall(
-                newCompletionId(), primaryRoute.providerId, requestedModel, "", "",
+                newCompletionId(), primaryRoute.providerId, requestedModel, lastAccountUid, lastAccountNickname,
                 streaming, CallStatus.FAILED, lastHttpStatus, null, 0L, reason, "", body, startedAt,
+                attemptedAccounts = attemptedAccountNames.toList(),
+                finalAccount = lastAccountNickname.ifEmpty { lastAccountUid },
+                didFailover = attemptedAccountNames.size > 1,
+                routeRegion = routeRegion,
+                finalAccountRegion = finalAccountRegion,
             )
         }
         return errorResponse(mappedFailure.status, mappedFailure.code, reason)
@@ -869,6 +968,11 @@ class GatewayHttpServer(
         httpStatus: Int,
         onFirstChunk: () -> Unit = {},
         onFinished: () -> Unit = {},
+        // 本次请求试过的所有账号
+        attemptedAccounts: List<String> = emptyList(),
+        // 区域信息：界面据 routeRegion != finalAccountRegion 判定「故障转移」
+        routeRegion: String = "",
+        finalAccountRegion: String = "",
     ): NanoHTTPD.Response {
         val id = newCompletionId()
         // 转发结果快照：由 produce 在结束时写入。header 写出失败时 produce 不执行，
@@ -883,12 +987,24 @@ class GatewayHttpServer(
                     recordCall(
                         id, providerId, model, uid, nickname, true,
                         CallStatus.FAILED, httpStatus, null, 0L, "连接在响应开始前中断", "", requestBody, startedAt,
-                    )
+                    finalAccount = nickname.ifEmpty { uid },
+                    attemptedAccounts = attemptedAccounts,
+                    didFailover = attemptedAccounts.size > 1,
+                    routeRegion = routeRegion,
+                    finalAccountRegion = finalAccountRegion,
+                )
                 } else {
                     recordCall(
                         id, providerId, model, uid, nickname, true,
                         result.status, httpStatus, result.usage, result.pointsConsumed,
                         result.failure, result.response, requestBody, startedAt, result.raw,
+                        // 流式成功也要带上换号轨迹：否则界面永远显示「路由」，
+                        // 明明中途换过号也看不出来。
+                        finalAccount = nickname.ifEmpty { uid },
+                        attemptedAccounts = attemptedAccounts,
+                        didFailover = attemptedAccounts.size > 1,
+                        routeRegion = routeRegion,
+                        finalAccountRegion = finalAccountRegion,
                     )
                 }
             },
@@ -1048,6 +1164,9 @@ class GatewayHttpServer(
         startedAt: Long,
         requestBody: String,
         httpStatus: Int,
+        routeRegion: String = "",
+        finalAccountRegion: String = "",
+        attemptedAccounts: List<String> = emptyList(),
     ): NanoHTTPD.Response {
         val payload = runCatching { JsonParser.parseString(aggregated).asJsonObject }.getOrNull()
         // 对调用方透明：将响应中的 model 归一化为客户端请求的逻辑模型
@@ -1062,6 +1181,10 @@ class GatewayHttpServer(
         recordCall(
             newCompletionId(), providerId, model, uid, nickname, false,
             CallStatus.SUCCESS, httpStatus, usage, pointsConsumedOf(payload ?: JsonObject(), usage), "", content, requestBody, startedAt, normalized,
+            finalAccount = nickname.ifEmpty { uid },
+            attemptedAccounts = attemptedAccounts,
+            routeRegion = routeRegion,
+            finalAccountRegion = finalAccountRegion,
         )
         // 同上：对话成功即证明有额度，先摘掉可能残留的「额度耗尽」标记
         engine.pool.clearExhaustedMark(providerId, uid)
@@ -1360,6 +1483,11 @@ class GatewayHttpServer(
         requestBody: String,
         startedAt: Long,
         rawResponse: String = "",
+        attemptedAccounts: List<String> = emptyList(),
+        finalAccount: String = "",
+        didFailover: Boolean = false,
+        routeRegion: String = "",
+        finalAccountRegion: String = "",
     ) {
         // 调用记录开关：关闭时不写任何记录（原文动辄几 KB，是存储的主要来源）；
         // 记录一 failover 链路的语义不变，只是不留痕。
@@ -1375,6 +1503,11 @@ class GatewayHttpServer(
                 model = model,
                 accountUid = uid,
                 accountNickname = nickname,
+                attemptedAccounts = attemptedAccounts,
+                finalAccount = finalAccount,
+                didFailover = didFailover,
+                routeRegion = routeRegion,
+                finalAccountRegion = finalAccountRegion,
                 streaming = streaming,
                 status = status,
                 httpStatus = httpStatus,

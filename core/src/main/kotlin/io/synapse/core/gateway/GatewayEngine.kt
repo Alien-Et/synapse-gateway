@@ -1805,6 +1805,7 @@ class GatewayEngine(
         region: String? = null,
         skipEmptyCredits: Boolean = false,
         model: String? = null,
+        allowCrossRegion: Boolean = false,
     ): ProviderAccount? {
         // 模型级冷却（按账号）：被冷却的号不要再挑出来，直接换同家的其它号。
         //
@@ -1814,10 +1815,14 @@ class GatewayEngine(
         val cooling = if (model.isNullOrEmpty()) emptySet() else modelCooldown.coolingAccounts(providerId, model)
         val excluded = if (cooling.isEmpty()) exclude else exclude + cooling
 
-        // ★ 区域是硬约束，任何一条路径都不许丢：
-        // 「腾讯国内/x」和「腾讯国外/x」共用同一个 providerId（codebuddy），
-        // 字节（trae）同理。一旦在这里把 region 丢了，就会挑到另一个区域的账号，
-        // 请求被发到 trae.ai 却以为是 trae.cn —— 反过来也一样。
+        // ★ 区域约束：
+        // 「腾讯国内/x」和「腾讯国外/x」共用同一个 providerId（codebuddy），字节同理。
+        // 默认**区域是硬约束**，绝不跨区——否则国内号没额度时会静默跑到国外站点。
+        //
+        // 例外：开启「国内外互通」（[allowCrossRegion] 且设置里的 crossRegionFailover 为真）时，
+        // **先在本区域内找**，找不到才顺延到另一个区域。绝不能直接整池挑——
+        // 那会让国内请求长期跑在国外号上，违背用户选区域的本意。
+        val crossRegion = allowCrossRegion && failoverSettings.crossRegionFailover
         if (region == null) return pool.pick(providerId, excluded, skipEmptyCredits)
         // 供应商没声明区域能力（非区域型供应商，如谷歌/讯飞/商汤）：
         // 它本来就没有区域概念，region 对它无意义，走整池选号即为正确语义。
@@ -1827,25 +1832,36 @@ class GatewayEngine(
         // 一次取状态快照（单次加锁），避免对每个账号各加一次读锁
         val statusByUid = pool.statuses(providerId).associateBy { it.uid }
 
+        // [sameRegionOnly] = false 时不看区域（跨区兜底那一轮用）。
         // 区域过滤写在 pickBest 内部，两轮（含「余额全空」的降级轮）都经过它，
-        // 所以降级只会在**同区域**里降级，绝不跨区域。
-        fun pickBest(ignoreCreditFilter: Boolean): ProviderAccount? = pool.accounts(providerId)
-            .asSequence()
-            .filter { account -> account.uid !in excluded }
-            .filter { account -> statusByUid[account.uid]?.usable == true }
-            .filter { account -> regionAware.regionOf(account) == region }
-            .filter { account ->
-                val st = statusByUid[account.uid]
-                !(skipEmptyCredits && !ignoreCreditFilter &&
-                    st != null && st.creditsKnown && st.credits <= 0L)
-            }
-            .maxByOrNull { account -> statusByUid[account.uid]?.credits ?: 0L }
+        // 所以降级只会在**同一范围内**降级，不会意外扩大范围。
+        fun pickBest(ignoreCreditFilter: Boolean, sameRegionOnly: Boolean): ProviderAccount? =
+            pool.accounts(providerId)
+                .asSequence()
+                .filter { account -> account.uid !in excluded }
+                .filter { account -> statusByUid[account.uid]?.usable == true }
+                .filter { account -> !sameRegionOnly || regionAware.regionOf(account) == region }
+                .filter { account ->
+                    val st = statusByUid[account.uid]
+                    !(skipEmptyCredits && !ignoreCreditFilter &&
+                        st != null && st.creditsKnown && st.credits <= 0L)
+                }
+                // 同区域内优先额度高的；跨区兜底时同样按额度挑，不做区域加权——
+                // 走到这一步说明本区域真的一个能用的号都没有了。
+                .maxByOrNull { account -> statusByUid[account.uid]?.credits ?: 0L }
 
-        val filtered = pickBest(ignoreCreditFilter = false)
-        if (filtered != null || !skipEmptyCredits) return filtered
-        // 该区域全部账号都被「余额为 0」挡掉了：在同区域内退回不过滤的一轮
-        // （余额可能是旧快照）。注意仍然带区域约束，不会跑到另一个区域去。
-        return pickBest(ignoreCreditFilter = true)
+        // 第 1 轮：本区域 + 跳过空额度
+        pickBest(ignoreCreditFilter = false, sameRegionOnly = true)?.let { return it }
+        // 第 2 轮：本区域 + 不跳过空额度（余额快照可能过时，让上游给真实答案）
+        if (skipEmptyCredits) {
+            pickBest(ignoreCreditFilter = true, sameRegionOnly = true)?.let { return it }
+        }
+        // 第 3 轮（仅在开启国内外互通时）：跨区域兜底。
+        // 走到这里说明本区域一个能用的号都没有了——要么都停用/凭证失效，
+        // 要么（skipEmptyCredits 时）额度都是 0。
+        if (!crossRegion) return null
+        pickBest(ignoreCreditFilter = false, sameRegionOnly = false)?.let { return it }
+        return pickBest(ignoreCreditFilter = true, sameRegionOnly = false)
     }
 
     /**

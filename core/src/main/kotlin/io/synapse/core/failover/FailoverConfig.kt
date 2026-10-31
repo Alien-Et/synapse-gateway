@@ -105,6 +105,17 @@ data class ModelFailoverSettings(
     val concurrency: ConcurrencyConfig = ConcurrencyConfig(),
     /** 模型级冷却（针对该模型不可用类错误）。 */
     val modelCooldown: ModelCooldownConfig = ModelCooldownConfig(),
+
+    /**
+     * 国内外互通：同供应商下的「国内」与「国外」两个区域共享账号池。
+     *
+     * 默认开启。开启后，`腾讯国内/xxx` 在国内账号都用不了时，会顺延到国外账号继续跑
+     * （反之亦然）——它们本来就是同一家供应商、能力相同，只是站点不同。
+     *
+     * 关闭时保持原语义：区域是硬约束，国内请求只在国内账号里换号，绝不跨到国外。
+     * 用户在「设置 → 故障转移」里可以关掉它。
+     */
+    val crossRegionFailover: Boolean = true,
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("enabled", enabled)
@@ -112,6 +123,7 @@ data class ModelFailoverSettings(
         add("circuitBreaker", circuitBreaker.toJson())
         add("concurrency", concurrency.toJson())
         add("modelCooldown", modelCooldown.toJson())
+        addProperty("crossRegionFailover", crossRegionFailover)
     }
 
     companion object {
@@ -127,6 +139,8 @@ data class ModelFailoverSettings(
                 circuitBreaker = CircuitBreakerConfig.fromJson(obj.getAsJsonObject("circuitBreaker")),
                 concurrency = ConcurrencyConfig.fromJson(obj.getAsJsonObject("concurrency")),
                 modelCooldown = ModelCooldownConfig.fromJson(obj.getAsJsonObject("modelCooldown")),
+                // 老配置没有这个字段 → 默认 true（与「开关默认打开」一致）
+                crossRegionFailover = obj.get("crossRegionFailover")?.asBoolean ?: true,
             )
         }
     }
