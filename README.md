@@ -243,9 +243,9 @@ resolveRoute(model)
 两个区域都没号可用了，网关会返回明确的错误，并**列出具体是哪些账号、什么原因**：
 
 ```
-该模型在所有候选账号上都不可用；codebuddy(usage exceeds frequency limit...)
-｜涉及账号：my-melody1@live.com：usage exceeds frequency limit...；
-          of2.or2.or2@gmail.com：usage exceeds frequency limit...
+该模型在所有候选账号上都不可用；codebuddy(上游限流)
+｜涉及账号：账号A：该模型使用频率超限，约 19:26 后重置；
+          账号B：该模型使用频率超限，约 15:28 后重置
 ```
 
 **绝不改发别家供应商** —— 写 `腾讯国内/` 的请求永远只可能去腾讯。
