@@ -5,6 +5,7 @@ import androidx.compose.ui.Modifier
 import com.google.gson.JsonObject
 import io.synapse.core.gateway.ProviderSettings
 import io.synapse.core.pool.AccountStatus
+import io.synapse.core.provider.HumanCheckChallenge
 import io.synapse.core.provider.ProviderTaskListView
 import io.synapse.core.provider.PointsBillListView
 import io.synapse.core.provider.QuotaPack
@@ -38,6 +39,26 @@ class ProviderUiActions(
     val onSmsLogin:
         (providerId: String, phone: String, code: String, ccode: String, onResult: (String) -> Unit) -> Unit =
         { _, _, _, _, _ -> },
+    /**
+     * 拉一张人机校验图（移动云盘的滑动拼图）；不支持该能力的供应商回 null。
+     *
+     * 用同步回调而不是挂起函数，是为了让界面能像「点一下换一张」那样随手调用：
+     * ViewModel 内部会把网络请求放到 IO 线程，结果只通过 [onResult] 回传。
+     */
+    val onFetchHumanCheck:
+        (providerId: String, phone: String, onResult: (HumanCheckChallenge?) -> Unit) -> Unit =
+        { _, _, onResult -> onResult(null) },
+
+    /**
+     * 通知供应商「人机校验已通过」。
+     *
+     * WebView 模式下必须调：校验页自己会把短信码发出去，供应商得记下这件事，
+     * 后续发码就会跳过实际请求（上游有次数配额，多发一次少一次）。
+     */
+    val onHumanCheckPassed: (providerId: String) -> Unit = { _ -> },
+
+    /** 该供应商的短信登录是否必须先过人机校验。 */
+    val requiresHumanCheck: (providerId: String) -> Boolean = { false },
     /** 粘贴凭证 JSON 导入。 */
     val onImport: (providerId: String, raw: String) -> Unit = { _, _ -> },
     /** 刷新额度；uid 为空表示刷新该供应商全部账号。 */

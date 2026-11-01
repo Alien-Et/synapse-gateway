@@ -60,6 +60,9 @@ fun ProviderDetailScreen(
                     viewModel.smsLogin(id, phone, code, ccode, onResult)
                 }
             },
+            onFetchHumanCheck = { id, phone, onResult -> viewModel.fetchHumanCheck(id, phone, onResult) },
+            onHumanCheckPassed = { id -> viewModel.notifyHumanCheckPassed(id) },
+            requiresHumanCheck = { id -> viewModel.requiresHumanCheck(id) },
             onImport = { id, raw -> viewModel.importCredentials(id, raw) },
             onAddCustomAccount = { id, nickname, apiKey, models -> viewModel.addCustomAccount(id, nickname, apiKey, models) },
             onRenameAccount = { id, uid, nickname -> viewModel.renameAccount(id, uid, nickname) },

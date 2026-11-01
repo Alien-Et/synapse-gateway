@@ -27,6 +27,8 @@ import io.synapse.core.provider.ProviderModelCatalogView
 import io.synapse.core.provider.ProviderRegistry
 import io.synapse.core.provider.QuotaPack
 import io.synapse.core.provider.RoutedModel
+import io.synapse.core.provider.HumanCheckChallenge
+import io.synapse.core.provider.HumanCheckSupport
 import io.synapse.core.provider.SmsLoginSupport
 import io.synapse.core.provider.WebLoginSupport
 import io.synapse.core.provider.WebLoginTicket
@@ -1397,6 +1399,31 @@ class GatewayEngine(
         return support.sendSmsCode(phone, ccode)
     }
 
+    /**
+     * 拉一张人机校验图（移动云盘的滑动拼图）。
+     *
+     * 只有实现了 [HumanCheckSupport] 的供应商才有；界面先用它判定要不要画滑块，
+     * 需要时再调这里取图。
+     */
+    fun fetchHumanCheck(providerId: String, phone: String): HumanCheckChallenge? {
+        val support = registry.get(providerId) as? HumanCheckSupport ?: return null
+        return support.fetchHumanCheck(phone)
+    }
+
+    /** 该供应商的短信登录是否需要先过人机校验。 */
+    fun requiresHumanCheck(providerId: String): Boolean =
+        (registry.get(providerId) as? HumanCheckSupport)?.requiresHumanCheckBeforeSms == true
+
+    /**
+     * 通知供应商「人机校验已通过」。
+     *
+     * WebView 模式下必须调：校验页自己会把短信码发出去，provider 得记下这件事，
+     * 后续 `sendSmsCode` 才不会重复发（上游有次数配额，多发一次少一次）。
+     */
+    fun notifyHumanCheckPassed(providerId: String) {
+        (registry.get(providerId) as? HumanCheckSupport)?.onHumanCheckPassed()
+    }
+
     fun completeSmsLogin(
         providerId: String,
         phone: String,
@@ -2075,6 +2102,7 @@ class GatewayEngine(
             "谷歌" -> "antigravity"
             "讯飞" -> "loomy"
             "商汤" -> "raccoon"
+            "移动云盘" -> "mcloud"
             else -> null
         }
     }
@@ -2123,6 +2151,7 @@ class GatewayEngine(
             "antigravity" -> "谷歌"
             "loomy" -> "讯飞"
             "raccoon" -> "商汤"
+            "mcloud" -> "移动云盘"
             // 未知供应商沿用 id，不硬编中文
             else -> return if (region == null) providerId else "$providerId-$region"
         }
@@ -2189,6 +2218,9 @@ class GatewayEngine(
     /** 详细日志：分多段写入请求日志，避免单条过长被环形缓冲截断。 */
     internal fun logVerbose(tag: String, text: String) {
         if (!settings.verboseLogging) return
+        // 详细日志也走 logSink（logcat），这样排查时能直接 `logcat -s SynapseGateway` 取，
+        // 不必让用户截 UI 里的请求日志面板。
+        logSink?.invoke("[$tag] ${text.take(4000)}")
         val limit = VERBOSE_LINE_LIMIT
         var start = 0
         var part = 0
