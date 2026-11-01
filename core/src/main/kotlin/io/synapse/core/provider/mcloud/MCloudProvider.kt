@@ -16,6 +16,8 @@ import io.synapse.core.provider.ProviderAccount
 import io.synapse.core.provider.ProviderCapability
 import io.synapse.core.provider.ProviderHooks
 import io.synapse.core.provider.ProviderModel
+import io.synapse.core.provider.PointsBill
+import io.synapse.core.provider.PointsBillListView
 import io.synapse.core.provider.ProviderModelCatalogView
 import io.synapse.core.provider.SmsLoginSupport
 import io.synapse.core.provider.StreamFailureChatCall
@@ -52,6 +54,8 @@ class MCloudProvider(
     private val chatClient: MCloudChatClient = MCloudChatClient(),
     /** App 端国密接口；会员中心的发码接口已废弃，登录实际走这条。 */
     private val appClient: MCloudAppClient = MCloudAppClient(),
+    /** 额度查询（AI tokens 权益）。 */
+    private val creditClient: MCloudCreditClient = MCloudCreditClient(),
 ) : Provider, SmsLoginSupport, HumanCheckSupport {
 
     init {
@@ -63,7 +67,11 @@ class MCloudProvider(
     override val id: String = ID
     override val displayName: String = "移动云盘"
     override val authKind: AuthKind = AuthKind.SMS_CODE
-    override val capabilities: Set<ProviderCapability> = setOf(ProviderCapability.CREDIT_REFRESH)
+    override val capabilities: Set<ProviderCapability> = setOf(
+        ProviderCapability.CREDIT_REFRESH,
+        // 消耗明细：上游 getAiTokenConsumptionRecords 能给出逐条 tokens 记录
+        ProviderCapability.POINTS_BILLS,
+    )
 
     // ------------------------------------------------------------------ 模型
 
@@ -262,21 +270,126 @@ class MCloudProvider(
     // ------------------------------------------------------------------ 额度
 
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
-        // 上游没有公开的额度查询接口（`apikey/get` 只给 Key 与模型清单），
-        // 所以这里只报告「账号是否可用」，不编造数字。
         val mcloud = parseOrNull(account) ?: return CreditInfo(0, known = false, detail = "账号凭证无法解析")
         val now = nowMillis()
         val canRefresh = mcloud.canAutoRefresh(now)
+
+        // 真实额度来自上游权益接口（抓包实测）：
+        //   queryAvailableBenefitV2 → benefitValue（总量）/ benefitUsed（已用）
+        //   queryMonthlyTokenConsumption → 本月累计
+        // 两者都是 tokens，不是次数。查不到时退回「未知」而不是 0。
+        val probe = runCatching { creditClient.fetchCreditDetailed(mcloud) }
+        val credit = probe.getOrNull()?.credit
+        val trace = probe.getOrNull()?.trace.orEmpty()
+        val failure = probe.exceptionOrNull()
+
+        // 失败诊断必须落进 detail：refreshCredits 在 known=false 时会用 detail 当失败原因展示，
+        // 只写 logWarn 的话用户和日志两边都看不到真正原因（之前就是这样查不出问题）。
+        val diag = buildString {
+            if (failure != null) append("异常 ${failure.message ?: failure::class.simpleName}")
+            if (trace.isNotEmpty()) {
+                if (isNotEmpty()) append("；")
+                append(trace.joinToString("；"))
+            }
+        }
+        hooks.onLog("移动云盘 额度查询（${mcloud.phone}）：${diag.ifEmpty { "无诊断信息" }}")
+
+        if (credit != null && credit.totalTokens > 0) {
+            val detail = buildCreditDetail(credit)
+            return CreditInfo(
+                balance = credit.remainTokens,
+                known = true,
+                detail = detail,
+                actionHint = if (canRefresh) "" else "点「重新登录」用手机号收验证码登录一次",
+                memberLevel = credit.memberLevel,
+            )
+        }
+
+        // 权益接口查不到（未开通 AI 权益 / 凭证过期 / 网络异常）：
+        // 保留原来的「不可知」语义，不编数字；detail 带上诊断，用户能自己看懂卡在哪
         return CreditInfo(
             balance = 0,
             known = false,
-            detail = if (canRefresh) {
-                "额度由移动云盘会员权益决定，应用内查看不了"
-            } else {
-                "登录凭证已过期，下次调用会自动续期；续不上需要重新登录"
+            detail = buildString {
+                append(if (canRefresh) "额度查询失败" else "登录凭证已过期，需要重新登录")
+                if (diag.isNotEmpty()) append("：$diag")
             },
-            actionHint = if (canRefresh) "" else "点「重新登录」用手机号收验证码登录一次",
+            actionHint = if (canRefresh) "点「刷新额度」重试" else "点「重新登录」用手机号收验证码登录一次",
         )
+    }
+
+    /**
+     * 把额度快照拼成给人看的一行明细。
+     *
+     * 格式：`剩余 1088.3万 / 总量 1100万 · 本月已用 11.7万（2026-11）`
+     * 大数字换算成「万」更易读，小于 1 万时显示原值。
+     */
+    private fun buildCreditDetail(credit: MCloudCredit): String {
+        val parts = mutableListOf<String>()
+        parts += "剩余 ${formatTokens(credit.remainTokens)} tokens"
+        parts += "总量 ${formatTokens(credit.totalTokens)}"
+        if (credit.monthlyKnown) {
+            parts += "本月已用 ${formatTokens(credit.monthlyTokens)}（${credit.monthLabel}）"
+        } else {
+            parts += "累计已用 ${formatTokens(credit.usedTokens)}"
+        }
+        if (!credit.isActive && credit.benefitStatus.isNotEmpty()) {
+            parts += "权益未生效"
+        }
+        return parts.joinToString(" · ")
+    }
+
+    /** tokens 数值美化：≥1 万用「万」，≥1 亿用「亿」，保留一位小数。 */
+    private fun formatTokens(tokens: Long): String {
+        val v = tokens.toDouble()
+        return when {
+            v >= 100_000_000 -> String.format("%.2f亿", v / 100_000_000)
+            v >= 10_000 -> String.format("%.1f万", v / 10_000)
+            else -> tokens.toString()
+        }
+    }
+
+    /**
+     * AI tokens 消耗明细（`vip.yun.139.com/m4c/benefit/getAiTokenConsumptionRecords`）。
+     *
+     * 复用 `POINTS_BILLS` 这套界面：每行是「模型名 · tokens · 系数 · 时间」，
+     * `points` 字段放的是 **tokens 消耗量（负数）**，`bizType` 放模型系数。
+     * 只取 `action=1`（消耗），`action=4` 是月底权益到期清理，不属于使用。
+     */
+    override fun pointsBills(account: ProviderAccount): PointsBillListView? {
+        val mcloud = parseOrNull(account) ?: return null
+        return try {
+            val records = creditClient.fetchRecords(mcloud, pageSize = POINTS_BILLS_LIMIT)
+            PointsBillListView(
+                bills = records.mapIndexed { index, r ->
+                    PointsBill(
+                        id = "${r.timeText}-$index",
+                        title = buildString {
+                            append(r.modelName.ifEmpty { "AI 对话" })
+                            if (r.coefficient.isNotEmpty()) append("（系数 ${r.coefficient}）")
+                        },
+                        points = -r.tokens,
+                        bizType = r.comments,
+                        createdAtMillis = parseRecordTime(r.timeText),
+                    )
+                },
+                error = if (records.isEmpty()) "上游没有返回消耗记录" else "",
+            )
+        } catch (e: Exception) {
+            hooks.onLog("移动云盘 消耗明细拉取失败：${e.message}")
+            PointsBillListView(emptyList(), error = NetworkErrorText.describe(e, "ypqy.mcloud.139.com"))
+        }
+    }
+
+    /** 解析上游时间串（`2026-10-31 18:11:23`，本地时区）。失败返回 0。 */
+    private fun parseRecordTime(text: String): Long {
+        if (text.isEmpty()) return 0L
+        return runCatching {
+            java.time.LocalDateTime.parse(text.replace(' ', 'T'))
+                .atZone(java.time.ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+        }.getOrDefault(0L)
     }
 
     // ------------------------------------------------------------------ 短信登录
@@ -449,5 +562,8 @@ class MCloudProvider(
 
     companion object {
         const val ID = "mcloud"
+
+        /** 消耗明细最大条数（与商汤积分流水保持一致）。 */
+        private const val POINTS_BILLS_LIMIT = 20
     }
 }

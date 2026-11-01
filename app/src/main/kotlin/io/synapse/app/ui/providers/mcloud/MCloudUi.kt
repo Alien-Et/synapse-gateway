@@ -290,14 +290,31 @@ object MCloudUi : ProviderUi {
                         }
                         Button(
                             onClick = {
+                                loading = true
+                                sendError = ""
                                 actions.onSmsLogin(id, phone, code, "86") { error ->
-                                    if (error.isNotEmpty()) sendError = error
+                                    loading = false
+                                    if (error.isEmpty()) {
+                                        // 登录成功后立刻收起表单、回到最初状态：
+                                        // 否则会停在验证码界面，用户会以为没成功又点一次
+                                        // （验证码是一次性的，重复提交必然回 9441）。
+                                        phone = ""
+                                        code = ""
+                                        challenge = null
+                                        puzzleSolved = false
+                                        smsSent = false
+                                        usedWebView = false
+                                        countdown = 0
+                                        sendError = ""
+                                    } else {
+                                        sendError = error
+                                    }
                                 }
                             },
-                            enabled = code.length >= 4,
+                            enabled = code.length >= 4 && !loading,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text("登录")
+                            Text(if (loading) "登录中…" else "登录")
                         }
                     }
                 } else if (sendError.isNotEmpty()) {

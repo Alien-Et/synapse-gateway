@@ -246,4 +246,50 @@ object MCloudConstants {
 
     /** 请求来源标识，缺了会被网关层拦掉。 */
     const val REQUESTED_WITH = "com.chinamobile.mcloud"
+
+    // ------------------------------------------------------------------ 额度（抓包实测）
+
+    /** 权益查询域名（`ypqy.mcloud.139.com`，走 isbo2/openApi）。 */
+    const val BENEFIT_BASE = "https://ypqy.mcloud.139.com"
+
+    /**
+     * 查可用权益：返回该账号的 AI tokens 总量与已用量。
+     *
+     * 实测响应（2026-10-31 抓包）：
+     * ```
+     * {"userAvailableBenefitList":[{"benefitNo":"RHR135","benefitName":"aitokens",
+     *   "benefitValue":"11000000","benefitUsed":"116656","benefitStatus":"2",
+     *   "reserve3":"[1000万 tokens/月]Token"}]}
+     * ```
+     * `benefitValue - benefitUsed` = 剩余可用 tokens。
+     */
+    const val PATH_AVAILABLE_BENEFIT = "/isbo2/openApi/queryAvailableBenefitV2"
+
+    /** 查本月累计消耗：`{"month":"2026-10","totalTokens":116656}`（明文，未加密）。 */
+    const val PATH_MONTHLY_CONSUMPTION = "/isbo2/openApi/queryMonthlyTokenConsumption"
+
+    /**
+     * 查消耗明细（会员中心侧）。
+     *
+     * 实测响应：
+     * ```
+     * {"data":{"aiTokenConsumptionRecordList":[{"action":"1","benefitNum":16656,
+     *   "modelName":"Qwen3.5-Plus","coefficient":"0.6","recordTime":"2026-10-31 18:11:23",
+     *   "comments":"云盘MClaw"}, ...]}}
+     * ```
+     * `action`：`1`=消耗，`4`=到期清理（清掉的不算使用量）。
+     */
+    const val PATH_TOKEN_RECORDS = "/m4c/benefit/getAiTokenConsumptionRecords"
+
+    /** AI tokens 权益编号（实测固定 `RHR135`）。 */
+    const val BENEFIT_NO_AI_TOKENS = "RHR135"
+
+    /**
+     * 会员身份查询。**注意是 openapi 版本**：`/m4c/openapi/userIdentity` 才接受
+     * `Authorization: Basic`；`/m4c/userInfo/userIdentity` 是给会员中心 H5 页面用的，
+     * 靠 Cookie 认证、body 是 `{"memberTypeList":[]}`，用 Basic 打过去拿不到数据。
+     *
+     * 实测响应：`{"data":[{"type":"1001","typeName":"白银会员","iconUrl":"...silver.png"}]}`
+     */
+    const val PATH_USER_IDENTITY = "/m4c/openapi/userIdentity"
 }

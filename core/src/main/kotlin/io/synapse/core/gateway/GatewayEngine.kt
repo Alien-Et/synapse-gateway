@@ -717,7 +717,10 @@ class GatewayEngine(
             pool.updateCredits(providerId, uid, 0, false, reason)
             return CreditRefreshResult(providerId, uid, account.nickname, 0, false, reason)
         }
-        pool.updateCredits(providerId, uid, info.balance, info.known, info.detail, info.actionHint, info.actionUrl)
+        pool.updateCredits(
+            providerId, uid, info.balance, info.known, info.detail, info.actionHint, info.actionUrl,
+            memberLevel = info.memberLevel,
+        )
         if (info.known) {
             log("额度刷新 $providerId/${account.nickname.ifEmpty { uid }}：${info.balance}（${info.detail}）")
         } else {
