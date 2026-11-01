@@ -91,7 +91,7 @@ class MCloudAppClient(
      */
     fun sendSmsCode(phone: String, device: MCloudDevice, puzzleToken: String? = null): SmsSent {
         // 字段与顺序按 App 实测逐个对齐（算法助手 Hook 到真实明文）：
-        // {"clientType":"414","mode":"0","phoneNumber":"18529186660","random":"pmbvpo","reqType":"3"}
+        // {"clientType":"414","mode":"0","phoneNumber":"13800138000","random":"pmbvpo","reqType":"3"}
         // 少 random / clientType 都会回 code=01000001「参数错误」。
         //
         // 走 H5 校验页那条路时明文形态（同样是 Hook 到的）：
@@ -482,10 +482,10 @@ data class MCloudLogin(
  * 上游按它做设备识别与风控。字段顺序照抄官方客户端，缺一项都可能被拦。
  */
 data class MCloudDevice(
-    val brand: String = "OnePlus",
-    val model: String = "PJE110",
+    val brand: String = "Xiaomi",
+    val model: String = "M610BB",
     val osVersion: String = "android 16",
-    val resolution: String = "1080X2208",
+    val resolution: String = "1440X3200",
     val deviceId: String,
 ) {
     /** 两头的实际值。 */
@@ -496,7 +496,7 @@ data class MCloudDevice(
      * H5 校验页用的设备串（实测形态）。
      *
      * 和 [info] 完全不是一套：H5 页面的 `Wb()` 生成的是
-     * `||3|7.17.7|机型|机型|32位hex||Android 16|360X792||||UEpFMTEw|`。
+     * `||3|7.17.7|机型|机型|32位hex||Android 16|360X792||||机型base64|`。
      * 注意版本号是 `7.17.7`（SDK 版本，不是 App 版本），分辨率也换成 WebView 的 CSS 像素。
      */
     val h5Info: String
@@ -504,7 +504,7 @@ data class MCloudDevice(
 
     /** WebView 里页面自己的 UA（不是 okhttp 的）。 */
     val webViewUserAgent: String
-        get() = "Mozilla/5.0 (Linux; $osVersion; $model Build/TP1A.220905.001; wv) AppleWebKit/537.36 " +
+        get() = "Mozilla/5.0 (Linux; $osVersion; $model Build/BP2A.250705.008; wv) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Version/4.0 Chrome/158.0.8127.2 Mobile Safari/537.36 " +
             "MCloudApp/13.2.5 AppLanguage/zh-CN"
 

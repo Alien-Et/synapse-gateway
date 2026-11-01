@@ -79,7 +79,7 @@ class MCloudCaptchaTest {
     @Test
     fun verifyUrlRoundTrip() {
         val device = MCloudDevice(deviceId = "7FCE333E3DF15B390502CEFC84E34115")
-        val url = MCloudCaptcha.buildVerifyUrl("18529186660", device)
+        val url = MCloudCaptcha.buildVerifyUrl("13800138000", device)
         assertTrue(url.startsWith(MCloudConstants.URL_CAPTCHA_PAGE + "?data="))
 
         // 把 %XX 还原再做 base64 解码
@@ -91,7 +91,7 @@ class MCloudCaptchaTest {
         assertEquals(2, obj.get("captchaType").asInt)
         val params = obj.getAsJsonObject("params")
         assertEquals("414", params.get("clientType").asString)
-        assertEquals("18529186660", params.get("phoneNumber").asString)
+        assertEquals("13800138000", params.get("phoneNumber").asString)
         assertEquals("+86", params.get("nationCode").asString)
         assertEquals("0", params.get("additionalSpaceSelected").asString)
         val headers = obj.getAsJsonObject("headers")
@@ -104,7 +104,10 @@ class MCloudCaptchaTest {
         val device = MCloudDevice(deviceId = "7fce333e3df15b390502cefc84e34115")
         val h5 = device.h5Info
         assertTrue(h5.startsWith("||3|7.17.7|"), "H5 串应以 ||3|7.17.7 开头，实际 ${h5}")
-        assertTrue(h5.contains("UEpFMTEw"), "H5 串应含 base64 机型")
+        // base64(机型名)：机型改成小米 18 Pro Max 后对应的值
+        val expectedModelB64 = java.util.Base64.getEncoder()
+            .encodeToString(MCloudConstants.DEVICE_MODEL.toByteArray(Charsets.UTF_8))
+        assertTrue(h5.contains(expectedModelB64), "H5 串应含 base64 机型（$expectedModelB64）")
         // 原生串是另一套
         assertTrue(device.info.startsWith("5|127.0.0.1|1|13.2.5|"))
     }
@@ -121,16 +124,16 @@ class MCloudCaptchaTest {
     fun h5KeyDecryptsRealRequest() {
         // HAR 里 index=232 的请求体（H5 页面发的），明文含 puzzleVerfycode
         val cipher =
-                "7l6CRBBVBY1FbgY23pLszcpp6UgEFKwAdxE2+fJp3W+POBUX2eEkMK+Y3XTqGj1pq9riW8hKPsBZwjlEhTvc+90T5bbBPCtql4Fu" +
-                "PGF5miwwdp8BRAW42lYP1vaxOIUObCDIkQL67U8u2qVO9ojHIoihrdg1EgAwiOQ+qavrqNEjEb5/aaPSBCKAfhWnv2MUa4B25DSs" +
-                "dsvqZnwGGIQZCcv1kYnzNidJmzNgKKF6DSxQ8ghJFk7feXNt44mFEUc8YgUFtT7XFfLUUQfHjB4pxYo6xkDJTmmEp1QBbmrfFVcm" +
-                "hMFE7+QDCYgbXxYIXC19iK9sUtxOuNq1Y6bwYtXsDDrKoEBuyoavZQXtFunuvhzWX9JSFSIaID3GLoyucQcmlEXay9FCsyDpX1hh" +
-                "ROb6WoNSB5QSrBClfYHPH8HYb7FlEECsLqj4fy1R/qVdajg7udQD6FhZIzwNDpbPHNuUGgSY23Qo7/6+Kt3xj7QXPDYrxbuisp/L" +
-                "wzwRBqRuw1+hmEeKi+RKxYQJXncTOSv3dFMTfxeDPoATxO6b8jjtunvBswy8Wsrsq3II8qkwAPsputiG4wOA8Gmoe6i05p6S/Syt" +
-                "MF9fVoImP4cM3nhLNZ+YS/6pANLXAty7DdLKG5rL"
+                "MDEyMzQ1Njc4OWFiY2RlZiAW6UtjfBtIbXhS4Cpn9dEysDAQXWLuUpLs9XyKG1lnfIAmVh3obBzkFNcJA5jJNfwCXFFB3pnY+5Qx" +
+                "xSzmChNyhCgGSgHgZXPePXNs0XQWEqyCWH8V5oq50y6ZFufkkGt/nT0SVt1FnuDYc4o1Rp4D8TfYJR37flVj1G90cUukhRG9TNPW" +
+                "yJJWRMWK7mxIC+djiwon5rHdjMiAAYQVyZZjsT0RusCRxTa2zhLUDYOJeb0zhyT1V75+j/bC+2OeNWA5KM0UVTl8IyTcpp4vnimd" +
+                "4KBCtTc0vJp/Kg/IobOy3nG8giVEKIVCFRPIY01xImBtYZaYWAUIo/WihQqzfYfLNaxk4M5yxthdyQ3A/ssFlqNVN33+tiCZRY3X" +
+                "uO8S9kWSH2vL11HK27WvNhUMunx1ilu3LvC4SHyza68NhD04LQ5s5wQ2yxqZpknBpB1bRQR1X8Bdcn5CNYKD0sfCor51RHnOItSw" +
+                "QF/vvIdWiG5mIUMGPP/LLpVxWP9jm5N/ZcMpoWOX9+JRganEC7unPL1/ebH09wSSosoW1iSOIEVqZY4XJtvsgm/eIeX2oPNc6Q1J" +
+                "8x0YxdNW+E6a/sLW6F3t58gYono/Bwx6hDUhvjzJ"
         val plain = MCloudCrypto.decryptAesIv(cipher, MCloudConstants.KEY_H5_CAPTCHA)
         assertTrue(plain.contains("\"puzzleVerfycode\""))
         assertTrue(plain.contains("\"captchaType\":2"))
-        assertTrue(plain.contains("18529186660"))
+        assertTrue(plain.contains("13800138000"))
     }
 }

@@ -244,6 +244,22 @@ object MCloudConstants {
         "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 (KHTML, like Gecko) " +
             "Version/4.0 Chrome/158.0.8127.2 Mobile Safari/537.36 MCloudApp/13.2.5 AppLanguage/zh-CN"
 
+    // ------------------------------------------------------------------ 设备机型（可自定义）
+
+    /**
+     * 设备品牌与机型。
+     *
+     * 默认值是一个**通用 Android 旗舰**（小米 18 Pro Max）。
+     * 改动这里会同步影响 `x-DeviceInfo` / `x-yun-client-info` / WebView UA 三处，
+     * 三者必须一致，否则上游会把同一账号当成不同设备。
+     *
+     * 注意：机型名只是字符串，**不能写成 iPhone**——iOS 客户端根本不会发
+     * `x-DeviceInfo` / `x-huawei-channelSrc` 这些头，Android 设备报 iOS 机型
+     * 会让风控直接判定伪造。
+     */
+    const val DEVICE_BRAND = "Xiaomi"
+    const val DEVICE_MODEL = "M610BB"
+
     /** 请求来源标识，缺了会被网关层拦掉。 */
     const val REQUESTED_WITH = "com.chinamobile.mcloud"
 

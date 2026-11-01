@@ -34,7 +34,7 @@ class MCloudCreditClient(
     private val vipBase: String = MCloudConstants.VIP_BASE,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     /** 机型（core 是纯 JVM 模块，不能引用 android.os.Build，由上层注入）。 */
-    private val deviceModel: String = "Android",
+    private val deviceModel: String = "M610BB",
     /** 系统版本，如 `16`。 */
     private val deviceOsVersion: String = "",
 ) {

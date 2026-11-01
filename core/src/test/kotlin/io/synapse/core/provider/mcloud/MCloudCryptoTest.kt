@@ -77,10 +77,10 @@ class MCloudCryptoTest {
     fun `RSA 加密后能用同一对密钥解回原文`() {
         val kp = java.security.KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
         val pubB64 = java.util.Base64.getEncoder().encodeToString(kp.public.encoded)
-        val ct = MCloudCrypto.encryptRsa("18529186660", pubB64)
+        val ct = MCloudCrypto.encryptRsa("13800138000", pubB64)
         val cipher = javax.crypto.Cipher.getInstance("RSA/ECB/PKCS1Padding")
         cipher.init(javax.crypto.Cipher.DECRYPT_MODE, kp.private)
-        assertEquals("18529186660", String(cipher.doFinal(java.util.Base64.getDecoder().decode(ct))))
+        assertEquals("13800138000", String(cipher.doFinal(java.util.Base64.getDecoder().decode(ct))))
     }
 
     @Test
