@@ -65,7 +65,7 @@ class MCloudProvider(
     }
 
     override val id: String = ID
-    override val displayName: String = "移动云盘"
+    override val displayName: String = "灵犀"
     override val authKind: AuthKind = AuthKind.SMS_CODE
     override val capabilities: Set<ProviderCapability> = setOf(
         ProviderCapability.CREDIT_REFRESH,
@@ -155,7 +155,7 @@ class MCloudProvider(
             return FailedChatCall(e.status, e.body)
         }
         if (call.status !in 200..299) {
-            hooks.onLog("移动云盘 对话失败（HTTP ${call.status}）：${call.errorBody.take(500)}")
+            hooks.onLog("灵犀 对话失败（HTTP ${call.status}）：${call.errorBody.take(500)}")
             return FailedChatCall(call.status, call.errorBody)
         }
 
@@ -259,10 +259,10 @@ class MCloudProvider(
 
         return try {
             val fresh = keyClient.refreshKey(mcloud, now)
-            hooks.onLog("移动云盘 已自动续期调用密钥（${fresh.phone}）")
+            hooks.onLog("灵犀 已自动续期调用密钥（${fresh.phone}）")
             toProviderAccount(fresh)
         } catch (e: Exception) {
-            hooks.onLog("移动云盘 自动续期失败（${mcloud.phone}）：${e.message}")
+            hooks.onLog("灵犀 自动续期失败（${mcloud.phone}）：${e.message}")
             null
         }
     }
@@ -292,7 +292,7 @@ class MCloudProvider(
                 append(trace.joinToString("；"))
             }
         }
-        hooks.onLog("移动云盘 额度查询（${mcloud.phone}）：${diag.ifEmpty { "无诊断信息" }}")
+        hooks.onLog("灵犀 额度查询（${mcloud.phone}）：${diag.ifEmpty { "无诊断信息" }}")
 
         if (credit != null && credit.totalTokens > 0) {
             val detail = buildCreditDetail(credit)
@@ -376,7 +376,7 @@ class MCloudProvider(
                 error = if (records.isEmpty()) "上游没有返回消耗记录" else "",
             )
         } catch (e: Exception) {
-            hooks.onLog("移动云盘 消耗明细拉取失败：${e.message}")
+            hooks.onLog("灵犀 消耗明细拉取失败：${e.message}")
             PointsBillListView(emptyList(), error = NetworkErrorText.describe(e, "ypqy.mcloud.139.com"))
         }
     }
@@ -453,12 +453,12 @@ class MCloudProvider(
         val digits = normalizePhone(phone)
         if (smsSentByWebView) {
             smsSentByWebView = false
-            hooks.onLog("移动云盘 验证码已由校验页发出（${maskPhone(digits)}）")
+            hooks.onLog("灵犀 验证码已由校验页发出（${maskPhone(digits)}）")
             // H5 的发码响应里没有 msgid 字段，上游登录时也不强校验，回空串即可
             return ""
         }
         val sent = appClient.sendSmsCode(digits, device())
-        hooks.onLog("移动云盘 验证码已发送（${maskPhone(digits)}）")
+        hooks.onLog("灵犀 验证码已发送（${maskPhone(digits)}）")
         return sent.msgId
     }
 
@@ -476,15 +476,15 @@ class MCloudProvider(
         } catch (e: Exception) {
             // 失败必须把细节打出来：上游对 thirdlogin 的拒绝常常是「加密方式不对」或
             // 「字段名不对」，光看一句「上游拒绝了本次请求」根本无从下手。
-            hooks.onLog("移动云盘 登录失败（${maskPhone(digits)}）：${e.message}")
+            hooks.onLog("灵犀 登录失败（${maskPhone(digits)}）：${e.message}")
             if (e is MCloudApiException) {
-                hooks.onLog("移动云盘 失败详情：${e.debugSummary()}")
+                hooks.onLog("灵犀 失败详情：${e.debugSummary()}")
             } else {
-                hooks.onLog("移动云盘 失败异常：${e::class.simpleName}: ${e.stackTraceToString().take(600)}")
+                hooks.onLog("灵犀 失败异常：${e::class.simpleName}: ${e.stackTraceToString().take(600)}")
             }
             throw e
         }
-        hooks.onLog("移动云盘 登录成功（${maskPhone(digits)}），正在换取调用密钥")
+        hooks.onLog("灵犀 登录成功（${maskPhone(digits)}），正在换取调用密钥")
         val account = keyClient.fetchKey(
             LoginCredential(basic = login.basic, userId = login.userId, nickname = login.nickname),
             digits,
@@ -497,7 +497,7 @@ class MCloudProvider(
     private fun normalizePhone(phone: String): String {
         val digits = phone.filter { it.isDigit() }
         if (digits.length != 11) {
-            throw IllegalStateException("移动云盘只支持中国大陆 11 位手机号")
+            throw IllegalStateException("灵犀只支持中国大陆 11 位手机号")
         }
         return digits
     }

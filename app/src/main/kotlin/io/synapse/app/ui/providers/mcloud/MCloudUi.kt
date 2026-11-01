@@ -3,6 +3,12 @@ package io.synapse.app.ui.providers.mcloud
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
@@ -13,6 +19,7 @@ import androidx.compose.material3.Icon as MaterialIcon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -93,6 +100,15 @@ object MCloudUi : ProviderUi {
         /** 短信是否已发出（决定提示文案）。 */
         var smsSent by remember { mutableStateOf(false) }
         var sendError by remember { mutableStateOf("") }
+        /**
+         * 验证码弹窗是否展开。
+         *
+         * 为什么要独立弹窗：内嵌在页面里时，WebView 的触摸事件会被外层
+         * LazyColumn/Column 的纵向滚动抢走，表现为「手指一滑页面就上下滚，
+         * 滑块完全拖不动」。全屏 Dialog 是独立 window，不参与外层滚动，
+         * 触摸事件能完整落在 WebView 里。
+         */
+        var captchaDialogVisible by remember { mutableStateOf(false) }
 
         LaunchedEffect(countdown) {
             if (countdown > 0) {
@@ -119,7 +135,7 @@ object MCloudUi : ProviderUi {
             SectionCard(enterIndex = 0) {
                 SectionLabel("登录")
                 Text(
-                    text = "用中国移动云盘绑定的手机号登录，登录后额度跟随该账号的会员权益。",
+                    text = "用中国移动绑定的手机号登录，登录后额度跟随该账号的会员权益。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -147,15 +163,22 @@ object MCloudUi : ProviderUi {
                 val current = challenge
                 when {
                     // 第一段：还没拿到拼图
-                    !puzzleSolved && current == null && phone.length == 11 -> {
+                    //
+                    // 按钮常驻显示（不再依赖手机号位数）：位数不够时点它会给出明确提示，
+                    // 否则用户输了 10 位发现"没有按钮"完全不知道卡在哪。
+                    !puzzleSolved && current == null -> {
                         Button(
                             onClick = {
-                                loading = true
-                                sendError = ""
-                                actions.onFetchHumanCheck(id, phone) { result ->
-                                    loading = false
-                                    challenge = result
-                                    if (result == null) sendError = "人机校验加载失败，请重试"
+                                if (phone.length != 11) {
+                                    sendError = "请填写完整的 11 位手机号"
+                                } else {
+                                    loading = true
+                                    sendError = ""
+                                    actions.onFetchHumanCheck(id, phone) { result ->
+                                        loading = false
+                                        challenge = result
+                                        if (result == null) sendError = "人机校验加载失败，请重试"
+                                    }
                                 }
                             },
                             enabled = !loading,
@@ -166,48 +189,27 @@ object MCloudUi : ProviderUi {
                     }
 
                     // 第二段：校验进行中
+                    //
+                    // WebView 模式（灵犀走这条）：校验页自己会把短信码发出去，
+                    // 所以 onPassed 里**不能再调 sendCode()**，否则白耗一次发码配额。
+                    //
+                    // 只保留**一个**按钮。之前「重新打开验证窗口」+「重新加载校验页」两个按钮
+                    // 功能几乎一样，而且后者只是重新拉链接、不会打开弹窗，看起来像点了没反应。
                     !puzzleSolved && current != null && current.webUrl.isNotEmpty() -> {
-                        // WebView 模式（移动云盘走这条）：
-                        // 校验页自己会把短信码发出去，所以 onPassed 里**不能再调 sendCode()**，
-                        // 否则会白耗一次上游的发码次数配额。
+                        // 拿到校验链接后自动弹出浮层对话框，不需要用户再点一次
+                        LaunchedEffect(current.webUrl) {
+                            captchaDialogVisible = true
+                        }
                         Text(
-                            text = "请拖动滑块完成校验，通过后验证码会自动发送",
+                            text = "在弹出的窗口里拖动滑块，通过后验证码会自动发送",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        MCloudCaptchaWebView(
-                            url = current.webUrl,
-                            userAgent = current.userAgent,
-                            onPassed = {
-                                puzzleSolved = true
-                                challenge = null
-                                smsSent = true
-                                usedWebView = true
-                                countdown = RESEND_SECONDS
-                                // 告诉 provider：码已经发出去了，别再发一次
-                                actions.onHumanCheckPassed(id)
-                            },
-                            onFailed = { reason ->
-                                sendError = reason
-                                // 失败就重新拉一次校验页，让用户能重试
-                                challenge = null
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
                         OutlinedButton(
-                            onClick = {
-                                loading = true
-                                sendError = ""
-                                actions.onFetchHumanCheck(id, phone) { result ->
-                                    loading = false
-                                    challenge = result
-                                    if (result == null) sendError = "人机校验加载失败，请重试"
-                                }
-                            },
-                            enabled = !loading,
+                            onClick = { captchaDialogVisible = true },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text(if (loading) "正在加载…" else "重新加载校验页")
+                            Text("打开人机验证")
                         }
                     }
 
@@ -326,6 +328,76 @@ object MCloudUi : ProviderUi {
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
+
+            // 人机验证：**同界面浮层对话框**（不是跳页面，也不是铺满全屏）
+            //
+            // 为什么必须浮层：内嵌在页面里时，WebView 的触摸会被外层滚动抢走，
+            // 表现为「手指一滑页面就上下滚、滑块拖不动」。Dialog 是独立 window，
+            // 不参与外层滚动；这里再用 usePlatformDefaultWidth=false 让宽度可控，
+            // 外观仍然是常规的居中卡片对话框。
+            val pendingChallenge = challenge
+            if (captchaDialogVisible && pendingChallenge != null) {
+                Dialog(
+                    onDismissRequest = { captchaDialogVisible = false },
+                    properties = DialogProperties(
+                        usePlatformDefaultWidth = false,
+                        dismissOnClickOutside = true,
+                    ),
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 6.dp,
+                        modifier = Modifier
+                            .fillMaxWidth(0.94f)
+                            .wrapContentHeight(),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "人机验证",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                OutlinedButton(onClick = { captchaDialogVisible = false }) {
+                                    Text("关闭")
+                                }
+                            }
+                            Text(
+                                text = "在下方滑动验证，通过后验证码会自动发送",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            MCloudCaptchaWebView(
+                                url = pendingChallenge.webUrl,
+                                userAgent = pendingChallenge.userAgent,
+                                onPassed = {
+                                    puzzleSolved = true
+                                    challenge = null
+                                    smsSent = true
+                                    usedWebView = true
+                                    countdown = RESEND_SECONDS
+                                    captchaDialogVisible = false
+                                    actions.onHumanCheckPassed(id)
+                                },
+                                onFailed = { reason ->
+                                    sendError = reason
+                                    challenge = null
+                                    captchaDialogVisible = false
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
+
             }
         }
     }

@@ -120,7 +120,15 @@ fun MCloudCaptchaWebView(
                         userAgentString = userAgent
                         useWideViewPort = true
                         loadWithOverviewMode = true
+                        // 关掉默认手势拦截：否则 WebView 会自己吞掉 touch 事件，
+                        // 注入的「全屏可抓滑块」脚本收不到 touchstart/touchmove
+                        setSupportZoom(false)
+                        builtInZoomControls = false
+                        displayZoomControls = false
                     }
+                    // WebView 默认对触摸比较"聪明"（可能触发滚动/缩放），
+                    // 这里不拦截，让事件原样交给页面 + 我们的注入脚本
+                    isLongClickable = false
                     addJavascriptInterface(bridge, "NpCaptchaBridge")
                     webViewClient = object : WebViewClient() {
                         override fun onPageStarted(view: WebView?, u: String?, favicon: android.graphics.Bitmap?) {
@@ -273,5 +281,104 @@ private val HOOK_JS = """
       });
     };
   }
+
+  // ---------------------------------------------------------------
+  // 滑块「全屏可抓」增强
+  //
+  // 阿里云验证码 3.0 的滑块按钮只有约 44x44px，而且它的 pointerdown 只绑在按钮自己身上，
+  // 手指落偏 2mm 就完全没反应。前面用 CSS 伪元素撑热区不生效（阿里云会重排 DOM）。
+  //
+  // 这里改成**自己做一次事件合成**：整页监听 touchstart，
+  // 只要按下的位置在滑块按钮上方（直到页面顶部），就手工构造一套
+  // touchstart → touchmove → touchend 用**真实的移动量**喂给滑块按钮。
+  // 于是手指在图上任何地方按住都能拖动，而且拖动方向/距离完全跟手。
+  // ---------------------------------------------------------------
+  var npTracking = false;
+  var npStartX = 0;
+  var npLastX = 0;
+  var npBtn = null;
+
+  function npFindBtn(){
+    var sels = ['[class*="slider-btn"]','[class*="slide-btn"]','[class*="sliderBtn"]','[class*="btn-slide"]',
+                '[class*="slider"] [class*="btn"]','.nc_iconfont.btn_slide'];
+    for (var i=0;i<sels.length;i++){
+      var list = document.querySelectorAll(sels[i]);
+      for (var j=0;j<list.length;j++){
+        var el = list[j];
+        var r = el.getBoundingClientRect();
+        // 只要可见且够小的元素（按钮），排除整块容器
+        if (r.width > 0 && r.width < 120 && r.height > 0 && r.height < 120) return el;
+      }
+    }
+    return null;
+  }
+
+  function npFire(type, target, x, y){
+    try {
+      var touch = new Touch({ identifier: 1, target: target, clientX: x, clientY: y,
+                              pageX: x, pageY: y, screenX: x, screenY: y });
+      var ev = new TouchEvent(type, {
+        bubbles: true, cancelable: true, composed: true,
+        touches: type === 'touchend' ? [] : [touch],
+        targetTouches: type === 'touchend' ? [] : [touch],
+        changedTouches: [touch]
+      });
+      target.dispatchEvent(ev);
+    } catch(e) {
+      // 老 WebView 不支持 TouchEvent 构造器时退回 PointerEvent
+      try {
+        var ptype = type === 'touchend' ? 'pointerup' : (type === 'touchmove' ? 'pointermove' : 'pointerdown');
+        target.dispatchEvent(new PointerEvent(ptype, { bubbles: true, cancelable: true,
+          clientX: x, clientY: y, pointerId: 1, pointerType: 'touch', isPrimary: true }));
+      } catch(e2) {}
+    }
+  }
+
+  document.addEventListener('touchstart', function(ev){
+    try {
+      var btn = npFindBtn();
+      if (!btn) return;
+      var r = btn.getBoundingClientRect();
+      var t = ev.touches && ev.touches[0];
+      if (!t) return;
+      // 手指已经在按钮上 → 交给阿里云自己处理
+      if (t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom) return;
+      // 只在按钮正上方（页面顶部到按钮）区域内接管
+      if (t.clientY > r.top + r.height || t.clientY < r.top - window.innerHeight) return;
+
+      npBtn = btn;
+      npTracking = true;
+      npStartX = t.clientX;
+      npLastX = t.clientX;
+      // 用按钮中心作为按下点，让阿里云认为是从手柄开始拖的
+      npFire('touchstart', btn, r.left + r.width / 2, r.top + r.height / 2);
+      report('__np_slider_grab', 0, 'y=' + Math.round(t.clientY));
+      ev.preventDefault();
+    } catch(e) {}
+  }, { passive: false, capture: true });
+
+  document.addEventListener('touchmove', function(ev){
+    if (!npTracking || !npBtn) return;
+    try {
+      var t = ev.touches && ev.touches[0];
+      if (!t) return;
+      var r = npBtn.getBoundingClientRect();
+      // 真实位移：手指移动多少，按钮就收到多少
+      npFire('touchmove', npBtn, r.left + r.width / 2 + (t.clientX - npStartX), r.top + r.height / 2);
+      npLastX = t.clientX;
+      ev.preventDefault();
+    } catch(e) {}
+  }, { passive: false, capture: true });
+
+  document.addEventListener('touchend', function(ev){
+    if (!npTracking || !npBtn) return;
+    try {
+      var r = npBtn.getBoundingClientRect();
+      npFire('touchend', npBtn, r.left + r.width / 2 + (npLastX - npStartX), r.top + r.height / 2);
+      report('__np_slider_release', 0, 'dx=' + Math.round(npLastX - npStartX));
+    } catch(e) {}
+    npTracking = false;
+    npBtn = null;
+  }, { passive: false, capture: true });
 })();
 """.trimIndent()
