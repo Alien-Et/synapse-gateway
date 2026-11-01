@@ -333,6 +333,36 @@ resolveRoute(model)
 
 重名会被表单和核心层双重拦截 —— 否则标签会解析到内置供应商，配起来像是能通，实际必然失败。
 
+### 自定义请求头
+
+部分中转站除了 `Bearer` Key 还要求额外的头（租户号、渠道号、`User-Agent` 等），不配就 401/403。
+在供应商详情页的「自定义请求头」里一行一条填写，格式 `名字: 值`：
+
+```
+User-Agent: MyClient/1.0
+X-Tenant: abc123
+```
+
+`Authorization` 默认由 API Key 自动生成；在这里写同名的一条会**覆盖**它（适用于要求 `x-api-key` 或裸 Key 的站点）。
+只发一条、不拼接 —— 两个 Auth 头同发，服务端多半直接 400。
+
+头名不合法（含空格等）或值里带换行的行会被忽略，界面当场提示哪几行不会发送。
+
+### 余额查询
+
+OpenAI 协议没有余额接口，所以余额要在供应商详情页手填一条查询：完整地址（可选）+ 相对路径 + 取值字段。
+
+| 字段 | 说明 |
+|---|---|
+| 完整地址 | 填了就优先用它 |
+| 相对路径 | 留空且无完整地址时，直接查 baseUrl 本身 |
+| 取哪个字段 | 点分写法，支持数组下标：`data.quota`、`data.accounts.0.remain` |
+| 倍数 / 除以 | 上游给最小单位时换算，如 `quota=500000` 想显示 1 元就填 500000 并勾「除以」 |
+| 单位 | 显示用，如 `点`、`元`，可留空 |
+
+点「测试余额」可以直接用当前表单值试一次，不用先保存。取不到字段时报 `known=false`（界面显示「—」），
+不会显示成 0 —— 0 会让人以为额度真的用完了。
+
 ---
 
 ## 接口
@@ -342,6 +372,8 @@ resolveRoute(model)
 | `POST` | `/v1/chat/completions` | 对话补全（流式 / 非流式 / 多模态） |
 | `GET` | `/v1/models` | 模型列表（按开放名单过滤） |
 | `GET` | `/v1/credits` | 额度查询（别名 `/credits`） |
+| `GET` | `/v1/dashboard/billing/subscription` | 余额（OpenAI 账单格式，`hard_limit_usd`） |
+| `GET` | `/v1/dashboard/billing/credit_grants` | 余额（OpenAI 格式，`total_available`） |
 | `GET` | `/healthz` | 健康检查，返回纯文本 `ok`，免鉴权 |
 
 ### 鉴权

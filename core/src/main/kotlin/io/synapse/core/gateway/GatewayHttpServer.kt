@@ -50,6 +50,16 @@ class GatewayHttpServer(
                 session.method == NanoHTTPD.Method.POST && uri == "/v1/chat/completions" -> chatCompletions(session)
                 session.method == NanoHTTPD.Method.GET && uri == "/v1/models" -> models(session)
                 session.method == NanoHTTPD.Method.GET && (uri == "/v1/credits" || uri == "/credits" || uri == "/v1/v1/credits") -> credits(session)
+                // 下游客户端读余额的两个事实标准路径（都是**标准 OpenAI 风格**的响应体）：
+                //  · /v1/dashboard/billing/subscription → 总额度 hard_limit_usd
+                //  · /v1/dashboard/billing/credit_grants → 可用/已用 total_available 等
+                // 很多第三方客户端（含 RikkaHub 一类）只认这两条，用来在设置页显示「余额」。
+                session.method == NanoHTTPD.Method.GET &&
+                    (uri == "/v1/dashboard/billing/subscription" || uri == "/dashboard/billing/subscription") ->
+                    billingSubscription(session)
+                session.method == NanoHTTPD.Method.GET &&
+                    (uri == "/v1/dashboard/billing/credit_grants" || uri == "/dashboard/billing/credit_grants") ->
+                    billingCreditGrants(session)
                 session.method == NanoHTTPD.Method.GET && uri == "/healthz" ->
                     NanoHTTPD.newFixedLengthResponse(SimpleStatus(200, "OK"), "text/plain; charset=utf-8", "ok")
                 session.method == NanoHTTPD.Method.GET && uri == "/authorize" -> authorize(session)
@@ -87,6 +97,85 @@ class GatewayHttpServer(
         if (!authorized(session)) return unauthorized(session)
         // 只对外暴露开放名单内的模型（未启用过滤时等价于全量）
         return json(200, OpenAiApi.modelList(engine.exposedModels()))
+    }
+
+    /**
+     * 余额汇总（供「下游客户端把额度显示成余额」用）。
+     *
+     * 返回所有**可查额度**账号的合计：额度池里每个账号的 credits 相加。
+     * 这不是 OpenAI 官方字段，是我们自己算的——所以下面两个标准端点也用它，
+     * 好让只认 OpenAI 协议的客户端能直接显示。
+     *
+     * 一个都查不到时 known=false：宁可让客户端显示「—」，也不能让它显示 0
+     * ——0 等于告诉用户「你没钱了」，会误导。
+     */
+    private fun creditSummary(): CreditSummary {
+        var remain = 0L
+        var known = false
+        for (status in engine.accounts()) {
+            if (!status.creditsKnown) continue
+            remain += status.credits
+            known = true
+        }
+        return CreditSummary(remain = remain, known = known)
+    }
+
+    /** OpenAI 账单订阅端点：下游拿 `hard_limit_usd` 当余额显示。 */
+    private fun billingSubscription(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        if (!authorized(session)) return unauthorized(session)
+        val summary = creditSummary()
+        val root = JsonObject().apply {
+            addProperty("object", "billing_subscription")
+            // 单位是「额度刻度」而不是美元：网关并不知道上游的积分怎么折算成钱，
+            // 硬换算成美元只会编出一个假数字。下游大多只把这个值当余额原样显示。
+            addProperty("hard_limit_usd", summary.remain.toDouble())
+            addProperty("soft_limit_usd", summary.remain.toDouble())
+            addProperty("system_hard_limit_usd", summary.remain.toDouble())
+            addProperty("access_until", 0)
+            // 额外字段：让知道内情（或我们自己）的客户端能区分「0 元」和「查不到」
+            addProperty("credits_known", summary.known)
+        }
+        return json(200, root.toString())
+    }
+
+    /** OpenAI 额度发放端点：`total_available` 是标准里的「可用余额」。 */
+    private fun billingCreditGrants(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        if (!authorized(session)) return unauthorized(session)
+        val summary = creditSummary()
+        val root = JsonObject().apply {
+            addProperty("object", "credit_summary")
+            addProperty("total_granted", summary.remain.toDouble())
+            addProperty("total_used", 0.0)
+            addProperty("total_available", summary.remain.toDouble())
+            addProperty("credits_known", summary.known)
+        }
+        return json(200, root.toString())
+    }
+
+    private data class CreditSummary(val remain: Long, val known: Boolean)
+
+    /**
+     * 额度归一化后的总量/已用（供 `/credits` 的 OpenRouter 兼容字段用）。
+     *
+     * 为什么要归一：下游客户端的余额模板普遍是**减法式**的
+     * （RikkaHub 的 OpenRouter 模板就是 `data.total_credits - data.total_usage`），
+     * 而网关池里每个账号只存了「剩余」一个数。这里把剩余还原成
+     * 「总量 = 剩余 + 已用」，让减法正好回到剩余，任何减法模板都能直接套用。
+     *
+     * 已用量来自账号的 detail/额度包都拿不到统一口径，所以这里只用
+     * 「总量 - 剩余」这一条恒等式：把 total_usage 记为 0、total_credits 记为剩余，
+     * 减法结果必然等于真实剩余。**不伪造用量**，也不算错。
+     */
+    private fun creditTotals(): Pair<Double, Double> {
+        var remain = 0L
+        var known = false
+        for (status in engine.accounts()) {
+            if (!status.creditsKnown) continue
+            remain += status.credits
+            known = true
+        }
+        // known=false 时给 0/0：下游算出 0，配合下面的 credits_known 字段可区分
+        return if (known) remain.toDouble() to 0.0 else 0.0 to 0.0
     }
 
     /** 聚合额度与配额查询端点：包含各供应商剩余额度及 Antigravity 的四个进度条指标。 */
@@ -170,6 +259,28 @@ class GatewayHttpServer(
         }
 
         root.add("providers", providerArray)
+
+        // ---- OpenRouter 兼容段（下游客户端的余额模板靠它取数）----
+        //
+        // 为什么不只靠 providers：RikkaHub / 多数客户端的余额查询是
+        // 「一个 URL + 一条表达式」，模板默认就是 OpenRouter 的形状：
+        //   {{baseUrl}}/credits  →  data.total_credits - data.total_usage
+        // 没有这两个字段时，客户端会报 "Balance path not found"，
+        // 用户即使把结果路径填对了也拿不到数——这正是「下游获取不了余额」的真因。
+        //
+        // 同时把 total_credits 填成「剩余」、total_usage 填 0，
+        // 使减法结果 == 真实剩余，任何减法模板都成立。
+        val (totalCredits, totalUsage) = creditTotals()
+        root.add("data", JsonObject().apply {
+            addProperty("total_credits", totalCredits)
+            addProperty("total_usage", totalUsage)
+        })
+        // 直接给一个「余额」字段，供模板直接写 balance 的客户端使用
+        root.addProperty("balance", totalCredits)
+        // 有多少个账号真的同步到了额度。0 表示一个都没查到，
+        // 客户端可据此区分「余额真的是 0」和「压根没取到数」。
+        root.addProperty("credits_known", engine.accounts().count { it.creditsKnown })
+
         return json(200, root.toString())
     }
 
@@ -1215,7 +1326,12 @@ class GatewayHttpServer(
     private fun authorized(session: NanoHTTPD.IHTTPSession): Boolean {
         // 本地回环地址发起额度/探活查询免 Key，方便本地 Dashboard 面板脚本在非对话时也能常驻刷新
         val uri = session.uri.trimEnd('/').ifEmpty { "/" }
-        if (isLocalhost(session) && (uri == "/v1/credits" || uri == "/credits" || uri == "/v1/v1/credits" || uri == "/healthz")) {
+        if (isLocalhost(session) && (
+                uri == "/v1/credits" || uri == "/credits" || uri == "/v1/v1/credits" || uri == "/healthz" ||
+                    uri == "/v1/dashboard/billing/subscription" || uri == "/dashboard/billing/subscription" ||
+                    uri == "/v1/dashboard/billing/credit_grants" || uri == "/dashboard/billing/credit_grants"
+                )
+        ) {
             return true
         }
         val settings = engine.settings()
