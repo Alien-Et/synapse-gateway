@@ -53,6 +53,83 @@ interface SmsLoginSupport {
     }
 }
 
+/**
+ * 登录前需要过一道人机校验的供应商（移动云盘：滑动拼图）。
+ *
+ * 与 [SmsLoginSupport] 分开是因为它只在**部分**供应商存在，硬塞进短信接口会让
+ * 讯飞等实现被迫写一堆空方法。界面按「provider 是否实现了这个接口」决定要不要画画板。
+ *
+ * 图片一律用 Base64 传（不含 `data:` 前缀），界面负责解码渲染。
+ */
+interface HumanCheckSupport {
+
+    /** 拉一张新的人机校验图。[phone] 已填时一并带上，上游据此做风控关联。 */
+    fun fetchHumanCheck(phone: String): HumanCheckChallenge
+
+    /**
+     * 是否需要在发短信码之前完成人机校验。
+     *
+     * 默认 true；个别供应商只对高频/新设备触发，那种情况下返回 false，
+     * 界面就不会强制先拖滑块。
+     */
+    val requiresHumanCheckBeforeSms: Boolean get() = true
+
+    /**
+     * 界面确认「人机校验已通过」时回调。
+     *
+     * WebView 模式下必须实现：校验页往往**自己就把短信码发出去了**，
+     * provider 需要记下这件事，让后续的 [SmsLoginSupport.sendSmsCode] 跳过实际发码，
+     * 否则会白耗一次上游的发码次数配额。
+     *
+     * 自绘模式下可以不管（界面拖完滑块后仍要 provider 自己发码）。
+     */
+    fun onHumanCheckPassed() {}
+}
+
+/**
+ * 一张人机校验图，或一个需要内嵌 WebView 打开的校验页。
+ *
+ * 两种形态二选一，用 [webUrl] 是否为空区分：
+ * - **自绘模式**（[sliderImage] / [backgroundImage] 有值）：上游给了两张 base64 图，
+ *   界面自己画滑块。适合「上游自己实现校验」的供应商。
+ * - **WebView 模式**（[webUrl] 有值）：校验由第三方 SDK 在网页里闭环完成，
+ *   界面只需内嵌 WebView 打开它。
+ *
+ * ⚠️ 移动云盘属于**第二种**。它的滑块是阿里云验证码 3.0，跑在
+ * `yun.139.com/fe/captcha/` 这个 H5 页面里，带设备指纹与阿里云侧 HMAC 签名，
+ * 纯 HTTP 复刻成本极高。而且页面验证通过后会**自己把短信码发出去**
+ * （实测响应 `{"success":true,"code":"0000","data":{"remainGetTimes":6}}`），
+ * 所以界面拿到成功信号后**不要再自己发一次码**。
+ */
+data class HumanCheckChallenge(
+    /** 滑块小图（Base64）。WebView 模式下为空。 */
+    val sliderImage: String = "",
+    /** 背景大图（Base64）。WebView 模式下为空。 */
+    val backgroundImage: String = "",
+    /** 滑块图案的原始宽度（px），界面据此等比缩放。 */
+    val sliderWidth: Int = 96,
+    /**
+     * 需要在内嵌 WebView 里打开的校验页地址。非空即走 WebView 模式。
+     *
+     * 界面应当拦截该页发出的业务请求，读到成功响应后关闭 WebView。
+     */
+    val webUrl: String = "",
+    /**
+     * WebView 模式下需要监听的成功判据：请求 URL 含这个子串、且响应体解出
+     * `"success":true` 时，视为校验通过。
+     *
+     * 留空表示界面自行判断（不推荐，容易把失败当成功）。
+     */
+    val successUrlHint: String = "",
+    /**
+     * WebView 应当使用的 User-Agent。
+     *
+     * 校验页会按 UA 判断宿主环境，留空则用系统默认 UA（可能被页面拒绝渲染）。
+     * 移动云盘要求伪装成官方 App 的 WebView，见 `MCloudDevice.webViewUserAgent`。
+     */
+    val userAgent: String = "",
+)
+
 interface LoopbackOAuthSupport {
     fun buildAuthUrl(): String
 

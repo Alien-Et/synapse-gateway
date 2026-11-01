@@ -43,6 +43,7 @@ import io.synapse.core.pool.PoolSummary
 import io.synapse.core.provider.ACTION_CHECKIN
 import io.synapse.core.provider.ACTION_TASKS
 import io.synapse.core.provider.DeviceAuthPoll
+import io.synapse.core.provider.HumanCheckChallenge
 import io.synapse.core.provider.ProviderActionResult
 import io.synapse.core.provider.ProviderCapability
 import io.synapse.core.provider.QuotaPack
@@ -1077,6 +1078,42 @@ class AppViewModel(
                 onFailure = { onResult(emptyList(), it.message ?: "拉取失败") },
             )
         }
+    }
+
+    /**
+     * 拉一张人机校验图（移动云盘滑动拼图）。
+     *
+     * 结果通过 [onResult] 回传：null 表示失败或不支持（界面按「没有滑块」处理，
+     * 不阻断后续发码——有些情况下上游会跳过校验）。
+     */
+    fun fetchHumanCheck(
+        providerId: String,
+        phone: String,
+        onResult: (HumanCheckChallenge?) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val challenge = withContext(Dispatchers.IO) {
+                runCatching { engine.fetchHumanCheck(providerId, phone) }.getOrNull()
+            }
+            onResult(challenge)
+        }
+    }
+
+    /** 该供应商是否必须先过人机校验（发送验证码前）。 */
+    fun requiresHumanCheck(providerId: String): Boolean =
+        runCatching { engine.requiresHumanCheck(providerId) }.getOrDefault(false)
+
+    /**
+     * 通知供应商「人机校验已通过」。
+     *
+     * WebView 模式的校验页自己会把短信码发出去，所以这里必须打个标记，
+     * 让随后的 [sendSmsCode] 跳过实际请求——上游对同一号码有次数配额
+     * （实测响应里的 `remainGetTimes`），重复发码会白耗一次甚至直接被风控挡掉。
+     */
+    fun notifyHumanCheckPassed(providerId: String) {
+        // 校验页已经发过码了，本地那套「60 秒重发」计时不该拦着用户，先清掉
+        smsResendAt.remove(providerId)
+        runCatching { engine.notifyHumanCheckPassed(providerId) }
     }
 
     /** 发短信验证码（msgid 内部暂存）；[onResult] 回传错误信息（空串表示成功）。 */

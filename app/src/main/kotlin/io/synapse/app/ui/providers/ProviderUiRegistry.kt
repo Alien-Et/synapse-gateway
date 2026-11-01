@@ -5,6 +5,7 @@ import io.synapse.app.ui.providers.antigravity.AntigravityUi
 import io.synapse.app.ui.providers.codebuddy.CodeBuddyUi
 import io.synapse.app.ui.providers.custom.CustomUi
 import io.synapse.app.ui.providers.loomy.LoomyUi
+import io.synapse.app.ui.providers.mcloud.MCloudUi
 import io.synapse.app.ui.providers.raccoon.RaccoonUi
 import io.synapse.app.ui.providers.trae.TraeUi
 
@@ -22,6 +23,7 @@ object ProviderUiRegistry {
         CodeBuddyUi,
         AntigravityUi,
         RaccoonUi,
+        MCloudUi,
     ).associateBy { it.id }
 
     private val customCache = ConcurrentHashMap<String, ProviderUi>()

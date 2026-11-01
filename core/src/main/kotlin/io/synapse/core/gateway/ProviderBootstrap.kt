@@ -4,6 +4,7 @@ import io.synapse.core.provider.ProviderRegistry
 import io.synapse.core.provider.antigravity.AntigravityProvider
 import io.synapse.core.provider.codebuddy.CodeBuddyProvider
 import io.synapse.core.provider.loomy.LoomyProvider
+import io.synapse.core.provider.mcloud.MCloudProvider
 import io.synapse.core.provider.raccoon.RaccoonProvider
 import io.synapse.core.provider.trae.TraeConstants
 import io.synapse.core.provider.trae.TraeProvider
@@ -61,6 +62,13 @@ internal fun registerBuiltinProviders(engine: GatewayEngine) {
 
     registry.register(
         RaccoonProvider(
+            hooks = engine.hooks,
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        MCloudProvider(
             hooks = engine.hooks,
             nowMillis = { engine.now() },
         ),
