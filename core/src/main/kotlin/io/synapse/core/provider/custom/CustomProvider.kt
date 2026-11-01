@@ -76,7 +76,7 @@ class CustomProvider(
         val model = requestedModel(openAiBody)
 
         val conn = try {
-            openConnection(chatUrl(config.baseUrl), key, openAiBody, "POST")
+            openConnection(chatUrl(config.baseUrl), key, openAiBody, "POST", config.headers)
         } catch (e: Exception) {
             return FailedChatCall(0, NetworkErrorText.describe(e))
         }
@@ -160,8 +160,179 @@ class CustomProvider(
         return UpstreamError(kind, message)
     }
 
-    /** 自定义供应商没有额度接口；返回 null 表示「不支持」。 */
-    override fun creditInfo(account: ProviderAccount): CreditInfo? = null
+    /**
+     * 余额查询。
+     *
+     * OpenAI 协议本身**没有余额接口**（官方只有用量，没有余额），所以这里不能靠协议，
+     * 只能靠用户在供应商配置里填 [BalanceQueryConfig]：一条 GET 地址 + 一个取值路径。
+     * 没配就返回 null（界面显示「不支持」，不编数字）。
+     *
+     * 认证沿用账号的 API Key；用户在「自定义请求头」里写了 `Authorization` 时以他写的为准
+     * ——有些中转站要求 `x-api-key` 或裸 Key，硬塞 Bearer 反而是错的。
+     */
+    override fun creditInfo(account: ProviderAccount): CreditInfo? {
+        val query = config.balanceQuery ?: return null
+        val key = parseKey(account) ?: return CreditInfo(0, known = false, detail = "凭证无法解析")
+        val url = balanceUrl(query)
+        if (url.isEmpty()) {
+            return CreditInfo(0, known = false, detail = "余额地址为空：请在供应商设置里填完整地址或相对路径")
+        }
+        return try {
+            val conn = openConnection(url, key, null, "GET", config.headers)
+            val status = try {
+                conn.responseCode
+            } catch (e: Exception) {
+                conn.disconnect()
+                return CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
+            }
+            if (status !in 200..299) {
+                val body = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
+                conn.disconnect()
+                return CreditInfo(
+                    0,
+                    known = false,
+                    detail = "余额接口 HTTP $status" +
+                        if (body.isBlank()) "" else "：${body.trim().take(160)}",
+                )
+            }
+            val text = runCatching { conn.inputStream.use { HttpSupport.readLimited(it) } }.getOrDefault("")
+            conn.disconnect()
+            parseBalance(text, query)
+        } catch (e: Exception) {
+            CreditInfo(0, known = false, detail = NetworkErrorText.describe(e))
+        }
+    }
+
+    /**
+     * 从响应里按路径取出余额。
+     *
+     * 取不到时**必须**报 known=false：余额真的是 0 和「字段没找到」在界面上是两件事，
+     * 前者说明要充值了，后者说明配置填错了——把后者显示成 0 会让人白充钱。
+     */
+    private fun parseBalance(text: String, query: io.synapse.core.gateway.BalanceQueryConfig): CreditInfo {
+        val root = runCatching { JsonParser.parseString(text) }.getOrNull()
+            ?: return CreditInfo(0, known = false, detail = "余额响应不是 JSON：${text.trim().take(120)}")
+        val raw = pickByPath(root, query.field)
+            ?: return CreditInfo(
+                0,
+                known = false,
+                detail = "响应里找不到「${query.field}」这个字段（片段：${text.trim().take(160)}）",
+            )
+        // 上游常把余额包成字符串（`"balance": "12.34"`），所以先按长整型试、再按浮点试。
+        // 直接 asLong 在非整数上会抛异常，用 runCatching 兜住。
+        val num = runCatching { raw.asString.trim().toLong() }.getOrNull()
+            ?: runCatching { raw.asString.trim().toDouble().toLong() }.getOrNull()
+            ?: runCatching { raw.asLong }.getOrNull()
+            ?: runCatching { raw.asDouble.toLong() }.getOrNull()
+            ?: return CreditInfo(0, known = false, detail = "「${query.field}」不是数字：${raw.toString().take(60)}")
+
+        val scale = if (query.scale > 0) query.scale else 1.0
+        val value = if (query.divide) (num / scale).toLong() else (num * scale).toLong()
+        val unit = query.unit.trim()
+        val detail = buildString {
+            append("余额 $value")
+            if (unit.isNotEmpty()) append(" $unit")
+            if (scale != 1.0) {
+                append("（上游 $num ")
+                append(if (query.divide) "÷" else "×")
+                append(if (scale == scale.toLong().toDouble()) scale.toLong().toString() else scale.toString())
+                append("）")
+            }
+        }
+        return CreditInfo(value, known = true, detail = detail)
+    }
+
+    /**
+     * 按点分路径取值，支持数组下标：`data.accounts.0.remain`。
+     *
+     * 全路径为空时直接返回根节点（响应本身就是个数字的接口）。
+     */
+    private fun pickByPath(root: com.google.gson.JsonElement, path: String): com.google.gson.JsonElement? {
+        val trimmed = path.trim()
+        if (trimmed.isEmpty()) return root
+        var current: com.google.gson.JsonElement = root
+        for (segment in trimmed.split('.')) {
+            if (segment.isEmpty()) return null
+            current = when {
+                current.isJsonObject -> current.asJsonObject.get(segment) ?: return null
+                current.isJsonArray -> {
+                    val index = segment.toIntOrNull() ?: return null
+                    val array = current.asJsonArray
+                    if (index < 0 || index >= array.size()) return null
+                    array.get(index)
+                }
+                else -> return null
+            }
+        }
+        return current.takeIf { it.isJsonPrimitive }
+    }
+
+    /**
+     * 余额地址：优先级 完整 URL > baseUrl + 相对路径 > baseUrl 本身。
+     *
+     * 最后一档不是兜底而是常见用法：不少中转站把余额就挂在 baseUrl 上
+     * （`https://x.com/v1` 直接回 `{"balance":12}`），这时只要填取值字段就够了。
+     */
+    private fun balanceUrl(query: io.synapse.core.gateway.BalanceQueryConfig): String {
+        val explicit = query.url.trim()
+        if (explicit.isNotEmpty()) return explicit
+        val base = config.baseUrl.trim().trimEnd('/')
+        if (base.isEmpty()) return ""
+        val path = query.path.trim()
+        if (path.isEmpty()) return base
+        return if (path.startsWith("/")) base + path else "$base/$path"
+    }
+
+    /**
+     * 保存前的连通性探针：返回 null 表示「这家能用」，非 null 是可以直接弹给用户的原因。
+     *
+     * 判据刻意宽松，因为 `/v1/models` **不是** OpenAI 协议里必被实现的接口：
+     *
+     * | 上游表现 | 判定 | 理由 |
+     * |---|---|---|
+     * | 200 且带模型 | 通过 | 最理想 |
+     * | 200 但列表为空 | 通过 | 有的站要显式开权限才有模型，对话仍可用 |
+     * | 401 / 403 | **失败** | Key 或请求头真的不对，用户必须知道 |
+     * | 404 / 405 / 5xx / 网络异常 | 通过 | 接口没实现或临时故障，不代表对话不通 |
+     *
+     * 之所以不把 404 判成失败：很多中转站只实现 `chat/completions`，没有 `models`，
+     * 它们完全可用——按 models 判死会把正常的供应商拦在门外。
+     */
+    fun probeModels(apiKey: String): ProbeOutcome {
+        if (config.baseUrl.isBlank()) return ProbeOutcome("接口地址不能为空")
+        val result = runCatching { rawModelsStatus(apiKey) }.getOrElse { e ->
+            // 网络层异常（DNS/连接拒绝）：这属于「地址可能写错了」，值得提示
+            return ProbeOutcome("连不上上游：${NetworkErrorText.describe(e)}")
+        }
+        val (status, body) = result
+        return when {
+            status in 200..299 -> ProbeOutcome(null)
+            status == 401 || status == 403 -> {
+                val hint = extractMessage(body).ifEmpty { "HTTP $status" }
+                ProbeOutcome("鉴权失败（HTTP $status）：$hint。请检查 API Key 与自定义请求头")
+            }
+            // 其余情况：接口没实现/上游抽风，但对话大概率能通，放行
+            else -> ProbeOutcome(null)
+        }
+    }
+
+    /** 打一次 `/models`，拿状态码与响应体（探针用，不解析模型）。 */
+    private fun rawModelsStatus(apiKey: String): Pair<Int, String> {
+        val conn = openConnection(modelsUrl(config.baseUrl), apiKey, null, "GET", config.headers)
+        return try {
+            val status = conn.responseCode
+            val text = runCatching {
+                val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+                HttpSupport.readLimited(stream)
+            }.getOrDefault("")
+            status to text
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    /** 探针结果：reason 为 null 表示通过。 */
+    data class ProbeOutcome(val reason: String?)
 
     /** 已保存的模型列表（UI 读取展示用）。 */
     fun savedModels(): List<String> = config.models
@@ -221,7 +392,7 @@ class CustomProvider(
         fun fetchModels(baseUrl: String, apiKey: String): List<String> {
             if (baseUrl.isBlank()) return emptyList()
             val conn = try {
-                openConnection(modelsUrl(baseUrl), apiKey, null, "GET")
+                openConnection(modelsUrl(baseUrl), apiKey, null, "GET", emptyList())
             } catch (_: Exception) {
                 return emptyList()
             }
@@ -247,11 +418,24 @@ class CustomProvider(
             key: String,
             body: String?,
             method: String,
+            extraHeaders: List<io.synapse.core.gateway.HttpHeader>,
         ): HttpURLConnection {
-            val headers = buildMap {
-                put("Accept", "text/event-stream, application/json")
-                if (key.isNotEmpty()) put("Authorization", "Bearer $key")
-                if (body != null) put("Content-Type", "application/json")
+            // 用 LinkedHashMap 而不是 buildMap：用户填的多个同名头（某些站要两条
+            // X-Forwarded-* 之类）必须都能留下来，Map 会去重成一条。
+            val headers = LinkedHashMap<String, String>()
+            headers["Accept"] = "text/event-stream, application/json"
+            if (key.isNotEmpty()) headers["Authorization"] = "Bearer $key"
+            if (body != null) headers["Content-Type"] = "application/json"
+            // 用户自定义头最后应用：同名覆盖内置值（尤其是 Authorization：
+            // 有些站点要 x-api-key 或裸 Key，硬塞 Bearer 一定验不过）
+            for (h in extraHeaders) {
+                val name = h.name.trim()
+                if (name.isEmpty() || !io.synapse.core.gateway.HttpHeader.isValidName(name)) continue
+                if (!io.synapse.core.gateway.HttpHeader.isValidValue(h.value)) continue
+                // Map 的 key 大小写敏感，HTTP 头大小写不敏感：先清掉大小写不同的同名项，
+                // 否则 Authorization 和 authorization 会同时发出去
+                headers.keys.filter { it.equals(name, ignoreCase = true) }.forEach { headers.remove(it) }
+                headers[name] = h.value
             }
             return HttpSupport.open(url, method, headers, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
         }
@@ -276,6 +460,21 @@ class CustomProvider(
 
         fun secretOf(apiKey: String): String =
             JsonObject().apply { addProperty("apiKey", apiKey) }.toString()
+
+        /**
+         * 从账号 secret（`{"apiKey":"sk-..."}`）里取回明文 Key。
+         *
+         * 账号池存的是包装后的 JSON，直接拿 secret 当 Key 发 Requests 必被拒。
+         * 兼容老数据：不是 JSON 时原样返回（早期版本可能直接存了裸 Key）。
+         */
+        fun parseKeyOf(secret: String): String? {
+            val trimmed = secret.trim()
+            if (trimmed.isEmpty()) return null
+            if (!trimmed.startsWith("{")) return trimmed
+            return runCatching {
+                JsonParser.parseString(trimmed).asJsonObject.get("apiKey")?.asString?.takeIf { it.isNotEmpty() }
+            }.getOrNull()
+        }
 
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 300_000

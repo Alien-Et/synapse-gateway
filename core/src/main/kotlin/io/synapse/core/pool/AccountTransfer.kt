@@ -97,6 +97,11 @@ object AccountTransfer {
                 addProperty("protocol", p.protocol)
                 addProperty("enabled", p.enabled)
                 add("models", JsonArray().apply { p.models.forEach { add(it) } })
+                // 请求头与余额配置一起带走：换机导入后能直接用，不用再手抄一遍
+                if (p.headers.isNotEmpty()) {
+                    add("headers", JsonArray().apply { p.headers.forEach { add(it.toJson()) } })
+                }
+                p.balanceQuery?.let { add("balanceQuery", it.toJson()) }
             })
         }
         return JsonObject().apply {
@@ -179,6 +184,15 @@ object AccountTransfer {
                         ?.asJsonArray?.mapNotNull { m -> runCatching { m.asString }.getOrNull() }
                         .orEmpty(),
                     enabled = item.get("enabled")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true,
+                    // 自定义请求头与余额配置也要跟着走：不然换台设备导入回来，
+                    // 能登录但调不通（缺头），也不知道该去哪查余额。
+                    headers = item.get("headers")?.takeIf { it.isJsonArray }
+                        ?.asJsonArray?.mapNotNull { h ->
+                            runCatching { io.synapse.core.gateway.HttpHeader.fromJson(h.asJsonObject) }.getOrNull()
+                        }
+                        .orEmpty(),
+                    balanceQuery = item.get("balanceQuery")?.takeIf { it.isJsonObject }
+                        ?.asJsonObject?.let { io.synapse.core.gateway.BalanceQueryConfig.fromJson(it) },
                 ),
             )
         }

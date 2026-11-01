@@ -150,6 +150,26 @@ data class CustomProviderConfig(
     /** 手填或从 `/v1/models` 拉取的模型名列表。 */
     val models: List<String> = emptyList(),
     val enabled: Boolean = true,
+    /**
+     * 额外请求头（按书写顺序发送，可多条同名）。
+     *
+     * 中转站/自建网关经常要求一些非标准头：`User-Agent`、`X-Api-Key`、
+     * 租户号、渠道号等，光有 `Bearer` 进不去。这里让用户自己补，
+     * 而不是逼他去改客户端或让我们硬编。
+     *
+     * **`Authorization` 由 API Key 自动生成**，用户如果也写了一条 `Authorization`，
+     * 以用户写的为准（有些站点要求 `x-api-key` 而不是 `Bearer`，甚至有要求裸 Key 的）。
+     * 这里只做覆盖、不做拼接——两个 Auth 头同时发出去，服务端多半直接 400。
+     */
+    val headers: List<HttpHeader> = emptyList(),
+    /**
+     * 余额查询的配置；为 null 表示这家不查余额。
+     *
+     * 各家查余额的路径、字段、包装结构都不一样，而且多半**不是** OpenAI 标准协议
+     * （OpenAI 自己都没有余额接口）。所以这里做成一条可配置的 GET 请求 +
+     * 一个「从 JSON 里挑出数字」的取值路径，而不是塞一堆供应商分支。
+     */
+    val balanceQuery: BalanceQueryConfig? = null,
 ) {
     val providerId: String get() = "custom:$key"
 
@@ -161,6 +181,8 @@ data class CustomProviderConfig(
         addProperty("protocol", protocol)
         add("models", JsonArray().apply { models.forEach { add(it) } })
         addProperty("enabled", enabled)
+        add("headers", JsonArray().apply { headers.forEach { add(it.toJson()) } })
+        balanceQuery?.let { add("balanceQuery", it.toJson()) }
     }
 
     companion object {
@@ -188,6 +210,108 @@ data class CustomProviderConfig(
                 protocol = obj.get("protocol")?.asString.orEmpty().ifEmpty { PROTOCOL_OPENAI },
                 models = models,
                 enabled = obj.get("enabled")?.asBoolean ?: true,
+                headers = obj.arrayOrNull("headers")
+                    ?.mapNotNull { el ->
+                        runCatching { HttpHeader.fromJson(el.asJsonObject) }.getOrNull()
+                    }
+                    .orEmpty(),
+                balanceQuery = obj.objOrNull("balanceQuery")?.let { BalanceQueryConfig.fromJson(it) },
+            )
+        }
+    }
+}
+
+/** 一条自定义请求头。 */
+data class HttpHeader(
+    val name: String,
+    val value: String,
+) {
+    fun toJson(): JsonObject = JsonObject().apply {
+        addProperty("name", name)
+        addProperty("value", value)
+    }
+
+    companion object {
+        /**
+         * HTTP 头的名字只允许 token 字符（RFC 7230 field-name）。
+         *
+         * 不校验的后果不是「报错」而是「静默失效」：带空格或冒号的名字发出去，
+         * 有些客户端会直接把这个头丢掉，用户看到的是「明明配了却不生效」。
+         */
+        private val NAME_PATTERN = Regex("^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$")
+
+        fun isValidName(name: String): Boolean = NAME_PATTERN.matches(name)
+
+        /** 值里不能有换行/回车：那是 HTTP 头注入（CRLF injection）的入口。 */
+        fun isValidValue(value: String): Boolean = value.none { it == '\r' || it == '\n' }
+
+        fun fromJson(obj: JsonObject): HttpHeader? {
+            val name = obj.get("name")?.asString?.trim().orEmpty()
+            if (name.isEmpty() || !isValidName(name)) return null
+            val value = obj.get("value")?.asString.orEmpty()
+            if (!isValidValue(value)) return null
+            return HttpHeader(name, value)
+        }
+    }
+}
+
+/**
+ * 自定义供应商的余额查询配置。
+ *
+ * 做法是「一条 GET + 一条取值路径」，而不是按供应商硬编：
+ * 中转站的余额接口五花八门（`/api/user/self`、`/v1/credits`、`/dashboard/billing/...`），
+ * 字段名也从 `balance` 到 `quota.data.remain` 都有。硬编只能覆盖已知的几家，
+ * 让用户自己填两个字段反而能覆盖全部。
+ */
+data class BalanceQueryConfig(
+    /** 完整地址；留空表示用供应商地址推导（baseUrl 去掉 `/v1` 后拼 [path]）。 */
+    val url: String = "",
+    /** [url] 为空时的相对路径，例如 `/api/user/self`。 */
+    val path: String = "",
+    /**
+     * 取值路径，点分写法，如 `data.quota` / `data.remain`。
+     *
+     * 每一段都支持数组下标（`data.accounts.0.remain`）。为空表示直接取根节点
+     * （响应本身就是个数字时用）。
+     */
+    val field: String = "balance",
+    /**
+     * 换算倍数：上游给的是「最小单位」（如某些站的 quota 是 500000 = $1），
+     * 想显示成元/点数就填倍数。默认 1，表示原样显示。
+     */
+    val scale: Double = 1.0,
+    /**
+     * 上游数值是否要除以倍数而不是乘。
+     *
+     * 这里不猜：`quota=500000` 到底等于 1 元还是 500000 点，只有用户知道。
+     */
+    val divide: Boolean = false,
+    /** 单位名（显示用），如「点」「元」。空串表示不显示单位。 */
+    val unit: String = "",
+) {
+    fun toJson(): JsonObject = JsonObject().apply {
+        addProperty("url", url)
+        addProperty("path", path)
+        addProperty("field", field)
+        addProperty("scale", scale)
+        addProperty("divide", divide)
+        addProperty("unit", unit)
+    }
+
+    companion object {
+        fun fromJson(obj: JsonObject): BalanceQueryConfig? {
+            val url = obj.get("url")?.asString.orEmpty().trim()
+            val path = obj.get("path")?.asString.orEmpty().trim()
+            val field = obj.get("field")?.asString.orEmpty().trim()
+            // 三样全空 = 没配，别落一条空配置占地方
+            if (url.isEmpty() && path.isEmpty() && field.isEmpty()) return null
+            return BalanceQueryConfig(
+                url = url,
+                path = path,
+                field = field.ifEmpty { "balance" },
+                scale = obj.get("scale")?.takeIf { it.isJsonPrimitive }?.asDouble?.takeIf { it > 0 } ?: 1.0,
+                divide = obj.get("divide")?.asBoolean ?: false,
+                unit = obj.get("unit")?.asString.orEmpty(),
             )
         }
     }
