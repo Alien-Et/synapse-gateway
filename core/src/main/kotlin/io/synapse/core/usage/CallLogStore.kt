@@ -104,6 +104,15 @@ data class UsageStats(
     val failed: Long = 0,
     /** 客户端中途断开（流式中断）的请求数；三者相加应等于 [requests]。 */
     val aborted: Long = 0,
+    /**
+     * 上游回报的积分消耗合计。
+     *
+     * 用途：把「积分」和「token」两个量纲连起来——同一段时间里
+     * 消耗了多少积分、顺带产生了多少 token，两者相除就是**真实换算率**，
+     * 再乘上剩余积分就能估出「剩下的积分还能跑多少 token」。
+     * 上游不报积分的供应商这里恒为 0，换算时会自动跳过。
+     */
+    val pointsConsumed: Long = 0,
 ) {
     /** 命中率（0~100 的百分比）；没有输入 token 时返回 null（无意义，不编造 0%）。 */
     val cacheHitPercent: Double?
@@ -136,6 +145,17 @@ class CallLogStore(
     /** 每日聚合，键为该日 00:00 的时间戳；仅保留最近 [RETENTION_DAYS] 天。 */
     private val daily = mutableMapOf<Long, UsageStats>()
 
+    /**
+     * **按供应商**的每日聚合：`providerId -> (日 -> 统计)`。
+     *
+     * 为什么不从 [daily] 反推：它是全局汇总，混起来就再也分不开谁消耗了多少积分、
+     * 产出了多少 token。而「积分换 token」的比例**每家都不一样**（Trae 可能 1 积分
+     * 换 50 token，Loomy 可能换 5000），用全池平均值折算会让某些家的余额虚高几十倍。
+     *
+     * 所以必须在写入时就按供应商分开累计，换算时各用各的样本。
+     */
+    private val dailyByProvider = mutableMapOf<String, MutableMap<Long, UsageStats>>()
+
     init {
         if (preloadOnConstruction) load()
     }
@@ -163,6 +183,14 @@ class CallLogStore(
         val updated = (daily[day] ?: UsageStats()) + record
         daily[day] = updated
         store.write(dayKeyOf(day), updated.toJson().toString())
+        // 同时单独记一份该供应商的：换算率要按家算，不能混
+        val pid = record.providerId
+        if (pid.isNotEmpty()) {
+            val perProvider = dailyByProvider.getOrPut(pid) { mutableMapOf() }
+            val providerUpdated = (perProvider[day] ?: UsageStats()) + record
+            perProvider[day] = providerUpdated
+            store.write(providerDayKeyOf(pid, day), providerUpdated.toJson().toString())
+        }
         pruneDaily()
     }
 
@@ -199,6 +227,22 @@ class CallLogStore(
                 daily[day] = remaining
                 store.write(dayKeyOf(day), remaining.toJson().toString())
             }
+            // 供应商维度的同步递减：不同步删会让换算率一直停在旧样本上
+            val pid = removed.providerId
+            if (pid.isNotEmpty()) {
+                val perProvider = dailyByProvider[pid]
+                if (perProvider != null) {
+                    val left = (perProvider[day] ?: UsageStats()) - removed
+                    if (left.isZero()) {
+                        perProvider.remove(day)
+                        store.delete(providerDayKeyOf(pid, day))
+                        if (perProvider.isEmpty()) dailyByProvider.remove(pid)
+                    } else {
+                        perProvider[day] = left
+                        store.write(providerDayKeyOf(pid, day), left.toJson().toString())
+                    }
+                }
+            }
         }
     }
 
@@ -214,6 +258,7 @@ class CallLogStore(
         for (key in store.keys(USAGE_PREFIX)) store.delete(key)
         totalAgg = UsageStats()
         daily.clear()
+        dailyByProvider.clear()
     }
 
     /** 删除早于保留窗口的日键；只清内存与存储的旧日聚合，不影响累计。 */
@@ -223,7 +268,34 @@ class CallLogStore(
             daily.remove(day)
             store.delete(dayKeyOf(day))
         }
+        for ((pid, perProvider) in dailyByProvider.entries.toList()) {
+            for (day in perProvider.keys.filter { it < cutoff }) {
+                perProvider.remove(day)
+                store.delete(providerDayKeyOf(pid, day))
+            }
+            if (perProvider.isEmpty()) dailyByProvider.remove(pid)
+        }
     }
+
+    /**
+     * 某供应商最近 [days] 天的统计（下标 0 最早、末尾今天）。
+     *
+     * 没记录的日子补零——调用方按整段区间累加成样本，
+     * 缺天不补会让「天数」和实际样本对不上（但累加结果相同，补零是为了长度一致）。
+     */
+    @Synchronized
+    fun dailyStatsByProvider(providerId: String, nowMillis: Long, days: Int = 30): List<UsageStats> {
+        if (days <= 0) return emptyList()
+        val perProvider = dailyByProvider[providerId] ?: return List(days) { UsageStats() }
+        val today = startOfDay(nowMillis)
+        return (days - 1 downTo 0).map { offset ->
+            perProvider[startOfDay(today - offset * 86_400_000L)] ?: UsageStats()
+        }
+    }
+
+    /** 所有有记录（且有积分/ token 样本）的供应商 id。 */
+    @Synchronized
+    fun providerIdsWithUsage(): Set<String> = dailyByProvider.keys.toSet()
 
     /** 累计聚合：不受容量淘汰与过期清理影响，跨启动累加。 */
     @Synchronized
@@ -398,6 +470,34 @@ class CallLogStore(
                 daily[day] = (daily[day] ?: UsageStats()) + record
             }
         }
+        loadProviderDaily(records)
+    }
+
+    /**
+     * 载入按供应商的日聚合。
+     *
+     * 存储里有（新版本写的）就直接读；一条都没有时按已载入的记录兜底重建——
+     * 老版本升级上来的人不会因为「没这个键」就永远算不出换算率。
+     */
+    private fun loadProviderDaily(records: List<CallRecord>) {
+        for (key in store.keys(PROVIDER_DAY_PREFIX)) {
+            // 键形如 usage/byProvider/<providerId>/<day>
+            val rest = key.removePrefix(PROVIDER_DAY_PREFIX)
+            val slash = rest.lastIndexOf('/')
+            if (slash <= 0) continue
+            val pid = rest.substring(0, slash)
+            val day = rest.substring(slash + 1).toLongOrNull() ?: continue
+            val stats = store.read(key)?.let(::usageStatsFromJson) ?: continue
+            dailyByProvider.getOrPut(pid) { mutableMapOf() }[day] = stats
+        }
+        if (dailyByProvider.isNotEmpty()) return
+        for (record in records) {
+            val pid = record.providerId
+            if (pid.isEmpty()) continue
+            val day = startOfDay(record.startedAtMillis)
+            val perProvider = dailyByProvider.getOrPut(pid) { mutableMapOf() }
+            perProvider[day] = (perProvider[day] ?: UsageStats()) + record
+        }
     }
 
     private fun aggregate(records: List<CallRecord>): UsageStats {
@@ -409,6 +509,8 @@ class CallLogStore(
     private fun keyOf(id: String) = "$PREFIX$id"
 
     private fun dayKeyOf(day: Long) = "$DAY_PREFIX$day"
+
+    private fun providerDayKeyOf(providerId: String, day: Long) = "${PROVIDER_DAY_PREFIX}${providerId}/$day"
 
     /**
      * 把超出摘要长度的完整原文溢写到缓存目录（每字段一个文件，单文件上限 [MAX_SPILL_CHARS]）。
@@ -464,6 +566,9 @@ class CallLogStore(
         private const val USAGE_PREFIX = "usage/"
         private const val TOTAL_KEY = "usage/total"
         private const val DAY_PREFIX = "usage/day/"
+
+        /** 按供应商的日聚合键前缀（形如 `usage/byProvider/trae/1735603200000`）。 */
+        private const val PROVIDER_DAY_PREFIX = "usage/byProvider/"
 
         /** 每日聚合保留天数（含今天）。 */
         const val RETENTION_DAYS = 30
@@ -525,6 +630,7 @@ private operator fun UsageStats.plus(record: CallRecord) = copy(
     completionTokens = completionTokens + record.completionTokens,
     totalTokens = totalTokens + record.totalTokens,
     cachedTokens = cachedTokens + record.cachedTokens,
+    pointsConsumed = pointsConsumed + record.pointsConsumed,
     success = success + if (record.status == CallStatus.SUCCESS) 1 else 0,
     failed = failed + if (record.status == CallStatus.FAILED) 1 else 0,
     aborted = aborted + if (record.status == CallStatus.ABORTED) 1 else 0,
@@ -536,6 +642,7 @@ private operator fun UsageStats.minus(record: CallRecord) = copy(
     completionTokens = (completionTokens - record.completionTokens).coerceAtLeast(0),
     totalTokens = (totalTokens - record.totalTokens).coerceAtLeast(0),
     cachedTokens = (cachedTokens - record.cachedTokens).coerceAtLeast(0),
+    pointsConsumed = (pointsConsumed - record.pointsConsumed).coerceAtLeast(0),
     success = (success - if (record.status == CallStatus.SUCCESS) 1 else 0).coerceAtLeast(0),
     failed = (failed - if (record.status == CallStatus.FAILED) 1 else 0).coerceAtLeast(0),
     aborted = (aborted - if (record.status == CallStatus.ABORTED) 1 else 0).coerceAtLeast(0),
@@ -547,6 +654,7 @@ private fun UsageStats.toJson(): JsonObject = JsonObject().apply {
     addProperty("completionTokens", completionTokens)
     addProperty("totalTokens", totalTokens)
     addProperty("cachedTokens", cachedTokens)
+    addProperty("pointsConsumed", pointsConsumed)
     addProperty("success", success)
     addProperty("failed", failed)
     addProperty("aborted", aborted)
@@ -554,7 +662,8 @@ private fun UsageStats.toJson(): JsonObject = JsonObject().apply {
 
 private fun UsageStats.isZero(): Boolean =
     requests == 0L && promptTokens == 0L && completionTokens == 0L &&
-        totalTokens == 0L && cachedTokens == 0L && success == 0L && failed == 0L && aborted == 0L
+        totalTokens == 0L && cachedTokens == 0L && pointsConsumed == 0L &&
+        success == 0L && failed == 0L && aborted == 0L
 
 private fun usageStatsFromJson(raw: String): UsageStats {
     val obj = runCatching { JsonParser.parseString(raw).asJsonObject }.getOrNull() ?: return UsageStats()
@@ -564,6 +673,8 @@ private fun usageStatsFromJson(raw: String): UsageStats {
         completionTokens = obj.get("completionTokens")?.asLong ?: 0L,
         totalTokens = obj.get("totalTokens")?.asLong ?: 0L,
         cachedTokens = obj.get("cachedTokens")?.asLong ?: 0L,
+        // 老数据没有这个键 → 0；换算时会把它当成「该区间没有积分样本」跳过
+        pointsConsumed = obj.get("pointsConsumed")?.asLong ?: 0L,
         success = obj.get("success")?.asLong ?: 0L,
         failed = obj.get("failed")?.asLong ?: 0L,
         aborted = obj.get("aborted")?.asLong ?: 0L,

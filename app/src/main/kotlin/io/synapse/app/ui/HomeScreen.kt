@@ -101,6 +101,7 @@ import io.synapse.app.ui.theme.LocalAppColors
 import io.synapse.app.ui.theme.WarningAmber
 import io.synapse.core.provider.RoutedModel
 import io.synapse.core.usage.CallRecord
+import io.synapse.core.usage.CreditReport
 import io.synapse.core.usage.CallStatus
 import io.synapse.core.usage.UsageStats
 import io.synapse.core.util.startOfDay
@@ -2087,20 +2088,37 @@ private fun DrawScope.drawSeries(xs: FloatArray, ys: FloatArray, baseline: Float
     )
 }
 
-/** 2×3 遥测指标网格。 */
+/**
+ * 遥测指标网格：**两列**（原来是三列）。
+ *
+ * 改两列的原因：三列时每张卡只有 ~1/3 屏宽，
+ * 「今日 TOKENS」和「已知额度」这种要显示「12.3万 · 输入 8.1万 / 输出 4.2万」的长内容
+ * 必然被 ellipsis 截断，用户看不到关键数字。
+ * 两列后每张卡宽了近一半，这两个数字终于能完整露出来。
+ *
+ * 布局：
+ * ```
+ * 供应商      账号就绪
+ * 模型        今日请求
+ * 今日TOKENS  ← 独占一行（横排：大数字在左，输入/输出在右）
+ * 已知额度    ← 独占一行（横排：大数字在左，换算说明在右）
+ * ```
+ * 后两张是这次重点，所以让它们横跨整行、内容左右分布，而不是挤在窄卡里。
+ */
 @Composable
 private fun TelemetryGrid(state: AppUiState, modifier: Modifier = Modifier) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             ProvidersTile(state, Modifier.weight(1f))
             ReadinessTile(state, Modifier.weight(1f))
-            ModelsTile(state, Modifier.weight(1f))
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ModelsTile(state, Modifier.weight(1f))
             RequestsTile(state, Modifier.weight(1f))
-            TodayTokensTile(state, Modifier.weight(1f))
-            CreditsTile(state, Modifier.weight(1f))
         }
+        // 下面两张独占整行：内容长，需要横向铺开
+        TodayTokensTile(state, Modifier.fillMaxWidth())
+        CreditsTile(state, Modifier.fillMaxWidth())
     }
 }
 
@@ -2128,8 +2146,17 @@ private fun Tile(modifier: Modifier, label: String, content: @Composable ColumnS
 
 /** 大号细体数字 + 小号后缀。 */
 @Composable
-private fun BigNumber(value: String, suffix: String? = null, color: Color = Color.Unspecified) {
-    Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+private fun BigNumber(
+    value: String,
+    suffix: String? = null,
+    color: Color = Color.Unspecified,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
         Text(
             text = value,
             style = MaterialTheme.typography.headlineSmall,
@@ -2138,6 +2165,9 @@ private fun BigNumber(value: String, suffix: String? = null, color: Color = Colo
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
+            // 让它能在 Row 里按权重收缩：不加 weight 时 Text 会按内容撑满，
+            // 右侧的说明文字就被挤出屏幕（这正是之前「位置不够」的直接原因）。
+            modifier = Modifier.weight(1f, fill = false),
         )
         if (suffix != null) {
             Text(
@@ -2262,22 +2292,105 @@ private fun RequestsTile(state: AppUiState, modifier: Modifier) {
 @Composable
 private fun TodayTokensTile(state: AppUiState, modifier: Modifier) {
     Tile(modifier, "今日 TOKENS · TOKENS") {
-        BigNumber(formatTokens(state.today.totalTokens))
-        TileNote("输入 ${formatTokens(state.today.promptTokens)} · 输出 ${formatTokens(state.today.completionTokens)}")
+        // 横排：左边大数字，右边输入/输出分两行。
+        // 之前是竖排（大数字 + 一行备注），三列宽时那行备注必被截断，
+        // 「输入 8.1万 · 输出 4.2万」只能看到一半。
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BigNumber(formatTokens(state.today.totalTokens), modifier = Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    text = "输入 ${formatTokens(state.today.promptTokens)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Text(
+                    text = "输出 ${formatTokens(state.today.completionTokens)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+        }
     }
 }
 
+/**
+ * 「已知额度」：token 与积分**两个大字并排**，各自带单位。
+ *
+ * 井水不犯河水：
+ * - token 余额（灵犀）→ 左边大字，单位 token
+ * - 积分余额（其余家）→ 右边大字，单位 积分
+ *
+ * **绝不换算**。缺哪一种就只显示那一种：
+ * - 只有积分账户 → 只显示积分
+ * - 只有 token 账户 → 只显示 token
+ * - 都没有 → 显示「—」
+ */
 @Composable
 private fun CreditsTile(state: AppUiState, modifier: Modifier) {
-    val known = state.pool.creditsKnown > 0
+    val report = state.creditReport
     val goldText = LocalAppColors.current.goldText
     Tile(modifier, "已知额度 · TOTAL CREDITS") {
-        BigNumber(
-            value = if (known) formatCount(state.pool.totalCredits) else "—",
-            color = if (known) goldText else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        TileNote(if (known) "已同步 ${state.pool.creditsKnown} 个账号" else "尚未同步额度")
+        when {
+            // 两种都有：并排两个大字
+            report.hasTokens && report.hasPoints -> CreditSummaryTwo(report, goldText, state)
+            // 只有 token / 只有积分：都走单个大字
+            report.known -> CreditSummaryOne(report, goldText)
+            else -> {
+                // 一个都没查到：不编「0 额度」，显示「—」
+                Text(
+                    text = "—",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+        }
     }
+}
+
+/** 两种量纲都有：并排两个大字，各自带单位。 */
+@Composable
+private fun CreditSummaryTwo(report: CreditReport, goldText: Color, state: AppUiState) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BigNumber(
+            value = formatTokens(report.tokensBalance),
+            suffix = "token",
+            color = goldText,
+            modifier = Modifier.weight(1f),
+        )
+        BigNumber(
+            value = formatCount(report.pointsBalance),
+            suffix = "积分",
+            color = goldText,
+            modifier = Modifier.weight(1f),
+        )
+    }
+    Text(
+        text = "已同步 ${state.pool.creditsKnown} 个账号",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+    )
+}
+
+/** 只有一种量纲：单个大字。 */
+@Composable
+private fun CreditSummaryOne(report: CreditReport, goldText: Color) {
+    val isToken = report.tokensBalance > 0
+    BigNumber(
+        value = if (isToken) formatTokens(report.tokensBalance) else formatCount(report.pointsBalance),
+        suffix = if (isToken) "token" else "积分",
+        color = goldText,
+    )
 }
 
 /** Antigravity 的模型组配额窗口（每组 × 每窗口一条），首页与账号详情共用。 */
