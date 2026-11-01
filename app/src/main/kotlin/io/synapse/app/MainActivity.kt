@@ -271,11 +271,13 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                     validateLabel = { viewModel.validateCustomLabel(it, page.key) },
                     onSave = { config, apiKey ->
                         // 一次到位：落盘 + 落账号 + 后台自动拉模型。
-                        // 拉模型可能要几百毫秒到几秒，不阻塞返回：先跳去详情页，
-                        // 拉完会把结果写回配置并在那页看到列表。
+                        // 保存成功后**回到供应商列表**（不再停在刚保存的编辑页）：
+                        // 编辑页是「改配置」的地方，保存意味着这次修改结束了，
+                        // 留在原地会让人以为没生效、还想再点一次保存。模型在后台拉，
+                        // 拉完写回配置，列表里的模型数会自己更新。
                         viewModel.saveCustomProviderAndSync(config, apiKey) { ok, message ->
                             viewModel.notice(message)
-                            if (ok) subPage = SubPage.ProviderDetail(config.providerId)
+                            if (ok) subPage = null
                         }
                     },
                     onDelete = {

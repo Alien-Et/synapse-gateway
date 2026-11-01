@@ -253,6 +253,8 @@ data class AppUiState(
     val lanUrls: List<String> = emptyList(),
     val pool: PoolSummary = PoolSummary(0, 0, 0, 0, 0, 0),
     val today: UsageStats = UsageStats(),
+    /** 积分 ↔ token 的实测换算关系：首页把不同量纲的余额统一到 token 刻度。 */
+    val creditReport: io.synapse.core.usage.CreditReport = io.synapse.core.usage.CreditReport(),
     /** 最近 30 天的每日聚合（下标 0 最早、末尾今天）。 */
     val daily: List<UsageStats> = emptyList(),
     /** 全部记录汇总（今日 + 历史）。 */
@@ -342,6 +344,8 @@ private class Snapshot(
     val lanUrls: List<String>,
     val pool: PoolSummary,
     val today: UsageStats,
+    /** 积分 ↔ token 实测换算关系（首页「已知额度」用）。 */
+    val creditReport: io.synapse.core.usage.CreditReport,
     val daily: List<UsageStats>,
     val total: UsageStats,
     val providers: List<ProviderInfo>,
@@ -493,6 +497,7 @@ class AppViewModel(
                     lanUrls = engine.lanUrls(),
                     pool = engine.pool.summary(),
                     today = engine.callLogStore.todayStats(System.currentTimeMillis()),
+                    creditReport = engine.status().creditReport,
                     daily = engine.callLogStore.dailyStats(System.currentTimeMillis()),
                     total = engine.callLogStore.totalStats(),
                     providers = engine.providers(),
@@ -518,6 +523,7 @@ class AppViewModel(
                 lanUrls = snapshot.lanUrls,
                 pool = snapshot.pool,
                 today = snapshot.today,
+                creditReport = snapshot.creditReport,
                 daily = snapshot.daily,
                 total = snapshot.total,
                 providers = snapshot.providers,
@@ -1274,6 +1280,21 @@ class AppViewModel(
             // 回来，必须手动点一次刷新才行。现在等它写完再往下走。
             val error = withContext(Dispatchers.IO) {
                 runCatching {
+                    // 保存前先验一次能不能连上：真正该拦的情况只有「地址写错 / Key 不对 /
+                    // 缺请求头」——这些必须当场告诉用户，否则保存完还是用不了，
+                    // 而用户会以为是保存没生效。拉模型失败**不在此列**（见下）。
+                    if (config.baseUrl.isNotBlank()) {
+                        val probeKey = newApiKey?.trim()?.takeIf { it.isNotEmpty() }
+                            ?: config.apiKeys.firstOrNull()
+                            ?: engine.accounts(config.providerId).firstOrNull()
+                                ?.let { engine.account(config.providerId, it.uid)?.secret }
+                                ?.let { CustomProvider.parseKeyOf(it) }
+                            ?: ""
+                        if (probeKey.isNotEmpty()) {
+                            checkCustomProviderReachable(config.baseUrl, probeKey, config.headers)
+                                ?.let { throw IllegalStateException(it) }
+                        }
+                    }
                     saveCustomProviderNow(config)
                     // 详情页是「单独填一个新 Key」的交互，它不在 config.apiKeys 里，
                     // 而 syncCustomAccounts 只认 config.apiKeys，这里补一手。
@@ -1288,19 +1309,74 @@ class AppViewModel(
                 return@launch
             }
             refresh()
-            // 配置已经在盘上了，界面可以立刻返回：拉模型可能几百毫秒到几秒，
-            // 不该把用户卡在保存按钮上。详情页会看到列表自己长出来。
-            onDone(true, "已保存，正在后台获取模型…")
-            refreshCustomModels(config.providerId, newApiKey) { _, fetchError ->
-                notice(
-                    if (fetchError.isNotEmpty()) {
-                        "获取模型失败：$fetchError（可到供应商详情页重新保存重试）"
-                    } else {
-                        "模型已获取"
-                    },
-                )
+            // 到这里配置已经落盘，保存这件事本身**成功了**——立刻告诉界面。
+            // 拉模型是「顺带补全信息」，不是保存的前置条件：/v1/models 不可用但
+            // /v1/chat/completions 正常的中转站很常见（有的站就是没实现 models），
+            // 下游照样能用模型。所以这里**绝不能用拉模型的结果去否定保存**，
+            // 更不能用弹窗打断——之前就是拿它的失败弹了一句「获取模型失败…检查
+            // 接口地址与 API Key」，用户明明能用，却被提示配置错了。
+            onDone(true, "已保存")
+            // 静默补模型：成功就写回配置，失败就什么都不做（界面显示「无」，不打扰）
+            refreshCustomModelsSilently(config.providerId, newApiKey)
+        }
+    }
+
+    /**
+     * 后台静默拉模型。
+     *
+     * 与 [refreshCustomModels] 的区别：**从不弹提示**。
+     * 用途是保存后的自动补全——用户没主动要求这件事，失败了也没必要告诉他；
+     * 拉到了模型列表会自然出现在详情页里，拉不到就保持「无」。
+     *
+     * 真正的「能不能用」由保存时的连通性校验和模型页的测试负责，
+     * 这里只负责让列表尽量有内容。
+     */
+    private fun refreshCustomModelsSilently(providerId: String, apiKey: String?) {
+        viewModelScope.launch {
+            setCustomFetching(providerId, true)
+            val result = withContext(Dispatchers.IO) {
+                runCatching { doFetchModels(providerId, apiKey) }
+            }
+            setCustomFetching(providerId, false)
+            // 成功且非空才写回；失败/为空一律当作「没有模型」，不落盘、不提示。
+            // 不落盘的意义：上游只是这次抽风时，别把已有的模型列表清空。
+            val models = result.getOrNull().orEmpty()
+            if (models.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    runCatching {
+                        val latest = customConfig(providerId) ?: return@runCatching
+                        saveCustomProviderNow(latest.copy(models = models))
+                    }
+                }
+                refresh()
             }
         }
+    }
+
+    /**
+     * 保存前校验这家自定义供应商到底通不通。
+     *
+     * 判据是「能拿到模型列表」或「/v1/models 明确不是鉴权类错误」：
+     * 有些站根本没实现 models 接口（404/405），但对话正常，这时不能判成失败。
+     * 只有 401/403 才是真的 Key 或请求头有问题——那才是值得弹窗告诉用户的事。
+     *
+     * @return null 表示通过；非 null 是给用户看的原因。
+     */
+    private fun checkCustomProviderReachable(baseUrl: String, apiKey: String, headers: List<io.synapse.core.gateway.HttpHeader>): String? {
+        if (baseUrl.isBlank()) return "接口地址不能为空"
+        if (apiKey.isBlank()) return "至少填一个 API Key"
+        val probe = runCatching {
+            io.synapse.core.provider.custom.CustomProvider(
+                io.synapse.core.gateway.CustomProviderConfig(
+                    key = "probe",
+                    name = "probe",
+                    baseUrl = baseUrl,
+                    apiKeys = listOf(apiKey),
+                    headers = headers,
+                ),
+            ).probeModels(apiKey)
+        }.getOrElse { e -> return e.message ?: "连接失败" }
+        return probe.reason
     }
 
     /** 把单个 API Key 落成账号（已存在则跳过）。同步执行，调用方决定线程。 */
@@ -1339,16 +1415,38 @@ class AppViewModel(
         )
     }
 
+    /**
+     * 同步版取样模型（在 IO 线程调用）。取不到时抛异常。
+     *
+     * 给 [refreshCustomModelsSilently] 用：那边只要结果，不要提示文案，
+     * 用异常表达失败比塞一个空列表 + 错误串更干净。
+     */
+    private fun doFetchModels(providerId: String, apiKey: String?): List<String> {
+        val config = customConfig(providerId) ?: throw IllegalStateException("供应商配置不存在")
+        val effectiveKey = effectiveKeyFor(providerId, apiKey)
+        if (effectiveKey.isEmpty()) throw IllegalStateException("还没有可用的 API Key")
+        val models = CustomProvider.fetchModels(config.baseUrl, effectiveKey)
+        if (models.isEmpty()) throw IllegalStateException("上游没有返回模型")
+        return models
+    }
+
+    /** 取一个可用来打上游的 Key：优先传入的，其次账号池里第一个。 */
+    private fun effectiveKeyFor(providerId: String, apiKey: String?): String =
+        apiKey?.takeIf { it.isNotBlank() }
+            ?: CustomProvider.parseKeyOf(
+                engine.accounts(providerId).firstOrNull()
+                    ?.let { engine.account(providerId, it.uid)?.secret }
+                    .orEmpty(),
+            ).orEmpty()
+
     private fun fetchCustomModelsInternal(providerId: String, apiKey: String?, onResult: (List<String>, String) -> Unit) {
         val config = customConfig(providerId)
         if (config == null) {
             onResult(emptyList(), "供应商配置不存在")
             return
         }
-        val effectiveKey = apiKey?.takeIf { it.isNotBlank() }
-            ?: engine.accounts(providerId).firstOrNull()
-                ?.let { engine.account(providerId, it.uid)?.secret }
-                .orEmpty()
+        // 账号池里存的是 {"apiKey":"sk-..."} 的 JSON，直接当 Key 发出去必失败
+        val effectiveKey = effectiveKeyFor(providerId, apiKey)
         if (effectiveKey.isEmpty()) {
             onResult(emptyList(), "先添加一个 API Key，再获取模型")
             return
@@ -1433,6 +1531,47 @@ class AppViewModel(
             val results = engine.refreshAllCredits(providerId)
             if (results.isEmpty()) throw IllegalStateException("该供应商还没有账号")
             summarizeCredits(results, "（${results.size} 个账号）")
+        }
+    }
+
+    /**
+     * 测试自定义供应商的余额查询配置（**不落盘**）。
+     *
+     * 用临时构造的 CustomProvider 直接打一次上游：配置填错（路径、字段名、倍数）是
+     * 最常见的情况，如果非要先保存才能试，用户就得在「保存 → 看额度 → 回来改 → 再保存」
+     * 里来回折腾。这里用表单里的当前值现场试，试通了再保存。
+     *
+     * 用第一个可用账号的 Key 发请求（余额是账号级的，换号数值可能不同）。
+     */
+    fun probeCustomBalance(
+        config: CustomProviderConfig,
+        onResult: (ok: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val account = engine.accounts(config.providerId)
+                .firstOrNull { it.usable }
+                ?.let { engine.account(config.providerId, it.uid) }
+            val (ok, message) = withContext(Dispatchers.IO) {
+                if (account == null) {
+                    false to "先保存一个 API Key 再测试余额"
+                } else {
+                    // config 里的地址可能还没保存/不合法，构造与调用都可能抛异常，
+                    // 这里统一兜住转成一条失败提示，不让它冒到协程外
+                    runCatching {
+                        io.synapse.core.provider.custom.CustomProvider(config).creditInfo(account)
+                    }.fold(
+                        onSuccess = { info ->
+                            when {
+                                info == null -> false to "余额查询未启用"
+                                info.known -> true to info.detail
+                                else -> false to "查询失败：${info.detail}"
+                            }
+                        },
+                        onFailure = { e -> false to (e.message ?: "余额查询失败") },
+                    )
+                }
+            }
+            onResult(ok, message)
         }
     }
 
