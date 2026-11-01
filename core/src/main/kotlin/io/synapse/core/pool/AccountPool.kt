@@ -38,6 +38,12 @@ data class AccountStatus(
     /** 使用优先级：数值越大越先用；同级仍按余额。默认 0。 */
     val priority: Int = 0,
     /**
+     * 会员身份名（如「白银会员」），**由服务器下发**（`/m4c/openapi/userIdentity` 的 typeName）。
+     *
+     * 界面在账号名右侧显示为彩色胶囊标签；空串表示不是会员或查询不到，不显示标签。
+     */
+    val memberLevel: String = "",
+    /**
      * 是否被手动移到了默认（uid 字典序）位置之上。
      *
      * 不能直接用 `priority > 0` 判定：↑/↓ 是交换两个账号的优先级，退回原顺序时高值会落到
@@ -65,6 +71,8 @@ private class Entry(var account: ProviderAccount) {
     var detail: String = ""
     var actionHint: String = ""
     var actionUrl: String = ""
+    /** 会员身份名（服务器下发，如「白银会员」）；空串表示非会员或未查到。 */
+    var memberLevel: String = ""
     var disabled: Boolean = false
     var enabled: Boolean = true
     var reason: String = ""
@@ -275,6 +283,7 @@ class AccountPool(
         detail: String = "",
         actionHint: String = "",
         actionUrl: String = "",
+        memberLevel: String = "",
     ) {
         val found = lock.write {
             val entry = entries[keyOf(providerId, uid)] ?: return@write false
@@ -283,6 +292,7 @@ class AccountPool(
             entry.detail = detail
             entry.actionHint = actionHint
             entry.actionUrl = actionUrl
+            if (memberLevel.isNotEmpty()) entry.memberLevel = memberLevel
             true
         }
         if (found) persistState(providerId, uid)
@@ -507,6 +517,7 @@ class AccountPool(
         disabled = entry.disabled,
         enabled = entry.enabled,
         priority = entry.priority,
+        memberLevel = entry.memberLevel,
     )
 
     private fun keyOf(providerId: String, uid: String) = "$providerId/$uid"

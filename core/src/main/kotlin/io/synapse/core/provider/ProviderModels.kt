@@ -42,6 +42,12 @@ data class CreditInfo(
      * 只接受 https 链接：这里的内容来自上游响应，绝不能让它变成可执行的任意 scheme。
      */
     val actionUrl: String = "",
+    /**
+     * 会员身份名（如「白银会员」），**由上游服务器下发**，不是硬编码。
+     *
+     * 界面把它渲染成账号名右侧的彩色胶囊标签；空串表示不是会员或查不到，不显示标签。
+     */
+    val memberLevel: String = "",
 )
 
 /** provider 专属动作的结果。 */

@@ -3,6 +3,7 @@ package io.synapse.app.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,8 +11,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -28,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.synapse.app.ui.providers.ProviderUiActions
@@ -42,17 +47,59 @@ fun AccountTitleColumn(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
-        Text(
-            text = account.nickname.ifEmpty { account.uid },
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
+        // 账号名 + 会员胶囊标签同一行：标签紧跟名字右侧
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = account.nickname.ifEmpty { account.uid },
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (account.memberLevel.isNotEmpty()) {
+                Spacer(Modifier.width(6.dp))
+                MemberLevelBadge(account.memberLevel)
+            }
+        }
         Text(
             text = accountStatusText(account),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+/**
+ * 会员身份胶囊标签。
+ *
+ * 文字**完全来自服务器**（`typeName`，如「白银会员」「黄金会员」），这里不做任何映射，
+ * 只按等级给个颜色：等级越高越亮（金 > 银 > 其他），认不出的名字用中性色。
+ */
+@Composable
+fun MemberLevelBadge(level: String, modifier: Modifier = Modifier) {
+    val (bg, fg) = memberBadgeColors(level)
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(bg)
+            .border(1.dp, fg.copy(alpha = 0.35f), RoundedCornerShape(50))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        Text(
+            text = level,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = fg,
+        )
+    }
+}
+
+/** 按等级名挑选胶囊配色（金/银/钻/铂），只影响观感，不参与任何业务判断。 */
+@Composable
+private fun memberBadgeColors(level: String): Pair<Color, Color> = when {
+    level.contains("金") -> Color(0xFFFFC107).copy(alpha = 0.30f) to Color(0xFFFFD54F)
+    level.contains("银") -> Color(0xFF90A4AE).copy(alpha = 0.38f) to Color(0xFFECEFF1)
+    level.contains("钻") -> Color(0xFF2979FF).copy(alpha = 0.30f) to Color(0xFF90CAF9)
+    level.contains("铂") || level.contains("白") -> Color(0xFFB0BEC5).copy(alpha = 0.28f) to Color(0xFFFAFAFA)
+    else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.26f) to MaterialTheme.colorScheme.primary
 }
 
 /**

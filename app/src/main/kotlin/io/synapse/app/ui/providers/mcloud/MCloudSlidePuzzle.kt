@@ -96,14 +96,30 @@ fun SlidePuzzle(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
-        // 背景：严格按原图宽高比，绝不拉伸
+        // 背景：严格按原图宽高比，绝不拉伸。
+        // 手势挂在**整张图**上（第 2 条需求：图形内任意焦点都能拖），
+        // 用户按住图片任何位置左右拖都能移动滑块，不必去够底部那条细轨道。
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(bgW / bgH)
                 .clip(RoundedCornerShape(10.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
-                .onSizeChanged { drawnWidth = it.width.toFloat() },
+                .onSizeChanged {
+                    drawnWidth = it.width.toFloat()
+                    // 图片宽度同时作为拖拽可用范围，保证两个入口刻度一致
+                    if (trackWidth <= 0f) trackWidth = it.width.toFloat()
+                }
+                .pointerInput(backgroundImage, drawnWidth) {
+                    detectDragGestures(
+                        onDragEnd = { finishIfFarEnough(drawnWidth, offsetX, completed) { completed = true; onCompleted() } },
+                    ) { change, drag ->
+                        change.consume()
+                        if (!completed) {
+                            offsetX = dragTo(offsetX + drag.x, drawnWidth, with(density) { 56.dp.toPx() })
+                        }
+                    }
+                },
         ) {
             if (background != null) {
                 Image(
@@ -144,10 +160,10 @@ fun SlidePuzzle(
                 .pointerInput(backgroundImage, trackWidth) {
                     detectDragGestures(
                         onDragEnd = {
-                            // 判定标准：拖到轨道 45% 以上就算通过。
+                            // 判定标准：拖到可用宽度 45% 以上就算通过。
                             // 上游并不校验轨迹（真正的风控在发码频率上），
                             // 假精确只会让用户反复失败。
-                            if (trackWidth > 0f && offsetX >= trackWidth * 0.45f) {
+                            finishIfFarEnough(trackWidth, offsetX, completed) {
                                 completed = true
                                 onCompleted()
                             }
@@ -155,8 +171,7 @@ fun SlidePuzzle(
                     ) { change, drag ->
                         change.consume()
                         if (!completed) {
-                            val max = (trackWidth - with(density) { 56.dp.toPx() }).coerceAtLeast(0f)
-                            offsetX = (offsetX + drag.x).coerceIn(0f, max)
+                            offsetX = dragTo(offsetX + drag.x, trackWidth, with(density) { 56.dp.toPx() })
                         }
                     }
                 },
@@ -204,8 +219,33 @@ fun SlidePuzzle(
     }
 }
 
+
+/**
+ * 把偏移量夹在 [0, 可用宽度 - 手柄宽度] 内。
+ *
+ * 图片区与底部轨道用同一套换算：图片宽度按原图比例缩放后，位移就按图片宽度算，
+ * 这样「在图上拖」和「在轨道上拖」得到的位置是一致的。
+ */
+private fun dragTo(current: Float, containerWidth: Float, handlePx: Float): Float {
+    if (containerWidth <= 0f) return current
+    val max = (containerWidth - handlePx).coerceAtLeast(0f)
+    return (current).coerceIn(0f, max)
+}
+
+/** 松手判定：位移超过可用宽度的 45% 视为通过。 */
+private fun finishIfFarEnough(
+    containerWidth: Float,
+    offsetX: Float,
+    completed: Boolean,
+    onPass: () -> Unit,
+) {
+    if (completed || containerWidth <= 0f) return
+    if (offsetX >= containerWidth * 0.45f) onPass()
+}
+
 /**
  * 解 Base64 → [ImageBitmap]。上游有时带 `data:image/png;base64,` 前缀，两种都要能解。
+
  *
  * 解不出来返回 null，由调用方放行（上游不二次校验轨迹，不该因为它卡住用户）。
  */
