@@ -141,8 +141,9 @@ fun CustomProviderScreen(
         SectionCard {
             SectionLabel("模型")
             Text(
-                text = "不需要在这里填。点「保存」后会自动向上游 /v1/models 获取，" +
-                    "拿到后可在供应商详情页里看到完整列表。",
+                text = "不需要在这里填。保存后会自动向上游 /v1/models 获取，" +
+                    "拿到就在供应商详情页里列出；有些中转站没有这个接口，那边会显示「无」，" +
+                    "不代表不能用。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -175,7 +176,7 @@ fun CustomProviderScreen(
                     )
                 }
                 val canSave = keyError == null && baseUrlTrimmed.isNotEmpty() && !keyRequired
-                OutlineActionButton(if (canSave) "保存并获取模型" else "请先补全标签、地址与 Key") {
+                OutlineActionButton(if (canSave) "保存" else "请先补全标签、地址与 Key") {
                     if (!canSave) return@OutlineActionButton
                     onSave(
                         CustomProviderConfig(

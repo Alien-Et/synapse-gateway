@@ -38,6 +38,7 @@ import io.synapse.core.provider.raccoon.RaccoonProvider
 import io.synapse.core.provider.trae.TraeProvider
 import io.synapse.core.store.KeyValueStore
 import io.synapse.core.usage.CallLogStore
+import io.synapse.core.usage.CreditReport
 import io.synapse.core.usage.RequestLog
 import io.synapse.core.usage.StorageAudit
 import io.synapse.core.usage.StorageReport
@@ -143,6 +144,13 @@ data class GatewayStatus(
     val today: UsageStats,
     val missingApiKey: Boolean,
     val providerCount: Int,
+    /**
+     * 积分 ↔ token 的实测换算关系。
+     *
+     * 池子里的余额是混合量纲（灵犀报 token、其余报积分），
+     * 首页「已知额度」靠它把积分折成 token 才能加在一起。
+     */
+    val creditReport: CreditReport = CreditReport(),
 )
 
 /**
@@ -588,7 +596,36 @@ class GatewayEngine(
         today = callLogStore.todayStats(nowMillis()),
         missingApiKey = !settings.allowNoKey && settings.apiKey.isEmpty(),
         providerCount = registry.all().count { providerSettings(it.id).enabled },
+        creditReport = buildCreditReport(),
     )
+
+    /**
+     * 用最近的日统计算出积分↔token 的实测换算率，并把池里余额按量纲分开。
+     *
+     * 样本窗口取最近 30 天（[CallLogStore.dailyStats] 的保留窗）：
+     * 只看今天常常样本不足；窗口太长又会把汇率变化、供应商调整系数之前的数据混进来。
+     *
+     * 怎么判断一个账号的余额是 token 还是积分：看 provider 给的 detail。
+     * 灵犀那条固定拼的是「剩余 … tokens …」，带 `tokens` 字样；其余家都是「积分/权益包」。
+     * 这不是靠 providerId 硬编，换一家以后只要 detail 里写了 tokens 也自动归到 token 侧。
+     */
+    private fun buildCreditReport(): CreditReport {
+        // 井水不犯河水：token / 积分 各算各的，绝不换算。
+        // 两次余额混在一起相加没有意义，换算又缺基准单价做不了。
+        var tokens = 0L
+        var points = 0L
+        for (status in pool.statuses()) {
+            if (!status.creditsKnown) continue
+            // 按 detail 里的单位标记分流：写了 tokens 的进 token 侧，否则进积分侧。
+            // 用文案而不是 providerId 硬编：以后接进来 a 写清单位的供应商会自动归位。
+            if (status.detail.contains(TOKEN_UNIT_MARK, ignoreCase = true)) {
+                tokens += status.credits
+            } else {
+                points += status.credits
+            }
+        }
+        return CreditReport(tokensBalance = tokens, pointsBalance = points)
+    }
 
     // ------------------------------------------------------------------ 供应商
 
@@ -2105,6 +2142,8 @@ class GatewayEngine(
             "谷歌" -> "antigravity"
             "讯飞" -> "loomy"
             "商汤" -> "raccoon"
+            // 灵犀（原「移动云盘 / 139 云」）。旧标签保留为别名，老客户端配置不用改。
+            "灵犀" -> "mcloud"
             "移动云盘" -> "mcloud"
             else -> null
         }
@@ -2154,7 +2193,7 @@ class GatewayEngine(
             "antigravity" -> "谷歌"
             "loomy" -> "讯飞"
             "raccoon" -> "商汤"
-            "mcloud" -> "移动云盘"
+            "mcloud" -> "灵犀"
             // 未知供应商沿用 id，不硬编中文
             else -> return if (region == null) providerId else "$providerId-$region"
         }
@@ -2238,6 +2277,17 @@ class GatewayEngine(
 
     private companion object {
         const val DAY_MILLIS = 24L * 3600 * 1000
+
+        /** 额度换算的样本窗口（天）：与 CallLogStore.dailyStats 的保留窗对齐。 */
+        const val CREDIT_SAMPLE_DAYS = 30
+
+        /**
+         * detail 里出现这个词就说明该账号的余额本来就是 token（灵犀这类）。
+         *
+         * 用文案而不是 providerId 判定：以后接进来的供应商只要 detail 写清单位，
+         * 就自动落到 token 侧，不需要回来改这里。
+         */
+        const val TOKEN_UNIT_MARK = "tokens"
 
         /** 详细日志单条上限：环形日志每条都全量展示，太长会淹没其它日志。 */
         const val VERBOSE_LINE_LIMIT = 1500
