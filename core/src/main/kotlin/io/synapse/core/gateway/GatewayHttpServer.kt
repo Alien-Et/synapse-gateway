@@ -299,9 +299,10 @@ class GatewayHttpServer(
         if (!authorized(session)) return unauthorized(session)
 
         val settings = engine.settings()
+        // limit = 0 表示不限：默认（开关关闭）就是这个状态，任何大小的请求体都照收。
         val bodyLimit = settings.effectiveBodyLimitBytes()
-        // 只有开了「大请求体」才走并发闸门：默认配置下不引入任何额外排队，
-        // 保持和以前完全一致的时序（老用户升级无感）。
+        // 只有打开「请求体限流」才走并发闸门。关闭时既不限大小也不限并发，
+        // 因为「不限」的语义就是完全放任——加并发限制等于偷偷加回了限制。
         if (!settings.largeBodyEnabled) {
             return chatCompletionsWithBody(session, settings, bodyLimit)
         }
@@ -328,6 +329,7 @@ class GatewayHttpServer(
         bodyLimit: Int,
     ): NanoHTTPD.Response {
         val (body, readResult) = readBody(session, bodyLimit)
+        // 未限流（bodyLimit = 0）时读取路径永不返回 OVER_LIMIT，这个分支只在开启限流后触发
         if (readResult == BodyReadResult.OVER_LIMIT) {
             return errorResponse(413, "payload_too_large", "请求体超过网关 ${bodyLimit / (1024 * 1024)}MB 上限")
         }
@@ -1469,9 +1471,19 @@ class GatewayHttpServer(
      * NanoHTTPD 自身不处理 `Transfer-Encoding: chunked` 的请求体，如果按「读到 EOF」去读会一直
      * 阻塞到连接关闭，所以这里自己解分块帧。
      */
+    /**
+     * 读取请求体。
+     *
+     * NanoHTTPD 自身不处理 `Transfer-Encoding: chunked` 的请求体，如果按「读到 EOF」去读会一直
+     * 阻塞到连接关闭，所以这里自己解分块帧。
+     *
+     * @param limit 单条上限（字节）；`<= 0`（[GatewaySettings.UNLIMITED_BODY_BYTES]）表示
+     *   **完全不限**——限流开关关闭时的默认行为。此时仍会持续读到 Content-Length 声明结束，
+     *   超大请求的全部字节都会进内存（可能 OOM，这是用户选择放任的代价）。
+     */
     private fun readBody(
         session: NanoHTTPD.IHTTPSession,
-        limit: Int = GatewaySettings.LEGACY_MAX_BODY_BYTES,
+        limit: Int = GatewaySettings.UNLIMITED_BODY_BYTES,
     ): Pair<String, BodyReadResult> {
         val input: InputStream = session.inputStream
         val out = ByteArrayOutputStream()
@@ -1494,40 +1506,64 @@ class GatewayHttpServer(
         val transferEncoding = session.headers["transfer-encoding"].orEmpty()
         val declared = session.headers["content-length"]?.trim()?.toLongOrNull() ?: -1L
         try {
-            // 丢弃路径同样套用当前上限：这里不保留任何字节（sink 只用于判断是否超限），
-            // 真正的限制只是「别把一次大请求当小请求反复读」——用 0 会让每次写入都判超限，
-            // 所以传当前生效上限，语义与接收路径保持一致。
+            // 丢弃路径不需要保留任何字节，但仍然要读干净：声明不限时也照读，
+            // 保证 keep-alive 连接上不留残留（残留会被下一个请求当成请求行）。
             val limit = engine.settings().effectiveBodyLimitBytes()
             when {
-                transferEncoding.contains("chunked", ignoreCase = true) -> readChunked(input, sink, limit)
-                declared > 0 -> readExactly(input, sink, declared, limit)
+                transferEncoding.contains("chunked", ignoreCase = true) -> readChunked(input, sink, limit, keep = false)
+                declared > 0 -> readExactly(input, sink, declared, limit, keep = false)
             }
         } catch (_: IOException) {}
     }
 
+    /**
+     * 按 Content-Length 精确读满 [length] 字节。
+     *
+     * @param limit `<= 0` 表示不限；否则超限后**继续读但丢弃**，把声明范围内的字节消费完，
+     *   避免残留污染 keep-alive 上的下一个请求。
+     * @param keep false 时一律丢弃（仅用于把请求体读干净的场景），不占内存。
+     */
     private fun readExactly(
         input: InputStream,
         out: ByteArrayOutputStream,
         length: Long,
         limit: Int,
+        keep: Boolean = true,
     ): BodyReadResult {
         val buffer = ByteArray(8192)
         var remaining = length
         var discarded = false
+        val unlimited = limit <= 0
         while (remaining > 0) {
             val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
             if (read < 0) return if (discarded) BodyReadResult.OVER_LIMIT else BodyReadResult.INCOMPLETE
-            // 超限后继续读但丢弃，保证 Content-Length 范围内的字节被消费完，连接上不留残留
-            if (out.size() < limit) out.write(buffer, 0, read) else discarded = true
+            if (!keep) {
+                // 丢弃模式：一个字节都不写，内存恒定
+            } else if (unlimited || out.size() < limit) {
+                out.write(buffer, 0, read)
+            } else {
+                discarded = true
+            }
             remaining -= read
         }
         return if (discarded) BodyReadResult.OVER_LIMIT else BodyReadResult.COMPLETE
     }
 
-    /** 解 `大小\r\n数据\r\n` 直到 0 号结束块。 */
-    private fun readChunked(input: InputStream, out: ByteArrayOutputStream, limit: Int): BodyReadResult {
+    /**
+     * 解 `大小\r\n数据\r\n` 直到 0 号结束块。
+     *
+     * @param limit `<= 0` 表示不限。
+     * @param keep false 时一律丢弃（读干净用），不占内存。
+     */
+    private fun readChunked(
+        input: InputStream,
+        out: ByteArrayOutputStream,
+        limit: Int,
+        keep: Boolean = true,
+    ): BodyReadResult {
         val buffer = ByteArray(8192)
         var discarded = false
+        val unlimited = limit <= 0
         while (true) {
             val header = readAsciiLine(input) ?: return BodyReadResult.INCOMPLETE
             // 允许 `1a;ext=1` 这种带扩展的块头
@@ -1537,7 +1573,13 @@ class GatewayHttpServer(
             while (remaining > 0) {
                 val read = input.read(buffer, 0, minOf(buffer.size, remaining))
                 if (read < 0) return BodyReadResult.INCOMPLETE
-                if (out.size() < limit) out.write(buffer, 0, read) else discarded = true
+                if (!keep) {
+                    // 丢弃模式
+                } else if (unlimited || out.size() < limit) {
+                    out.write(buffer, 0, read)
+                } else {
+                    discarded = true
+                }
                 remaining -= read
             }
             readAsciiLine(input)
@@ -1753,8 +1795,8 @@ class GatewayHttpServer(
 
     companion object {
         /**
-         * 历史固定上限（8MB）。保留常量名供旧代码引用；
-         * **实际生效值改由设置决定**，见 [GatewaySettings.effectiveMaxBodyBytes]。
+         * 历史固定上限（8MB）。**默认已不再生效**：限流开关关闭时为不限。
+         * 保留常量供「开启限流」时的下限参考与旧代码引用。
          */
         const val MAX_BODY_BYTES = GatewaySettings.LEGACY_MAX_BODY_BYTES
 

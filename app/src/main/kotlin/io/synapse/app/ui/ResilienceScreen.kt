@@ -351,7 +351,7 @@ private fun LargeBodyComponent(
     var mbText by remember(maxBodyMb) { mutableStateOf(maxBodyMb.toString()) }
     var concurrencyText by remember(concurrency) { mutableStateOf(concurrency.toString()) }
 
-    SectionLabel("请求体上限")
+    SectionLabel("请求体大小")
     SectionCard(enterIndex = 6) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -359,12 +359,12 @@ private fun LargeBodyComponent(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Column(Modifier.weight(1f)) {
-                Text("允许接收更大的请求体", style = MaterialTheme.typography.bodyMedium)
+                Text("限制请求体大小", style = MaterialTheme.typography.bodyMedium)
                 Text(
                     text = if (enabled) {
                         "已开启：单条上限 ${maxBodyMb}MB，同时最多收 $concurrency 条"
                     } else {
-                        "已关闭：沿用默认 8MB 上限"
+                        "已关闭：不限大小，任意大的请求体都照收"
                     },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -407,6 +407,15 @@ private fun LargeBodyComponent(
                 text = "内存峰值大约是「上限 × 同时接收数」的两三倍（要读原始字节、转字符串、再解析 JSON）。" +
                     "例如 32MB × 2 约需 200MB 堆内存；调得太高会让整个 App 被系统杀掉。" +
                     "超出同时接收数的请求会直接返回 429，不会排队干等。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "不限大小时请求体会被完整读进内存（原始字节 + 字符串 + 解析树，约 3 倍开销）。" +
+                    "一条 100MB 的请求可能占掉 600MB 以上，超过单个 App 的堆上限就会崩掉整个网关，" +
+                    "正在进行的对话也会中断。需要防护时打开上面的开关。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
