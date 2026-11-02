@@ -40,6 +40,17 @@ class GatewayHttpServer(
     port: Int,
 ) : NanoHTTPD(host, port) {
 
+    /**
+     * 「同时在读请求体」的许可池。
+     *
+     * 固定的 8 个许可只是**池容量上界**：真正生效的数量是设置里的
+     * [GatewaySettings.maxBodyConcurrency]（tryAcquire 时按比例判断），
+     * 这样改设置不用重建信号量，而 Semaphore 本身又不需要加锁。
+     *
+     * 只在 [GatewaySettings.largeBodyEnabled] 为 true 时被使用。
+     */
+    private val bodyReadSlots = BodyReadSlots(GatewaySettings.MAX_MAX_BODY_CONCURRENCY)
+
     fun listeningAddress(): String = (hostname ?: "0.0.0.0") + ":" + listeningPort
 
     override fun serve(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
@@ -287,9 +298,38 @@ class GatewayHttpServer(
     private fun chatCompletions(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         if (!authorized(session)) return unauthorized(session)
 
-        val (body, readResult) = readBody(session)
+        val settings = engine.settings()
+        val bodyLimit = settings.effectiveBodyLimitBytes()
+        // 只有开了「大请求体」才走并发闸门：默认配置下不引入任何额外排队，
+        // 保持和以前完全一致的时序（老用户升级无感）。
+        if (!settings.largeBodyEnabled) {
+            return chatCompletionsWithBody(session, settings, bodyLimit)
+        }
+        val permit = bodyReadSlots.tryAcquire(settings.maxBodyConcurrency)
+        if (!permit) {
+            // 超并发直接 429，不排队：排队会让客户端干等，而且内存峰值并没有因此下降
+            drainBody(session)
+            return errorResponse(
+                429,
+                "body_concurrency_limited",
+                "同时接收中的大请求已达上限（${settings.maxBodyConcurrency} 条），请稍后重试",
+            )
+        }
+        return try {
+            chatCompletionsWithBody(session, settings, bodyLimit)
+        } finally {
+            bodyReadSlots.release()
+        }
+    }
+
+    private fun chatCompletionsWithBody(
+        session: NanoHTTPD.IHTTPSession,
+        settings: GatewaySettings,
+        bodyLimit: Int,
+    ): NanoHTTPD.Response {
+        val (body, readResult) = readBody(session, bodyLimit)
         if (readResult == BodyReadResult.OVER_LIMIT) {
-            return errorResponse(413, "payload_too_large", "请求体超过网关 ${MAX_BODY_BYTES / (1024 * 1024)}MB 上限")
+            return errorResponse(413, "payload_too_large", "请求体超过网关 ${bodyLimit / (1024 * 1024)}MB 上限")
         }
         if (body.isEmpty()) {
             logInvalidBody(session, body, "请求体为空")
@@ -304,7 +344,6 @@ class GatewayHttpServer(
             return errorResponse(400, "invalid_request", "请求体不是合法 JSON")
         }
 
-        val settings = engine.settings()
         val streaming = peek.get("stream")?.asBoolean ?: false
         val requestedModel = peek.get("model")?.asString.orEmpty()
 
@@ -1430,15 +1469,18 @@ class GatewayHttpServer(
      * NanoHTTPD 自身不处理 `Transfer-Encoding: chunked` 的请求体，如果按「读到 EOF」去读会一直
      * 阻塞到连接关闭，所以这里自己解分块帧。
      */
-    private fun readBody(session: NanoHTTPD.IHTTPSession): Pair<String, BodyReadResult> {
+    private fun readBody(
+        session: NanoHTTPD.IHTTPSession,
+        limit: Int = GatewaySettings.LEGACY_MAX_BODY_BYTES,
+    ): Pair<String, BodyReadResult> {
         val input: InputStream = session.inputStream
         val out = ByteArrayOutputStream()
         val transferEncoding = session.headers["transfer-encoding"].orEmpty()
         val declared = session.headers["content-length"]?.trim()?.toLongOrNull() ?: -1L
 
         val result = when {
-            transferEncoding.contains("chunked", ignoreCase = true) -> readChunked(input, out)
-            declared > 0 -> readExactly(input, out, declared)
+            transferEncoding.contains("chunked", ignoreCase = true) -> readChunked(input, out, limit)
+            declared > 0 -> readExactly(input, out, declared, limit)
             else -> BodyReadResult.COMPLETE
         }
         // Gson 不接受 UTF-8 BOM，客户端带上时合法 JSON 会被误判
@@ -1452,14 +1494,23 @@ class GatewayHttpServer(
         val transferEncoding = session.headers["transfer-encoding"].orEmpty()
         val declared = session.headers["content-length"]?.trim()?.toLongOrNull() ?: -1L
         try {
+            // 丢弃路径同样套用当前上限：这里不保留任何字节（sink 只用于判断是否超限），
+            // 真正的限制只是「别把一次大请求当小请求反复读」——用 0 会让每次写入都判超限，
+            // 所以传当前生效上限，语义与接收路径保持一致。
+            val limit = engine.settings().effectiveBodyLimitBytes()
             when {
-                transferEncoding.contains("chunked", ignoreCase = true) -> readChunked(input, sink)
-                declared > 0 -> readExactly(input, sink, declared)
+                transferEncoding.contains("chunked", ignoreCase = true) -> readChunked(input, sink, limit)
+                declared > 0 -> readExactly(input, sink, declared, limit)
             }
         } catch (_: IOException) {}
     }
 
-    private fun readExactly(input: InputStream, out: ByteArrayOutputStream, length: Long): BodyReadResult {
+    private fun readExactly(
+        input: InputStream,
+        out: ByteArrayOutputStream,
+        length: Long,
+        limit: Int,
+    ): BodyReadResult {
         val buffer = ByteArray(8192)
         var remaining = length
         var discarded = false
@@ -1467,14 +1518,14 @@ class GatewayHttpServer(
             val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
             if (read < 0) return if (discarded) BodyReadResult.OVER_LIMIT else BodyReadResult.INCOMPLETE
             // 超限后继续读但丢弃，保证 Content-Length 范围内的字节被消费完，连接上不留残留
-            if (out.size() < MAX_BODY_BYTES) out.write(buffer, 0, read) else discarded = true
+            if (out.size() < limit) out.write(buffer, 0, read) else discarded = true
             remaining -= read
         }
         return if (discarded) BodyReadResult.OVER_LIMIT else BodyReadResult.COMPLETE
     }
 
     /** 解 `大小\r\n数据\r\n` 直到 0 号结束块。 */
-    private fun readChunked(input: InputStream, out: ByteArrayOutputStream): BodyReadResult {
+    private fun readChunked(input: InputStream, out: ByteArrayOutputStream, limit: Int): BodyReadResult {
         val buffer = ByteArray(8192)
         var discarded = false
         while (true) {
@@ -1486,7 +1537,7 @@ class GatewayHttpServer(
             while (remaining > 0) {
                 val read = input.read(buffer, 0, minOf(buffer.size, remaining))
                 if (read < 0) return BodyReadResult.INCOMPLETE
-                if (out.size() < MAX_BODY_BYTES) out.write(buffer, 0, read) else discarded = true
+                if (out.size() < limit) out.write(buffer, 0, read) else discarded = true
                 remaining -= read
             }
             readAsciiLine(input)
@@ -1701,7 +1752,11 @@ class GatewayHttpServer(
     private fun log(text: String) = engine.log(text)
 
     companion object {
-        const val MAX_BODY_BYTES = 8 * 1024 * 1024
+        /**
+         * 历史固定上限（8MB）。保留常量名供旧代码引用；
+         * **实际生效值改由设置决定**，见 [GatewaySettings.effectiveMaxBodyBytes]。
+         */
+        const val MAX_BODY_BYTES = GatewaySettings.LEGACY_MAX_BODY_BYTES
 
         /** `/v1/credits` 并行拉取的单家预算；上游半挂时不能让请求线程无限等。 */
         private const val CREDITS_FETCH_TIMEOUT_SECONDS = 20L
@@ -1850,3 +1905,44 @@ private fun callbackPage(title: String, message: String): String = """
     </style></head>
     <body><div class="card"><h1>$title</h1><p>$message</p></div></body></html>
 """.trimIndent()
+
+/**
+ * 「同时接收请求体」的限流器。
+ *
+ * 为什么不用 [java.util.concurrent.Semaphore]：并发上限是**运行时可改**的设置项，
+ * 而 Semaphore 的许可数只能在构造时定死（改要重建实例，正在读的请求会拿到失效引用）。
+ * 这里用一个原子计数 + 一个当前上限读取函数，改设置立即生效、不影响在途请求。
+ *
+ * 语义上故意做成 `tryAcquire`（不阻塞）：请求体并发超限时排队会让客户端干等，
+ * 而内存峰值并不会因为排队下降——直接 429 让客户端重试反而更清楚。
+ */
+internal class BodyReadSlots(private val maxLimit: Int) {
+    private val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * 尝试占一个名额。
+     *
+     * @param limit 当前生效的并发上限（1..[maxLimit]），超出 [maxLimit] 的部分直接夹回，
+     *   防止设置被外部写坏后把池撑爆。
+     */
+    fun tryAcquire(limit: Int = maxLimit): Boolean {
+        val cap = limit.coerceIn(1, maxLimit)
+        while (true) {
+            val current = inFlight.get()
+            if (current >= cap) return false
+            if (inFlight.compareAndSet(current, current + 1)) return true
+        }
+    }
+
+    fun release() {
+        // 只在 tryAcquire 成功后调用；减到负数说明调用方漏了 release，夹住不抛异常免得拖垮 serve()
+        inFlight.decrementAndGet()
+    }
+
+    /** 当前在途数量（仅用于状态展示/测试）。 */
+    fun current(): Int = inFlight.get()
+}
+
+/** 当前生效的单条请求体上限（字节），由设置里的开关决定。 */
+internal fun GatewaySettings.effectiveBodyLimitBytes(): Int =
+    GatewaySettings.effectiveMaxBodyBytes(largeBodyEnabled, maxBodyMb)
