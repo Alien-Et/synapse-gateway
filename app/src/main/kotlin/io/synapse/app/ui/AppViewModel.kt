@@ -41,6 +41,7 @@ import io.synapse.core.gateway.ProxySettings
 import io.synapse.core.pool.AccountStatus
 import io.synapse.core.pool.PoolSummary
 import io.synapse.core.provider.ACTION_CHECKIN
+import io.synapse.core.provider.ACTION_COMPLETE_TASKS
 import io.synapse.core.provider.ACTION_TASKS
 import io.synapse.core.provider.DeviceAuthPoll
 import io.synapse.core.provider.HumanCheckChallenge
@@ -1624,6 +1625,28 @@ class AppViewModel(
         val targets = batchTargets(ACTION_TASKS, ProviderCapability.TASKS)
         if (targets.isEmpty()) throw IllegalStateException("还没有支持任务的账号")
         engine.performActionAll(targets, ACTION_TASKS, onProgress = onProgress)
+    }
+
+    /**
+     * 批量「自动完成」任务（不只接单领奖，还按官方客户端行为把任务本身做完）。
+     *
+     * 与 [runAllTasks] 的分工：后者只做「接单 + 领已达标奖励」，任务进度要靠用户在官方客户端
+     * 自己做；这里连进度一起推进（WorkBuddy 成长中心上报埋点事件、对话类任务真发一次对话）。
+     *
+     * 单个账号的推进是多轮写请求，上游对密集写有风控，所以这里用批量路径的有界并发，
+     * 并在每个账号内部按 [CodeBuddyProvider] 的节奏停顿。
+     */
+    fun runAllTaskAutoComplete() = runBatch(
+        busyText = "自动完成任务",
+        successNotice = { results ->
+            results.filter { it.message.isNotEmpty() }
+                .joinToString("；") { "${it.nickname.ifEmpty { it.uid }}：${it.message}" }
+                .ifEmpty { "任务已处理（${results.size} 个账号）" }
+        },
+    ) { onProgress ->
+        val targets = batchTargets(ACTION_COMPLETE_TASKS, ProviderCapability.TASK_AUTO_COMPLETE)
+        if (targets.isEmpty()) throw IllegalStateException("还没有支持自动完成任务的账号")
+        engine.performActionAll(targets, ACTION_COMPLETE_TASKS, onProgress = onProgress)
     }
 
     /**

@@ -106,6 +106,18 @@ class RaccoonProvider(
 
     override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall {
         val credential = parse(account) ?: return FailedChatCall(401, "凭证无法解析")
+        // 已确定过期、且刷新刚刚连续失败：如实报一个**可重试**的错误。
+        // 不能带着过期 token 打上游——那会拿到 401，被分类成 SESSION_DEAD 而把账号硬禁用，
+        // 一次瞬时刷新失败就变成了用户看到的「登录失效」。连续失败超过上限就不再护着，
+        // 让真正的死会话（refresh_token 已被吊销）照常暴露出来。
+        if (shouldShieldExpiredCredential(
+                expiresAt = credential.expiresAt,
+                streak = synchronized(refreshLock) { refreshFailureStreak[account.uid] ?: 0 },
+                nowSeconds = nowMillis() / 1000,
+            )
+        ) {
+            return FailedChatCall(503, "凭证已过期且刷新未成功，稍后会自动重试")
+        }
         val streaming = isStreamingBody(openAiBody)
         val model = resolveModel(requestedModelOf(openAiBody))
         val body = prepareRaccoonBody(openAiBody)
@@ -297,25 +309,96 @@ class RaccoonProvider(
         val nowSeconds = nowMillis() / 1000
         if (credential.expiresAt > 0 && credential.expiresAt - nowSeconds > skewSeconds) return null
         if (credential.refreshToken.isEmpty()) return null
-        // 上游该端点若不可用（404/405/400），安全降级为 null：宁可过期后由 401 触发重新登录，
-        // 也不要在这里抛异常或清空凭证误伤账号。
-        return runCatching {
-            val (status, text) = postJson(
-                "$host$PATH_REFRESH",
-                JsonObject().apply { addProperty("refresh_token", credential.refreshToken) }.toString(),
-                jsonHeaders(credential),
-            )
-            if (status !in 200..299) return@runCatching null
-            val data = envelopeData(text) ?: return@runCatching null
-            val access = data.firstString("access_token", "accessToken")
-            if (access.isEmpty()) return@runCatching null
-            val refreshed = credential.copy(
-                accessToken = access,
-                refreshToken = data.firstString("refresh_token", "refreshToken").ifEmpty { credential.refreshToken },
-                expiresAt = jwtClaimLong(access, "exp") ?: credential.expiresAt,
-            )
-            toProviderAccount(refreshed, existingUid = account.uid)
-        }.getOrNull()
+        synchronized(refreshLock) {
+            // 锁内复查：并发请求跨入同一临期窗口时，复用别的线程刚刷出的凭证，绝不重复刷新。
+            // 必须返回新凭证——返回 null 会让调用方拿旧 token 去请求（直接 401）。
+            val cached = lastRefreshed[account.uid]
+            if (cached != null && cached.expiresAt - nowSeconds > skewSeconds) {
+                return toProviderAccount(cached, existingUid = account.uid)
+            }
+            // 失败冷却：刷新失败后短时间内不再重打，否则 token 被吊销后会按请求频率轰炸端点。
+            val failedAt = lastRefreshFailedAt[account.uid]
+            if (failedAt != null && nowSeconds - failedAt < REFRESH_COOLDOWN_SECONDS) return null
+            // 上游该端点若不可用（404/405/400），安全降级为 null：宁可过期后由 401 触发重新登录，
+            // 也不要在这里抛异常或清空凭证误伤账号。
+            // 失败原因用局部变量带出来：refreshFailed() 返回 ProviderAccount?，
+            // 放进 runCatching 会让整个表达式的类型退化成 Any。
+            var failure: String? = null
+            val refreshed: Credential? = runCatching {
+                val (status, text) = postJson(
+                    "$host$PATH_REFRESH",
+                    JsonObject().apply { addProperty("refresh_token", credential.refreshToken) }.toString(),
+                    jsonHeaders(credential),
+                )
+                if (status !in 200..299) {
+                    failure = "HTTP $status"
+                    return@runCatching null
+                }
+                val data = envelopeData(text)
+                if (data == null) {
+                    failure = "响应不是预期信封"
+                    return@runCatching null
+                }
+                val access = data.firstString("access_token", "accessToken")
+                if (access.isEmpty()) {
+                    failure = "响应里没有 access_token"
+                    return@runCatching null
+                }
+                credential.copy(
+                    accessToken = access,
+                    refreshToken = data.firstString("refresh_token", "refreshToken").ifEmpty { credential.refreshToken },
+                    // 绝不能沿用旧 expiresAt：能走到刷新就说明旧值已临期，沿用会让之后每个请求
+                    // 都再刷一次（刷新频率 = 请求频率），正是上游风控吊销 token 的触发条件。
+                    expiresAt = resolveRefreshedExpiry(data.firstLong("expires_in", "expiresIn"), access, nowSeconds),
+                )
+            }.getOrNull()
+            if (refreshed == null) {
+                return refreshFailed(account.uid, nowSeconds, failure ?: "未知原因")
+            }
+            lastRefreshed = lastRefreshed + (account.uid to refreshed)
+            if (lastRefreshFailedAt.containsKey(account.uid)) lastRefreshFailedAt = lastRefreshFailedAt - account.uid
+            if (refreshFailureStreak.containsKey(account.uid)) refreshFailureStreak = refreshFailureStreak - account.uid
+            return toProviderAccount(refreshed, existingUid = account.uid)
+        }
+    }
+
+    /** 记录一次刷新失败并返回 null（调用方据此沿用旧凭证/除障）。 */
+    private fun refreshFailed(uid: String, nowSeconds: Long, detail: String): ProviderAccount? {
+        hooks.onLog("小浣熊刷新凭证失败（$uid）：$detail")
+        lastRefreshFailedAt = lastRefreshFailedAt + (uid to nowSeconds)
+        refreshFailureStreak = refreshFailureStreak + (uid to ((refreshFailureStreak[uid] ?: 0) + 1))
+        return null
+    }
+
+    /**
+     * 刷新的结果是否可信：已确定过期、且刷新刚刚连续失败时，别再带过期 token 打上游。
+     *
+     * 带过期 token 会拿到 401 → 被分类成 SESSION_DEAD → 账号被硬禁用，
+     * 一次瞬时刷新失败就成了用户看到的「登录失效」。连续失败超过上限就不再护着，
+     * 让真正被吊销的会话照常暴露出来。
+     */
+    internal fun shouldShieldExpiredCredential(expiresAt: Long, streak: Int, nowSeconds: Long): Boolean {
+        if (expiresAt <= 0) return false
+        if (expiresAt > nowSeconds) return false
+        return streak in 1..MAX_SHIELD_STREAK
+    }
+
+    /**
+     * 刷新后的绝对过期时间：响应里的绝对/相对时间 → 新 access_token 的 JWT `exp` → 保守兜底 TTL。
+     *
+     * 绝不能沿用旧值（理由见 refreshAccount 里的注释）。
+     * [expiresInOrAt] 同时兼容「相对秒数」与「绝对秒级时间戳」两种上游口径。
+     */
+    internal fun resolveRefreshedExpiry(expiresInOrAt: Long, accessToken: String, nowSeconds: Long): Long {
+        val absolute = when {
+            expiresInOrAt <= 0 -> 0L
+            // 小于 100 年的秒数按「相对时长」解释，否则按绝对时间戳
+            expiresInOrAt > 3_155_760_000L -> 0L
+            expiresInOrAt > nowSeconds -> expiresInOrAt
+            else -> nowSeconds + expiresInOrAt
+        }
+        if (absolute > nowSeconds) return absolute
+        return jwtClaimLong(accessToken, "exp") ?: (nowSeconds + REFRESH_FALLBACK_TTL_SECONDS)
     }
 
     // ------------------------------------------------------------------ 网页登录
@@ -766,12 +849,37 @@ class RaccoonProvider(
         val orgCode: String,
     )
 
+    // ------------------------------------------------------------------ 刷新状态
+
+    private val refreshLock = Any()
+
+    /** 各账号最近一次成功刷新的凭证（按 uid）。 */
+    @Volatile
+    private var lastRefreshed: Map<String, Credential> = emptyMap()
+
+    /** 各账号最近一次刷新失败的秒级时间戳（按 uid），用于失败冷却。 */
+    @Volatile
+    private var lastRefreshFailedAt: Map<String, Long> = emptyMap()
+
+    /** 连续刷新失败次数（按账号）：决定还要不要护着过期凭证。 */
+    @Volatile
+    private var refreshFailureStreak: Map<String, Int> = emptyMap()
+
     companion object {
         const val ID = "raccoon"
 
         const val HOST = "https://xiaohuanxiong.com"
 
         const val APP_NAME = "Raccoon"
+
+        /** 刷新失败后的冷却时长：避免 token 被吊销后按请求频率轰炸刷新端点。 */
+        internal const val REFRESH_COOLDOWN_SECONDS = 60L
+
+        /** 连续失败超过这个次数就不再护着过期凭证，让真死会话照常暴露成 401。 */
+        internal const val MAX_SHIELD_STREAK = 2
+
+        /** 上游没给过期时间、JWT 也解不出 exp 时的兜底 TTL（30 分钟）。 */
+        internal const val REFRESH_FALLBACK_TTL_SECONDS = 1800L
 
         // ---- web 通道（官网/桌面客户端在用）----
         const val PATH_LOGIN = "/code/authorize"
