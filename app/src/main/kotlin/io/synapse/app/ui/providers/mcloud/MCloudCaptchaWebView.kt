@@ -21,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import io.synapse.core.provider.mcloud.MCloudConstants
 import io.synapse.core.provider.mcloud.MCloudCrypto
@@ -71,6 +72,10 @@ fun MCloudCaptchaWebView(
     val context = LocalContext.current
     var loading by remember { mutableStateOf(true) }
     var status by remember { mutableStateOf("正在加载校验页…") }
+    // 主文档加载失败的原因：失败就不再重试，直接把原因交给外层报错。
+    // （不在这里做「重试 / 换浏览器」按钮：验证页失败几乎都是网络层问题，
+    //   用户重开一次即可；在弹窗里堆按钮反而挡住页面。）
+    var loadError by remember { mutableStateOf("") }
     // 用引用持有 WebView，便于销毁时清理（WebView 不释放会泄漏整个 Activity）
     val holder = remember { arrayOfNulls<WebView>(1) }
 
@@ -151,7 +156,9 @@ fun MCloudCaptchaWebView(
                             super.onReceivedError(view, request, error)
                             // 只报主文档的错误；子资源（图片、统计脚本）失败不影响校验
                             if (request?.isForMainFrame == true) {
-                                onFailed("校验页加载失败：${error?.description ?: "网络错误"}")
+                                loadError = describeWebViewError(error, request.url?.toString())
+                                loading = false
+                                onFailed("校验页加载失败：$loadError")
                             }
                         }
                     }
@@ -161,6 +168,7 @@ fun MCloudCaptchaWebView(
                             view?.evaluateJavascript(HOOK_JS, null)
                         }
                     }
+                    loadError = ""
                     loadUrl(url)
                 }
             },
@@ -382,3 +390,36 @@ private val HOOK_JS = """
   }, { passive: false, capture: true });
 })();
 """.trimIndent()
+
+/**
+ * 把 WebView 的错误翻译成用户能行动的说明。
+ *
+ * 原生返回的是 `net::ERR_NAME_NOT_RESOLVED` 这类内核错误码，用户看到只会一脸茫然。
+ * 其中 DNS 失败最常见也最容易被误判成「App 坏了」：设备若配置了一个不可用的
+ * **私有 DNS（DoT）服务器**，系统级请求（如 curl）可能仍走常规 DNS 而正常，
+ * 但 WebView 会优先尝试 DoT 并直接失败、不回落——于是表现为「只有这个页面打不开」。
+ * 这种情况下要明确告诉用户去关私有 DNS，而不是让他反复重试。
+ */
+private fun describeWebViewError(error: android.webkit.WebResourceError?, url: String?): String {
+    val raw: String = (error?.description ?: "").toString()
+    val code = error?.errorCode ?: 0
+    val host: String = runCatching { java.net.URI(url ?: "").host ?: "" }.getOrDefault("")
+    val where = if (host.isEmpty()) "" else "（$host）"
+    return when {
+        // ERROR_HOST_LOOKUP = -2：域名解析失败
+        code == android.webkit.WebViewClient.ERROR_HOST_LOOKUP ||
+            raw.contains("ERR_NAME_NOT_RESOLVED") ||
+            raw.contains("ERR_NAME_RESOLUTION_FAILED") -> {
+            "域名解析失败$where。请检查手机是否开启了「私人 DNS」，" +
+                "若开启请先关闭（设置 → 网络和互联网 → 私人 DNS），然后重试。"
+        }
+        code == android.webkit.WebViewClient.ERROR_TIMEOUT || raw.contains("ERR_TIMED_OUT") ->
+            "连接超时$where，请检查网络后重试。"
+        code == android.webkit.WebViewClient.ERROR_CONNECT || raw.contains("ERR_CONNECTION") ->
+            "无法连接服务器$where，请检查网络或代理设置。"
+        // 证书类问题：系统时间不对时最常见
+        raw.contains("ERR_CERT") -> "页面证书校验失败$where，请检查手机系统时间是否正确。"
+        raw.isEmpty() -> "网络错误$where"
+        else -> raw
+    }
+}
