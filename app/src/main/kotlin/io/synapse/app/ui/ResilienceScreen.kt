@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.failover.CircuitBreakerConfig
 import io.synapse.core.failover.ConcurrencyConfig
 import io.synapse.core.failover.ModelCooldownConfig
@@ -89,6 +90,21 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
             onOpenConfig = { showCrossProviderDialog = true },
         )
 
+        Spacer(Modifier.height(4.dp))
+        LargeBodyComponent(
+            enabled = state.settings.largeBodyEnabled,
+            maxBodyMb = state.settings.maxBodyMb,
+            concurrency = state.settings.maxBodyConcurrency,
+            onToggle = { on ->
+                viewModel.updateSettings(state.settings.copy(largeBodyEnabled = on))
+            },
+            onLooseChange = { mb, concurrency ->
+                viewModel.updateSettings(
+                    state.settings.copy(maxBodyMb = mb, maxBodyConcurrency = concurrency),
+                )
+            },
+        )
+
         Spacer(Modifier.height(8.dp))
         Text(
             text = "全部参数保存后立即生效，无需重启网关。并发在途指「已向上游发起、尚未返回」的请求；" +
@@ -111,9 +127,9 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
                         crossProvider = state.failover.crossProvider.copy(
                             candidates = candidates,
                             strategy = strategy,
-                            // 用户在这一步明确选完候选，顺手把开关打开：否则保存了却不生效，
-                            // 用户会以为配置没起作用（弹窗标题已经说明了这是「故障兜底」）
-                            enabled = true,
+                            // 这里**不改** enabled：跨供应商默认关闭是用户明确要求的行为，
+                            // 选完候选就偷偷打开会让「关着」变成一句空话——用户以为没生效，
+                            // 实际已经绕过了「写哪家发哪家」的语义。要开就自己拨开关。
                         ),
                     ),
                 )
@@ -319,6 +335,82 @@ private fun CrossRegionComponent(enabled: Boolean, onToggle: (Boolean) -> Unit) 
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun LargeBodyComponent(
+    enabled: Boolean,
+    maxBodyMb: Int,
+    concurrency: Int,
+    onToggle: (Boolean) -> Unit,
+    onLooseChange: (Int, Int) -> Unit,
+) {
+    // 输入框的原始文本单独存：用户删空的瞬间不能立刻落盘成 0，
+    // 只在能解析出合法数字时回写设置（失焦/输入完成时由 clamp 兜住范围）。
+    var mbText by remember(maxBodyMb) { mutableStateOf(maxBodyMb.toString()) }
+    var concurrencyText by remember(concurrency) { mutableStateOf(concurrency.toString()) }
+
+    SectionLabel("请求体上限")
+    SectionCard(enterIndex = 6) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("允许接收更大的请求体", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = if (enabled) {
+                        "已开启：单条上限 ${maxBodyMb}MB，同时最多收 $concurrency 条"
+                    } else {
+                        "已关闭：沿用默认 8MB 上限"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onToggle)
+        }
+
+        // 只有打开开关才出现下面两项：关闭时连参数都不显示，
+        // 避免「关了但看起来还能调」的误解。
+        if (enabled) {
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
+
+            NumberField(
+                label = "单条请求体上限（${GatewaySettings.MIN_MAX_BODY_MB}-${GatewaySettings.MAX_MAX_BODY_MB} MB）",
+                value = mbText,
+                maxLen = 3,
+            ) { input ->
+                mbText = input
+                val parsed = input.toIntOrNull() ?: return@NumberField
+                onLooseChange(GatewaySettings.clampMaxBodyMb(parsed), concurrency)
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            NumberField(
+                label = "同时接收上限（${GatewaySettings.MIN_MAX_BODY_CONCURRENCY}-${GatewaySettings.MAX_MAX_BODY_CONCURRENCY} 条）",
+                value = concurrencyText,
+                maxLen = 1,
+            ) { input ->
+                concurrencyText = input
+                val parsed = input.toIntOrNull() ?: return@NumberField
+                onLooseChange(maxBodyMb, GatewaySettings.clampMaxBodyConcurrency(parsed))
+            }
+
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "内存峰值大约是「上限 × 同时接收数」的两三倍（要读原始字节、转字符串、再解析 JSON）。" +
+                    "例如 32MB × 2 约需 200MB 堆内存；调得太高会让整个 App 被系统杀掉。" +
+                    "超出同时接收数的请求会直接返回 429，不会排队干等。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
