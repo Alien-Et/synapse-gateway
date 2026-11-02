@@ -6,27 +6,32 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * 「大请求体」开关与并发闸门的纯逻辑测试。
+ * 「请求体限流」开关的纯逻辑测试。
  *
- * 覆盖三件容易写错的事：
- * 1. 开关关闭时必须回到 8MB，**不看**用户填的上限值（否则就是「关了没关干净」）；
- * 2. 上限 / 并发数读写时都要夹回合法区间（设置是从 JSON 读的，可能被手改坏）；
- * 3. 并发池满时 tryAcquire 必须立刻失败而不是排队。
+ * 语义是用户明确要求的：**开关关闭 = 完全不限**（等价于废除原 8MB 上限），
+ * 打开后才启用「上限 × 并发」双闸门。这里重点守住两件容易写反的事：
+ * 1. 关闭时上限必须是 0（不限），不能退回 8MB；
+ * 2. 关闭时并发也不生效——加并发限制等于偷偷把限制加回来了。
  */
 class LargeBodySettingsTest {
 
     @Test
-    fun `默认关闭且沿用 8MB 上限`() {
+    fun `默认关闭且完全不限`() {
         val settings = GatewaySettings()
-        assertFalse(settings.largeBodyEnabled, "默认必须关闭，不能悄悄放开")
-        assertEquals(8 * 1024 * 1024, settings.effectiveBodyLimitBytes())
+        assertFalse(settings.largeBodyEnabled, "默认必须关闭")
+        assertEquals(
+            GatewaySettings.UNLIMITED_BODY_BYTES,
+            settings.effectiveBodyLimitBytes(),
+            "关闭状态必须是不限，不能是 8MB",
+        )
+        assertEquals(0, settings.effectiveBodyLimitBytes())
     }
 
     @Test
-    fun `开关关闭时忽略用户填的上限`() {
-        // 用户先调成 256MB 再关开关：期望回到 8MB，而不是「关了但没完全关」
+    fun `开关关闭时忽略用户填的上限值`() {
+        // 用户先调成 256MB 再关开关：期望是不限，而不是某个残留的数值
         val settings = GatewaySettings(largeBodyEnabled = false, maxBodyMb = 256)
-        assertEquals(8 * 1024 * 1024, settings.effectiveBodyLimitBytes())
+        assertEquals(GatewaySettings.UNLIMITED_BODY_BYTES, settings.effectiveBodyLimitBytes())
     }
 
     @Test
@@ -36,15 +41,16 @@ class LargeBodySettingsTest {
     }
 
     @Test
+    fun `不限的表示值是 0 且读取路径据此不截断`() {
+        // readBody/readExactly/readChunked 都以 limit <= 0 作为「不限」的判断条件
+        assertTrue(GatewaySettings.UNLIMITED_BODY_BYTES <= 0)
+        assertEquals(0, GatewaySettings.UNLIMITED_BODY_BYTES)
+    }
+
+    @Test
     fun `上限被夹回合法区间`() {
-        assertEquals(
-            GatewaySettings.MIN_MAX_BODY_MB,
-            GatewaySettings.clampMaxBodyMb(0),
-        )
-        assertEquals(
-            GatewaySettings.MAX_MAX_BODY_MB,
-            GatewaySettings.clampMaxBodyMb(99999),
-        )
+        assertEquals(GatewaySettings.MIN_MAX_BODY_MB, GatewaySettings.clampMaxBodyMb(0))
+        assertEquals(GatewaySettings.MAX_MAX_BODY_MB, GatewaySettings.clampMaxBodyMb(99999))
         assertEquals(32, GatewaySettings.clampMaxBodyMb(32))
     }
 
@@ -69,14 +75,14 @@ class LargeBodySettingsTest {
     }
 
     @Test
-    fun `旧配置缺少新字段时落到默认值`() {
-        // 老版本存下来的 JSON 里根本没有这三个键
+    fun `旧配置缺少新字段时落到不限`() {
+        // 老版本存下来的 JSON 里根本没有这三个键；升级后行为应当是「不再有 8MB 上限」
         val legacy = """{"port":8790,"maxRotate":3}"""
         val restored = GatewaySettings.fromJson(legacy)
         assertFalse(restored.largeBodyEnabled)
         assertEquals(GatewaySettings.DEFAULT_MAX_BODY_MB, restored.maxBodyMb)
         assertEquals(GatewaySettings.DEFAULT_MAX_BODY_CONCURRENCY, restored.maxBodyConcurrency)
-        assertEquals(8 * 1024 * 1024, restored.effectiveBodyLimitBytes())
+        assertEquals(GatewaySettings.UNLIMITED_BODY_BYTES, restored.effectiveBodyLimitBytes())
     }
 
     @Test
@@ -113,7 +119,6 @@ class LargeBodySettingsTest {
     @Test
     fun `并发上限超过池容量时按池容量夹住`() {
         val slots = BodyReadSlots(GatewaySettings.MAX_MAX_BODY_CONCURRENCY)
-        // 传入超过池容量的上限不应突破池的物理容量
         repeat(GatewaySettings.MAX_MAX_BODY_CONCURRENCY) {
             assertTrue(slots.tryAcquire(limit = 999))
         }

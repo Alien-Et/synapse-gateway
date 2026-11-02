@@ -38,11 +38,12 @@ data class GatewaySettings(
     /** 请求日志环形缓冲容量（条）。 */
     val requestLogCapacity: Int = DEFAULT_REQUEST_LOG_CAPACITY,
     /**
-     * 「大请求体」总开关。默认关闭 = 沿用原来的 8MB 上限。
+     * 「请求体限流」总开关。**默认关闭 = 完全不做大小限制**。
      *
-     * 打开后才允许出现 [maxBodyMb] / [maxBodyConcurrency] 两个参数，
-     * 且以「上限 × 并发」乘积的方式放开——单看上限放开会让内存被外部客户端
-     * 直接决定（一条 100MB 请求峰值能到 600MB+，单进程堆 512MB 就 OOM 崩整个 App）。
+     * 语义（按用户要求）：
+     * - 关闭：不限大小、不限并发，与「废除上限」等价。请求体仍然会被完整读进内存，
+     *   所以超大请求可能把整个 App 撑到 OOM——这是放任的代价，用户明确要这个默认。
+     * - 打开：才启用 [maxBodyMb] + [maxBodyConcurrency] 的方案 B（上限 × 并发双闸门）。
      */
     val largeBodyEnabled: Boolean = false,
     /** 单条请求体上限（MB）；仅 [largeBodyEnabled] 为 true 时生效。 */
@@ -84,8 +85,11 @@ data class GatewaySettings(
         const val MIN_REQUEST_LOG_CAPACITY = 50
         const val MAX_REQUEST_LOG_CAPACITY = 5000
 
-        /** 关闭大请求体开关时固定使用的原上限（8MB），与历史行为一致。 */
+        /** 历史固定上限（8MB），仅作为「限流开启时」的下限参考，默认不再生效。 */
         const val LEGACY_MAX_BODY_BYTES = 8 * 1024 * 1024
+
+        /** 「不限」的表示：上限为 0 或负数时按不限处理。 */
+        const val UNLIMITED_BODY_BYTES = 0
 
         const val DEFAULT_MAX_BODY_MB = 32
         /** 上限下限：比老值 8MB 再小就没意义了，用户只是想放开才开这个开关。 */
@@ -104,13 +108,13 @@ data class GatewaySettings(
             value.coerceIn(MIN_MAX_BODY_CONCURRENCY, MAX_MAX_BODY_CONCURRENCY)
 
         /**
-         * 实际生效的单条请求体上限（字节）。
+         * 实际生效的单条请求体上限（字节）；[UNLIMITED_BODY_BYTES] 表示不限。
          *
-         * 开关关闭时**不看** [maxBodyMb]：用户把上限填成 256 再关掉开关，
-         * 期望的是回到 8MB，而不是「关了但没完全关」。
+         * **开关关闭 = 不限**（用户明确要求的默认行为）：返回 0，读取路径据此
+         * 不设任何截断。打开后才按 [maxBodyMb] 生效。
          */
         fun effectiveMaxBodyBytes(largeBodyEnabled: Boolean, maxBodyMb: Int): Int =
-            if (largeBodyEnabled) clampMaxBodyMb(maxBodyMb) * 1024 * 1024 else LEGACY_MAX_BODY_BYTES
+            if (largeBodyEnabled) clampMaxBodyMb(maxBodyMb) * 1024 * 1024 else UNLIMITED_BODY_BYTES
 
         fun clampRequestLogCapacity(value: Int): Int =
             value.coerceIn(MIN_REQUEST_LOG_CAPACITY, MAX_REQUEST_LOG_CAPACITY)
