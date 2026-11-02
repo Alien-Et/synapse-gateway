@@ -362,6 +362,34 @@ class GatewayHttpServer(
         var breakerAccountOverride: ProviderAccount? = null
         var currentRoute = primaryRoute
 
+        // ★ 跨供应商故障转移（默认关闭，独立模块）。
+        // 这里只准备状态，不改变任何既有分支：开关关闭时 tryCrossProvider() 恒返回 false，
+        // 循环行为与改造前逐字节一致。
+        val crossProviderTried = LinkedHashSet<String>().apply { add("${primaryRoute.providerId}|${primaryRoute.model}") }
+        val crossProviderDecider = io.synapse.core.failover.CrossProviderSwitchDecider(
+            config = { engine.failoverSettings().crossProvider },
+        )
+
+        /**
+         * 尝试换到另一个供应商：成功则改写 [currentRoute] 并返回 true（循环继续），
+         * 否则返回 false（调用方照原样 break，行为不变）。
+         */
+        fun tryCrossProvider(trigger: io.synapse.core.failover.CrossProviderSwitchDecider.Trigger): Boolean {
+            val verdict = crossProviderDecider.decide(
+                trigger = trigger,
+                attempted = crossProviderTried,
+                creditsOf = { candidate -> engine.cachedCreditsOf(candidate.providerId) },
+            ) ?: return false
+            val candidate = verdict.candidate
+            val label = routeLabelOf(candidate.providerId, null)
+            log("跨供应商故障转移：${verdict.reason} → 改发 $label/${candidate.model}")
+            routeErrors.add("${currentRoute.providerId}(${verdict.reason})")
+            crossProviderTried += candidate.key
+            currentRoute = Route(candidate.providerId, candidate.model, region = null)
+            breakerAccountOverride = null
+            return true
+        }
+
         // 循环级许可兜底：异常沿着存盘/日志等调用逃逸出循环时（如加密存储写失败），
         // 各分支的显式 release 来不及执行；Handle.release 幂等，这里重复释放无副作用。
         var pendingGate: io.synapse.core.failover.ConcurrencyGate.Handle? = null
@@ -405,7 +433,7 @@ class GatewayHttpServer(
                 // 所以这里先看看是不是个别账号把熔断计数顶上去的：
                 // 只要同家还有没试过的号，就让它们顶上继续试。
                 val breakerRemainingMs = cb.remainingOpenMs()
-                // 熔断时的「还有没有号可换」同样要尊重「国内外互通」开关：
+                // 熔断时的「还有没有号可换」同样要尊重「跨区域」开关：
                 // 开启时可以把另一个区域的号捞进来，关闭时只看本区域。
                 val alt = engine.pickAccount(
                     providerId, tried, currentRoute.region,
@@ -438,13 +466,19 @@ class GatewayHttpServer(
                                     "建议稍等片刻重试，或改用其它供应商的模型"
                             else
                                 "连续失败被熔断，约 ${waitSec}s 后自动恢复；本区域已无其它可用账号" +
-                                    "（可在设置里开启「国内外互通」跨区使用），或改用其它供应商的模型",
+                                    "（可在设置里开启「跨区域」使用另一区域的账号），或改用其它供应商的模型",
                         ),
                         QuotaAlert.Level.PROVIDER_CIRCUIT_OPEN,
                     )
-                    // ★ 不再跳去其它供应商：路由到哪家就是哪家。
-                    // 熔断只影响「这家暂时不接活」，而不是「改发给别家」——
-                    // 换家会直接破坏标签语义（写了字节国内却发到谷歌）。
+                    // 默认仍不换家（会破坏标签语义）：只有用户显式开启跨供应商、
+                    // 且候选里还有没试过的，才继续循环；否则照原样结束。
+                    if (tryCrossProvider(
+                            io.synapse.core.failover.CrossProviderSwitchDecider.Trigger
+                                .ProviderCircuitOpen(providerId),
+                        )
+                    ) {
+                        continue
+                    }
                     break
                 }
             }
@@ -453,7 +487,7 @@ class GatewayHttpServer(
             // 只在那个号上冷却。其它号可能完全正常，所以这里不整家跳过，
             // 而是交给选号逻辑自动换到没被冷却的号。
             //
-            // ⚠️ 判定范围必须和选号一致：开启「国内外互通」时，本区域号全冷却了
+            // ⚠️ 判定范围必须和选号一致：开启「跨区域」时，本区域号全冷却了
             // 还能跨区继续跑，所以这里也要按**全供应商**统计，否则会出现
             // 「国外只有一个号被冷却 → 整家被判定全冷却 → 连国内号都一起废掉」。
             val coolingUids = engine.modelCooldownOf().coolingAccounts(providerId, resolvedModel)
@@ -478,7 +512,15 @@ class GatewayHttpServer(
                     ),
                     QuotaAlert.Level.MODEL_UNAVAILABLE,
                 )
-                // 模型级冷却也只是「这家暂时不行」，不跨家
+                // 模型级冷却默认也只是「这家暂时不行」，不跨家；
+                // 用户开启跨供应商后，才好换到别家同名/同能力的模型
+                if (tryCrossProvider(
+                        io.synapse.core.failover.CrossProviderSwitchDecider.Trigger
+                            .ModelFullyCooling(providerId, resolvedModel, waitSec),
+                    )
+                ) {
+                    continue
+                }
                 break
             }
             if (coolingUids.isNotEmpty()) {
@@ -533,6 +575,14 @@ class GatewayHttpServer(
                             )
                             log("[$providerName] 账号全部不可用（$reason）：无法发出请求")
                         }
+                    }
+                    // 这家选不出人了：用户开启跨供应商时换到候选
+                    if (tryCrossProvider(
+                            io.synapse.core.failover.CrossProviderSwitchDecider.Trigger
+                                .NoUsableAccount(providerId),
+                        )
+                    ) {
+                        continue
                     }
                     break
                 }
@@ -1008,8 +1058,15 @@ class GatewayHttpServer(
             }
             routeErrors.add("${currentRoute.providerId}($errDetail)")
 
-            // ★ 跨供应商 Failover 已删除：这家没跑成就直接结束，不换家。
-            // 换家会让「标签只绑定对应供应商」形同虚设，也会让报错看不出到底是哪家不行。
+            // 默认不换家：换家会让「标签只绑定对应供应商」形同虚设，报错也看不出是哪家不行。
+            // 用户显式开启跨供应商后，这里才作为最后一层兜底（本家所有账号都试过仍失败）。
+            if (tryCrossProvider(
+                    io.synapse.core.failover.CrossProviderSwitchDecider.Trigger
+                        .UpstreamExhausted(providerId, providerLastError),
+                )
+            ) {
+                continue
+            }
             break
         }
         } finally {

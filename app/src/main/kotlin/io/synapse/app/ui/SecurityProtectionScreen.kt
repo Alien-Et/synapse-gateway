@@ -13,7 +13,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -322,10 +321,23 @@ private fun RateLimitEditDialog(
     var minText by remember { mutableStateOf(currentMin.toString()) }
     var jitterText by remember { mutableStateOf(currentJitter.toString()) }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("修改账号限速参数") },
-        text = {
+    // 走统一弹窗：从前是 Material3 AlertDialog，和系统原生、自绘三种并存
+    AppDialog(
+        title = "修改账号限速参数",
+        onDismiss = onDismiss,
+        buttons = {
+            AppDialogButton("取消", onDismiss)
+            AppDialogButton(
+                "保存",
+                onClick = {
+                    val min = (minText.toLongOrNull() ?: currentMin).coerceIn(0L, 60_000L)
+                    val jitter = (jitterText.toLongOrNull() ?: currentJitter).coerceIn(0L, 10_000L)
+                    onConfirm(min, jitter)
+                },
+                emphasis = true,
+            )
+        },
+    ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
                     value = minText,
@@ -349,20 +361,5 @@ private fun RateLimitEditDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val min = minText.toLongOrNull() ?: currentMin
-                    val jitter = jitterText.toLongOrNull() ?: currentJitter
-                    onConfirm(min.coerceIn(0L, 60_000L), jitter.coerceIn(0L, 10_000L))
-                },
-            ) {
-                Text("保存")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        },
-    )
+    }
 }

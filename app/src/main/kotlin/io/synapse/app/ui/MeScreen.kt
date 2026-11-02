@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -322,12 +321,12 @@ private fun appVersion(context: android.content.Context): String = runCatching {
 /** 点「我的」标题弹出的作者信息：两行居中，点任意处关闭。 */
 @Composable
 private fun AboutDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        },
-        text = {
+    // 走统一弹窗：从前是 Material3 AlertDialog，和系统原生、自绘三种并存
+    AppDialog(
+        title = "关于",
+        onDismiss = onDismiss,
+        buttons = { AppDialogButton("关闭", onDismiss) },
+    ) {
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -347,9 +346,8 @@ private fun AboutDialog(onDismiss: () -> Unit) {
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
                 )
-            }
-        },
-    )
+        }
+    }
 }
 
 @Composable

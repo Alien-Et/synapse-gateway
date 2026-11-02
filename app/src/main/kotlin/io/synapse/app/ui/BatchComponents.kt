@@ -11,7 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Surface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -22,27 +22,35 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
+import io.synapse.core.gateway.BatchStage
 import io.synapse.app.ui.theme.LocalAppColors
 
 /**
- * 批量动作的进度卡：显示「已完成 X/N（当前：某账号）」与一条细进度条。
+ * 批量动作的进度浮层：标题 + 阶段 + 「已完成 X/N」+ 进度条 + 当前账号。
  *
- * 批量从串行改为有界并发后，一次操作可能要等十几秒；只给一句笼统的 busy 用户不知道卡在哪，
- * 所以把每个账号的完成进度实时画出来。由发起批量动作的页面渲染（首页 / 任务中心）。
+ * **为什么用浮层而不是页内卡片**：页面内的进度卡只在发起动作的那一页可见，
+ * 用户一旦切页/滑走就完全看不到进度，只能对着没有变化的界面干等。
+ * 批量签到要串行打十几次上游（每个账号一次签到 + 一次刷额度），十几秒内没有任何反馈
+ * 会被当成「点了没反应」，然后再点一次，反而让上游把请求翻倍。
+ *
+ * 所以这里用**不可取消的浮层**：动作进行期间始终盖在最上层，走完自动消失。
+ * 不给「取消」按钮——批量动作已经发出的请求不会因为关掉浮层而撤回，
+ * 留一个按了也不生效的取消键只会误导。
  */
 @Composable
-fun BatchProgressCard(progress: BatchProgressUi) {
+fun BatchProgressDialog(progress: BatchProgressUi) {
     val gold = LocalAppColors.current.goldStart
-    SectionCard {
-        Text(
-            text = if (progress.total > 0) {
-                "已完成 ${progress.done}/${progress.total}（当前：${progress.current}）"
-            } else {
-                "批量任务准备中…"
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+    AppDialog(
+        title = progress.title,
+        onDismiss = {},
+        dismissible = false,
+        subtitle = when {
+            progress.total <= 0 -> "正在准备…"
+            progress.stage == BatchStage.REFRESH -> "正在刷新额度 ${progress.done}/${progress.total}"
+            else -> "正在处理 ${progress.done}/${progress.total}"
+        },
+    ) {
         val fraction = if (progress.total > 0) {
             (progress.done.toFloat() / progress.total).coerceIn(0f, 1f)
         } else {
@@ -62,37 +70,76 @@ fun BatchProgressCard(progress: BatchProgressUi) {
                     .background(gold),
             )
         }
+        if (progress.current.isNotEmpty()) {
+            Text(
+                text = if (progress.stage == BatchStage.REFRESH) {
+                    "当前：${progress.current} 的额度"
+                } else {
+                    "当前：${progress.current}"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+        // 已完成的账号：让用户看到「确实一个个在过」，而不是只看到数字在动
+        if (progress.recent.isNotEmpty()) {
+            Text(
+                text = "已完成：" + progress.recent.joinToString("、") { it.account },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
 /**
  * 批量动作结束后的结果面板：「成功 N 个 / 失败 M 个」+ 每个账号的逐条原因。
  *
- * 改用**系统原生对话框**（[SystemPrompt.alert]）：主人要求全局提示统一走安卓接口，
- * 不再用自绘的 Material3 AlertDialog——同一种「结果提示」在系统里应该长同一张脸。
- *
- * 原生 AlertDialog 只吃纯文本，所以这里把结果拼成结构化文字：
- * 先失败项（用户最需要看的），再成功项，每项「账号：结果」。
+ * 走统一的 [AppDialog]（不再是系统原生 AlertDialog）：失败项用错误色排前面，
+ * 成功项跟在后面补充细节——签到场景下「今日已签到」和「签到成功」是两条不同的事实。
  */
 @Composable
 fun BatchOutcomeDialog(outcome: BatchOutcome, onDismiss: () -> Unit) {
-    val message = remember(outcome) {
-        buildString {
-            append("成功 ${outcome.succeeded} 个，失败 ${outcome.failed} 个")
-            val failed = outcome.items.filter { !it.ok }
-            val ok = outcome.items.filter { it.ok }
-            if (failed.isNotEmpty()) {
-                append("\n\n【失败】")
-                failed.forEach { append("\n${it.account}：${it.message}") }
-            }
-            if (ok.isNotEmpty()) {
-                append("\n\n【已完成】")
-                ok.forEach { append("\n${it.account}：${it.message}") }
+    val failed = remember(outcome) { outcome.items.filter { !it.ok } }
+    val ok = remember(outcome) { outcome.items.filter { it.ok } }
+    AppDialog(
+        title = "${outcome.title}结果",
+        onDismiss = onDismiss,
+        subtitle = "成功 ${outcome.succeeded} 个，失败 ${outcome.failed} 个",
+        buttons = {
+            AppDialogButton("知道了", onDismiss, emphasis = true)
+        },
+    ) {
+        if (failed.isNotEmpty()) {
+            Text(
+                text = "失败",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.error,
+            )
+            failed.forEach { item ->
+                Text(
+                    text = "${item.account}：${item.message}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         }
-    }
-    LaunchedEffect(outcome) {
-        SystemPrompt.alert("${outcome.title}结果", message, onDismiss)
+        if (ok.isNotEmpty()) {
+            Text(
+                text = "已完成",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ok.forEach { item ->
+                Text(
+                    text = "${item.account}：${item.message}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -102,8 +149,8 @@ fun BatchOutcomeHost(outcome: BatchOutcome?, onDismiss: () -> Unit) {
     outcome?.let { BatchOutcomeDialog(it, onDismiss) }
 }
 
-/** 页面内联进度：进度为空（未在批量动作）时什么都不画。 */
+/** 页面级入口：批量动作进行中时显示进度浮层，否则什么都不画。 */
 @Composable
 fun BatchProgressHost(progress: BatchProgressUi?) {
-    progress?.let { BatchProgressCard(it) }
+    progress?.let { BatchProgressDialog(it) }
 }
