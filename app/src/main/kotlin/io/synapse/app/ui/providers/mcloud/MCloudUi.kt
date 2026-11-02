@@ -165,21 +165,18 @@ object MCloudUi : ProviderUi {
                 when {
                     // 第一段：还没拿到拼图
                     //
-                    // 按钮常驻显示（不再依赖手机号位数）：位数不够时点它会给出明确提示，
-                    // 否则用户输了 10 位发现"没有按钮"完全不知道卡在哪。
-                    !puzzleSolved && current == null -> {
+                    // 手机号没填满 11 位时**不显示按钮**：验证页要把手机号编进 URL 才能打开，
+                    // 号码不完整时打开的页面必然走不下去，摆一个点了只会报错的按钮纯属误导。
+                    // （之前是常驻 + 点击提示位数不够，等于让用户先点错一次才知道不能点。）
+                    !puzzleSolved && current == null && phone.length == 11 -> {
                         Button(
                             onClick = {
-                                if (phone.length != 11) {
-                                    sendError = "请填写完整的 11 位手机号"
-                                } else {
-                                    loading = true
-                                    sendError = ""
-                                    actions.onFetchHumanCheck(id, phone) { result ->
-                                        loading = false
-                                        challenge = result
-                                        if (result == null) sendError = "人机校验加载失败，请重试"
-                                    }
+                                loading = true
+                                sendError = ""
+                                actions.onFetchHumanCheck(id, phone) { result ->
+                                    loading = false
+                                    challenge = result
+                                    if (result == null) sendError = "人机校验加载失败，请重试"
                                 }
                             },
                             enabled = !loading,
@@ -187,6 +184,15 @@ object MCloudUi : ProviderUi {
                         ) {
                             Text(if (loading) "正在加载…" else "获取人机校验")
                         }
+                    }
+
+                    // 号码还没填完：只给一行提示，不摆按钮
+                    !puzzleSolved && current == null && phone.isNotEmpty() -> {
+                        Text(
+                            text = "手机号填满 11 位后会出现「获取人机校验」",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
 
                     // 第二段：校验进行中
@@ -346,6 +352,10 @@ object MCloudUi : ProviderUi {
                     subtitle = "在下方滑动验证，通过后验证码会自动发送",
                     onDismiss = { captchaDialogVisible = false },
                     modifier = Modifier.fillMaxWidth(0.96f),
+                    // ★ 必须关掉内层滚动：AppDialog 默认给内容套 verticalScroll，
+                    // 而 verticalScroll 会先抢走拖动手势，WebView 里的滑块就拖不动了
+                    // （表现是「手指一滑整个弹窗内容在滚，滑块纹丝不动」）。
+                    scrollable = false,
                     buttons = {
                         AppDialogButton("关闭", { captchaDialogVisible = false })
                     },
