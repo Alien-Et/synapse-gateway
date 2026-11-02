@@ -45,6 +45,7 @@ import io.synapse.core.pool.AccountStatus
 import io.synapse.core.provider.ProviderTask
 
 import io.synapse.core.provider.ACTION_CHECKIN
+import io.synapse.core.provider.ACTION_COMPLETE_TASKS
 import io.synapse.core.provider.ACTION_TASKS
 import io.synapse.core.provider.codebuddy.CodeBuddyProvider
 
@@ -199,6 +200,11 @@ object CodeBuddyUi : ProviderUi {
                         ChoiceChip("成长中心", false) {
                             actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
                         }
+                        // 「成长中心」只接单 + 领已达标奖励，进度得用户自己去官方客户端做；
+                        // 这个入口会按官方客户端行为把任务进度一起推进（上报埋点、对话类真发对话）。
+                        ChoiceChip("自动完成", false) {
+                            actions.onAction(id, status.uid, ACTION_COMPLETE_TASKS, JsonObject())
+                        }
                     }
                     TaskListSection(status, actions)
                 }
@@ -312,6 +318,17 @@ object CodeBuddyUi : ProviderUi {
                         id,
                         uid,
                         ACTION_TASKS,
+                        JsonObject().apply { addProperty("task_code", task.code) },
+                    )
+                }
+            } else if (!task.completed && !task.locked) {
+                // 没做完的任务给一条单条「自动完成」：只针对这一条推进进度并领奖，
+                // 不必等整页批量（批量会动到该账号全部任务，风控面更大）。
+                ChoiceChip("自动完成", false) {
+                    actions.onAction(
+                        id,
+                        uid,
+                        ACTION_COMPLETE_TASKS,
                         JsonObject().apply { addProperty("task_code", task.code) },
                     )
                 }

@@ -5,6 +5,7 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import io.synapse.core.provider.ACTION_CHECKIN
 import io.synapse.core.provider.ACTION_TASKS
+import io.synapse.core.provider.ACTION_COMPLETE_TASKS
 import io.synapse.core.provider.AggregatedChatCall
 import io.synapse.core.provider.AuthKind
 import io.synapse.core.provider.ChatCall
@@ -56,17 +57,25 @@ import java.util.Locale
  * 用户在 WebView 里扫码/登录后，`GET /v2/plugin/auth/token?state=…` 轮询拿 token。
  * 对话走 `/v2/chat/completions`（OpenAI 兼容，但**上游拒绝非流式**，必须强制 `stream:true`）。
  */
-class CodeBuddyProvider(
+class CodeBuddyProvider internal constructor(
     private val region: () -> String = { REGION_CN },
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val hooks: ProviderHooks = ProviderHooks(),
+    /** 端点解析：默认按区域取官方端点，测试可指向本地假上游。 */
+    private val endpointFor: (String) -> Endpoint = { endpointOf(it) },
+    /** 写动作之间的停顿（上游对密集写有风控）；测试里换成空实现。 */
+    private val pause: (Long) -> Unit = { Thread.sleep(it) },
 ) : Provider, DeviceCodeSupport, io.synapse.core.provider.RegionAwareSupport {
 
     override val id: String = ID
     override val displayName: String = "腾讯"
     override val authKind: AuthKind = AuthKind.DEVICE_CODE
-    override val capabilities: Set<ProviderCapability> =
-        setOf(ProviderCapability.CREDIT_REFRESH, ProviderCapability.CHECKIN, ProviderCapability.TASKS)
+    override val capabilities: Set<ProviderCapability> = setOf(
+        ProviderCapability.CREDIT_REFRESH,
+        ProviderCapability.CHECKIN,
+        ProviderCapability.TASKS,
+        ProviderCapability.TASK_AUTO_COMPLETE,
+    )
 
     // ------------------------------------------------------------------ 模型
 
@@ -276,7 +285,7 @@ class CodeBuddyProvider(
         val credential = parse(account)
         if (credential != null && regionOf(credential) == REGION_GLOBAL) {
             return when (action) {
-                ACTION_CHECKIN, ACTION_TASKS ->
+                ACTION_CHECKIN, ACTION_TASKS, ACTION_COMPLETE_TASKS ->
                     ProviderActionResult.failure("国外账号没有签到与成长中心")
                 else -> ProviderActionResult.unsupported(action)
             }
@@ -284,7 +293,7 @@ class CodeBuddyProvider(
         // 企业账号没有个人成长体系：同属不适用，选目标时已排掉
         if (credential != null && credential.enterpriseId.isNotEmpty()) {
             return when (action) {
-                ACTION_CHECKIN, ACTION_TASKS ->
+                ACTION_CHECKIN, ACTION_TASKS, ACTION_COMPLETE_TASKS ->
                     ProviderActionResult.failure("企业账号没有个人成长体系（签到/任务仅个人账号可用）")
                 else -> ProviderActionResult.unsupported(action)
             }
@@ -294,6 +303,7 @@ class CodeBuddyProvider(
         return when (action) {
             ACTION_CHECKIN -> checkin(account)
             ACTION_TASKS -> if (singleTask.isEmpty()) growth(account) else claimSingleTask(account, singleTask)
+            ACTION_COMPLETE_TASKS -> completeTasks(account, singleTask)
             else -> ProviderActionResult.unsupported(action)
         }
     }
@@ -644,6 +654,168 @@ class CodeBuddyProvider(
             add("task_codes", JsonArray().apply { codes.forEach { add(it) } })
         }.toString()
 
+    /**
+     * 自动完成成长任务：先接单，再按 [CodeBuddyTaskComplete] 的配方推进进度，最后领奖。
+     *
+     * 与 [growth] 的分工：[growth] 只是「一键领取」（接单 + 领已达标奖励），任务本身要用户自己去官方
+     * 客户端做；这里把任务也做完——上游把进度记在客户端埋点事件上，逐条上报对应事件即可推进，
+     * 对话类任务还会真发一次对话。
+     *
+     * 顺序与官方客户端一致：**先接单再做事**（没接单不计进度），最后领奖。
+     * 没有配方的任务不假装完成，在结果里点名列出。
+     *
+     * [singleTask] 非空时只处理这一条（详情页单条任务上的按钮）。
+     */
+    private fun completeTasks(account: ProviderAccount, singleTask: String): ProviderActionResult {
+        val credential = parse(account) ?: return ProviderActionResult.failure("凭证无法解析")
+        val base = "${chatBase(credential)}$PATH_GROWTH"
+        val headers = billingHeaders(credential)
+        val adopted = ArrayList<String>()
+        val notes = ArrayList<String>()
+        val pushed = ArrayList<String>()
+        val claimed = ArrayList<String>()
+        fun scoped(task: ProviderTask): Boolean = singleTask.isEmpty() || task.code == singleTask
+
+        // 前置：没有 Buddy 实例时上游会拒掉其余任务的接单（prerequisite not met: first_buddy）
+        runCatching { adoptBuddy(credential, headers, adopted) }
+
+        val before = fetchTasksBody(credential, base, headers)?.let { parseGrowthTasks(it).tasks }
+            ?: return ProviderActionResult.failure("拉取任务列表失败")
+        acceptTaskCodes(
+            credential,
+            base,
+            headers,
+            // 未解锁的先不接：接了也只会拿到「task locked until …」
+            before.filter { scoped(it) && !it.locked && needsTaskAccept(it) }.map { it.code },
+            notes,
+        )
+
+        for (task in before.filter { scoped(it) && !it.completed && !it.locked }) {
+            val recipe = CodeBuddyTaskComplete.recipeFor(task.code) ?: continue
+            if (recipe.nightOnly && !isNightWindow()) {
+                notes.add("「${recipe.label}」只在 23:00-08:00 计数，已跳过")
+                continue
+            }
+            val gap = if (task.target > 0) (task.target - task.current).toInt().coerceAtLeast(1) else 1
+            var rounds = 0
+            repeat(minOf(gap, recipe.maxRounds)) { round ->
+                // 先真发对话、再拿它的会话 id 上报：埋点里的会话必须真实存在，否则不计进度
+                val prompt = recipe.chatFor?.invoke(round)
+                val session = prompt?.let { runCatching { growthChat(account, it) }.getOrNull() }
+                val events = recipe.events(
+                    GrowthContext(
+                        uid = credential.uid.ifEmpty { account.uid },
+                        nickname = account.nickname,
+                        nowMillis = nowMillis(),
+                    ),
+                    round,
+                    session,
+                )
+                val (status, _) = reportEvents(credential, events)
+                if (status !in 200..299) return@repeat
+                rounds++
+                pause(WRITE_GAP_MS)
+            }
+            if (rounds > 0) pushed.add("${recipe.label}×$rounds")
+        }
+
+        // 回读一次再领奖：上游记进度有延迟，判据用进度本身而不是 accept_status
+        val after = fetchTasksBody(credential, base, headers)?.let { parseGrowthTasks(it).tasks }.orEmpty()
+        for (task in after.filter { scoped(it) && !it.locked && it.claimable }) {
+            claimTaskReward(credential, task, claimed)
+        }
+
+        val summary = ArrayList<String>()
+        summary.addAll(adopted)
+        if (pushed.isNotEmpty()) summary.add("已推进 " + pushed.joinToString("、"))
+        summary.addAll(claimed)
+        summary.addAll(notes)
+        var message = summary.joinToString("；")
+        val unsupported = after
+            .filter { scoped(it) && !it.completed && !it.locked && CodeBuddyTaskComplete.recipeFor(it.code) == null }
+            .map { it.title }
+        if (unsupported.isNotEmpty()) {
+            val tail = "暂不支持自动完成：" + unsupported.joinToString("、")
+            message = if (message.isEmpty()) tail else "$message；$tail"
+        }
+        return ProviderActionResult.success(message.ifEmpty { "没有需要完成的任务" })
+    }
+
+    /**
+     * 桌面域埋点上报：`POST /v2/report`，请求体是**裸数组**（不是 `{code,msg,data}` 信封）。
+     *
+     * 官方客户端的「去完成」就是这个请求；X-Domain 固定声明 `copilot.tencent.com`
+     * （与桌面客户端的 chatBase 一致，区域分叉只发生在对话/额度链路）。
+     */
+    private fun reportEvents(credential: Credential, events: List<JsonObject>): Pair<Int, String> {
+        if (events.isEmpty()) return 200 to ""
+        val body = JsonArray().apply { events.forEach { add(it) } }.toString()
+        val headers = buildMap {
+            put("Authorization", "Bearer ${credential.accessToken}")
+            put("Accept", "application/json, text/plain, */*")
+            put("X-Domain", "copilot.tencent.com")
+            put("X-Product", "SaaS")
+            put("X-Request-ID", CodeBuddyTaskComplete.newMessageId(nowMillis()))
+            put("User-Agent", CodeBuddyTaskComplete.DESKTOP_UA)
+            if (credential.uid.isNotEmpty()) put("X-User-Id", credential.uid)
+        }
+        return runCatching {
+            postJson("${chatBase(credential)}$PATH_REPORT", credential, body, headers)
+        }.getOrElse { e ->
+            // 网络异常不该中断整个账号：单条上报失败按「没生效」处理，后面的任务照常走
+            0 to (e.message ?: "上报失败")
+        }
+    }
+
+    /**
+     * 任务推进用的一次真实对话，返回这次对话的会话标识。
+     *
+     * 埋点里的 conversationId 必须指向**真实发出的那次对话**（自造 UUID 上游不认），
+     * 所以这里把请求头里声明的会话 id（`X-Conversation-ID`，与 [stableConversationId] 同值）
+     * 与响应回传的服务端消息 id 一并返回，交给 [CodeBuddyTaskComplete] 组装事件。
+     * 对话没发成（或响应不可解析）时返回 null，配方退回合成的 id 兜底。
+     */
+    private fun growthChat(account: ProviderAccount, prompt: String): GrowthSession? {
+        val body = JsonObject().apply {
+            addProperty("model", CodeBuddyTaskComplete.GROWTH_CHAT_MODEL)
+            addProperty("stream", false)
+            add(
+                "messages",
+                JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("role", "system")
+                        addProperty("content", GROWTH_CHAT_SYSTEM)
+                    })
+                    add(JsonObject().apply {
+                        addProperty("role", "user")
+                        addProperty("content", prompt)
+                    })
+                },
+            )
+        }.toString()
+        val call = openChat(account, body)
+        val aggregated = try {
+            (call as? AggregatedChatCall)?.aggregated
+        } finally {
+            call.close()
+        }
+        if (call.status !in 200..299 || aggregated == null) return null
+        val conversationId = stableConversationId(body).ifEmpty { FALLBACK_CONVERSATION_ID }
+        val serverId = runCatching {
+            JsonParser.parseString(aggregated).asJsonObject.get("id")?.asString
+        }.getOrNull().orEmpty()
+        val messageId = serverId
+            .takeIf { it.isNotEmpty() && it != OpenAiSseAggregator.FALLBACK_ID }
+            ?: CodeBuddyTaskComplete.newMessageId(nowMillis())
+        return GrowthSession(conversationId, messageId)
+    }
+
+    /** 夜猫子活动只在 CST 23:00-08:00 计数（UTC+8 小时）。 */
+    private fun isNightWindow(): Boolean {
+        val hour = ((nowMillis() / 3_600_000L + 8) % 24).toInt()
+        return hour >= 23 || hour < 8
+    }
+
     /** 盲盒：有配额才开。 */
     private fun openBlindBox(
         credential: Credential,
@@ -699,7 +871,8 @@ class CodeBuddyProvider(
                 target = target,
                 status = acceptStatus,
                 locked = task.get("locked")?.asBoolean ?: false,
-                claimed = acceptStatus == "claimed",
+                // 上游同时下发 accept_status 与 claimed 布尔；两个都要认（领奖前靠它避免重复领）
+                claimed = acceptStatus == "claimed" || task.get("claimed")?.asBoolean == true,
                 rewardCredit = task.firstLong("reward_credit"),
             )
         }
@@ -717,7 +890,7 @@ class CodeBuddyProvider(
      * 批量选目标时就会把这两种排掉，不会跑完再报错。
      */
     override fun supportsAction(account: ProviderAccount, action: String): Boolean {
-        if (action != ACTION_CHECKIN && action != ACTION_TASKS) return true
+        if (action != ACTION_CHECKIN && action != ACTION_TASKS && action != ACTION_COMPLETE_TASKS) return true
         val credential = parse(account) ?: return true
         if (regionOf(credential) == REGION_GLOBAL) return false
         return credential.enterpriseId.isEmpty()
@@ -1319,7 +1492,7 @@ class CodeBuddyProvider(
     override fun regions(): List<String> = listOf(REGION_CN, REGION_GLOBAL)
 
     /** 该凭证的区域端点；所有按区域分叉的 host / 路径 / 头都从这里取。 */
-    private fun endpoint(credential: Credential?): Endpoint = endpointOf(regionOf(credential))
+    private fun endpoint(credential: Credential?): Endpoint = endpointFor(regionOf(credential))
 
     private fun chatBase(credential: Credential?): String = endpoint(credential).chatBase
 
@@ -1522,6 +1695,15 @@ class CodeBuddyProvider(
          * 模型目录路径：国内走网页控制台接口，国际版走客户端 product config。
          */
         internal fun modelsPath(region: String): String = endpointOf(region).modelsPath
+        /** 客户端埋点上报：成长任务的进度就记在这里（裸数组 body，见 [reportEvents]）。 */
+        const val PATH_REPORT = "/v2/report"
+
+        /** 写动作之间的停顿：上游对密集写有风控，参照实现用 1.2s。 */
+        internal const val WRITE_GAP_MS = 1200L
+
+        /** 任务推进发的真实对话的系统提示词：上游要求首条消息必须是 system。 */
+        private const val GROWTH_CHAT_SYSTEM = "你是 WorkBuddy 助手，请简短回答用户的问题。"
+
         const val PATH_USER_RESOURCE = "/v2/billing/meter/get-user-resource"
         const val PATH_CHECKIN = "/v2/billing/meter/daily-checkin"
 

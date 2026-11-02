@@ -294,13 +294,25 @@ class MCloudProvider(
         }
         hooks.onLog("灵犀 额度查询（${mcloud.phone}）：${diag.ifEmpty { "无诊断信息" }}")
 
-        if (credit != null && credit.totalTokens > 0) {
+        if (credit != null && credit.balanceKnown) {
             val detail = buildCreditDetail(credit)
             return CreditInfo(
                 balance = credit.remainTokens,
                 known = true,
                 detail = detail,
                 actionHint = if (canRefresh) "" else "点「重新登录」用手机号收验证码登录一次",
+                memberLevel = credit.memberLevel,
+            )
+        }
+
+        // 只有本月用量、没拿到权益总量（残缺的成功响应）：额度未知，但用量是真的，如实展示。
+        // 不能因为「额度查不到」就把已知的本月用量一并藏掉，也不能编一个 0。
+        if (credit != null && !credit.balanceKnown && credit.monthlyKnown) {
+            return CreditInfo(
+                balance = 0,
+                known = false,
+                detail = "剩余额度未知（权益接口未返回总量）· 本月已用 ${formatTokens(credit.monthlyTokens)}",
+                actionHint = if (canRefresh) "点「刷新额度」重试" else "点「重新登录」用手机号收验证码登录一次",
                 memberLevel = credit.memberLevel,
             )
         }

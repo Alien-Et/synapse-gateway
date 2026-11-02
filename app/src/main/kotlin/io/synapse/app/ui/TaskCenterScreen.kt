@@ -26,6 +26,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.synapse.core.provider.ACTION_CHECKIN
+import io.synapse.core.provider.ACTION_COMPLETE_TASKS
 import io.synapse.core.provider.ACTION_TASKS
 import io.synapse.core.provider.ProviderCapability
 
@@ -67,6 +68,8 @@ fun TaskCenterScreen(
         // 从前只有签到/刷新额度两个按钮，任务中心的「批量任务」能力根本没接到界面上。
         val checkinTargets = viewModel.batchTargetSummary(ACTION_CHECKIN, ProviderCapability.CHECKIN)
         val taskTargets = viewModel.batchTargetSummary(ACTION_TASKS, ProviderCapability.TASKS)
+        val autoTargets =
+            viewModel.batchTargetSummary(ACTION_COMPLETE_TASKS, ProviderCapability.TASK_AUTO_COMPLETE)
 
         SectionCard(enterIndex = 0) {
             SectionLabel("批量操作")
@@ -89,6 +92,15 @@ fun TaskCenterScreen(
                     Text("批量任务")
                 }
             }
+            // 自动完成：比「批量任务」更进一步——不只接单领奖，连任务进度一起推进。
+            // 只有声明了 TASK_AUTO_COMPLETE 的供应商会进这条流程（目前是 WorkBuddy 成长中心）。
+            OutlinedButton(
+                onClick = { viewModel.runAllTaskAutoComplete() },
+                enabled = autoTargets.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("自动完成任务")
+            }
             Button(onClick = { viewModel.refreshAllCredits() }, modifier = Modifier.fillMaxWidth()) {
                 Text("刷新全部额度")
             }
@@ -103,6 +115,12 @@ fun TaskCenterScreen(
             Text(
                 text = "任务：" + taskTargets.describeTargets("没有支持批量任务的账号") +
                     "（新手任务、成长中心）",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "自动完成：" + autoTargets.describeTargets("没有支持自动完成的账号") +
+                    "（会按官方客户端行为推进任务进度后再领奖）",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

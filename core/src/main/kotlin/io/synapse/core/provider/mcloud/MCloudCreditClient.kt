@@ -82,10 +82,16 @@ class MCloudCreditClient(
         identityProbe.exceptionOrNull()?.let { trace += "会员身份接口异常：${it.message}" }
         trace += lastIdentityTrace.ifEmpty { "会员身份未查询" }
 
+        // 「残缺」与「真是 0」必须区分开（同 antigravity 配额的两个坑）：
+        // 权益接口偶发会回**残缺的成功响应**（HTTP 200 但 userAvailableBenefitList 为空/字段缺失），
+        // 这时 total 算出来是 0。若直接把 total=0 当成结果，界面会显示「额度 0」——
+        // 用户会以为额度用完了（真实剩余其实还有几百万），比显示「查询失败」更误导。
+        // 判据用 balanceKnown（权益接口真的给了 benefitValue），而不是 total > 0。
         if (benefit == null && monthly == null) {
             trace += "两个接口都没拿到数据"
             return MCloudCreditProbe(null, trace)
         }
+        if (benefit == null) trace += "权益接口没拿到额度，只有本月用量"
 
         val total = benefit?.total ?: 0L
         val used = benefit?.used ?: (monthly ?: 0L)
@@ -96,6 +102,7 @@ class MCloudCreditClient(
                 totalTokens = total,
                 usedTokens = used,
                 remainTokens = remain,
+                balanceKnown = benefit != null,
                 monthlyTokens = monthly ?: 0L,
                 monthlyKnown = monthly != null,
                 monthLabel = currentMonthLabel(),
@@ -353,6 +360,13 @@ class MCloudCreditClient(
 data class MCloudCredit(
     /** 权益总量（tokens）。 */
     val totalTokens: Long,
+    /**
+     * 额度是否真的查到了（`queryAvailableBenefitV2` 给了 `benefitValue`）。
+     *
+     * 不能用 `totalTokens > 0` 代替：真实性未知与「确实用光」是两件事，
+     * 前者要显示「未知」、后者才该显示 0。残缺的成功响应（200 但缺字段）走前者。
+     */
+    val balanceKnown: Boolean = true,
     /** 已使用（tokens）。 */
     val usedTokens: Long,
     /** 剩余（tokens），= 总量 - 已用。 */
