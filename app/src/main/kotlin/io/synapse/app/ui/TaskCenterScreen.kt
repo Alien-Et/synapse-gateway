@@ -56,13 +56,12 @@ fun TaskCenterScreen(
     onOpenProviders: () -> Unit = {},
     onBack: () -> Unit,
 ) {
-    BatchOutcomeHost(state.batchOutcome) { viewModel.dismissBatchOutcome() }
     PageScaffold(
         title = "任务中心",
         subtitle = "签到与额度",
         leading = { BackButton(onBack) },
     ) {
-        BatchProgressHost(state.batchProgress)
+
 
         // 批量目标概览：只在真有可执行账号时才把按钮点亮，并列出「这次会动到谁」。
         // 从前只有签到/刷新额度两个按钮，任务中心的「批量任务」能力根本没接到界面上。

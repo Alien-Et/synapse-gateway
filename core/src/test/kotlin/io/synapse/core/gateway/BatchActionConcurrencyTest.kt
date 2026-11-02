@@ -226,10 +226,15 @@ class BatchActionConcurrencyTest {
         val progress = CopyOnWriteArrayList<BatchProgress>()
         engine.performActionAll(targets("u1", "u2", "u3"), "checkin", onProgress = { progress.add(it) })
 
-        assertEquals(3, progress.size, "每个账号完成时应回调一次进度")
-        assertEquals(setOf(1, 2, 3), progress.map { it.done }.toSet(), "已完成数应从 1 递增到 N")
-        assertTrue(progress.all { it.total == 3 })
-        assertTrue(progress.all { it.providerId == "batch" && it.nickname.isNotEmpty() })
+        // 进度事件现在有「开始」与「完成」两种（见 BatchProgress.started），
+        // 动作阶段之后还有一轮额度刷新；这里只看动作阶段的**完成**事件。
+        val doneEvents = progress.filter { !it.started && it.stage == BatchStage.ACTION }
+        assertEquals(3, doneEvents.size, "每个账号完成时应回调一次进度")
+        assertEquals(setOf(1, 2, 3), doneEvents.map { it.done }.toSet(), "已完成数应从 1 递增到 N")
+        assertTrue(doneEvents.all { it.total == 3 })
+        assertTrue(doneEvents.all { it.providerId == "batch" && it.nickname.isNotEmpty() })
+        // 每个账号也都要有一次「开始」事件，否则界面在并发最初几秒只会显示准备中
+        assertEquals(3, progress.count { it.started && it.stage == BatchStage.ACTION })
     }
 
     @Test

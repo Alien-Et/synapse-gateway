@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -59,6 +58,11 @@ import io.synapse.app.ui.SystemPrompt
 import io.synapse.app.service.QuotaAlertNotifier
 import io.synapse.app.ui.pushPopSpec
 import io.synapse.app.ui.tabContentSpec
+import io.synapse.app.ui.AppDialog
+import io.synapse.app.ui.AppDialogButton
+import io.synapse.app.ui.AppDialogHost
+import io.synapse.app.ui.BatchOutcomeHost
+import io.synapse.app.ui.BatchProgressHost
 import io.synapse.app.ui.AppUiState
 import io.synapse.app.ui.ApiSettingsScreen
 import io.synapse.app.ui.AppViewModel
@@ -250,6 +254,13 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
         },
     ) { insets ->
         Box(Modifier.fillMaxSize().padding(bottom = insets.calculateBottomPadding())) {
+            // ★ 全局弹窗挂载点：放在所有页面之外，切换 Tab / 二级页都照样可见。
+            // 批量签到要串行打十几次上游，进度跟着页面走的话，用户切页就看不到了，
+            // 会以为「点了没反应」再点一次，反而把上游请求翻倍。
+            AppDialogHost()
+            BatchProgressHost(state.batchProgress)
+            BatchOutcomeHost(state.batchOutcome) { viewModel.dismissBatchOutcome() }
+
             // 二级页推拉过渡：推入从右滑入，返回向右滑出
             AnimatedContent(
                 targetState = subPage,
@@ -341,10 +352,48 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
     // 当前安装包能否自己装 APK（旧版本含 v2.13.1 缺 REQUEST_INSTALL_PACKAGES，必然装不了）
     val canSelfInstall = viewModel.canInstallUpdate()
     state.updateInfo?.takeIf { !updatePromptDismissed }?.let { info ->
-        AlertDialog(
-            onDismissRequest = { if (!updateBusy) updatePromptDismissed = true },
-            title = { Text("发现新版本 ${info.version}") },
-            text = {
+        // 走统一弹窗外观（AppDialog）：从前是 Material3 AlertDialog，和系统原生、自绘三种并存
+        AppDialog(
+            title = "发现新版本 ${info.version}",
+            onDismiss = { if (!updateBusy) updatePromptDismissed = true },
+            dismissible = !updateBusy,
+            buttons = {
+                AppDialogButton(
+                    if (updateBusy) "取消下载" else "稍后",
+                    onClick = {
+                        if (updateBusy) viewModel.cancelUpdateDownload()
+                        updatePromptDismissed = true
+                    },
+                )
+                // 主操作按下载状态切换，语义与原三态一致：
+                // 就绪→安装 / 失败或无包→下载·前往 / 进行中→取消
+                when (download) {
+                    is UpdateDownload.Ready -> AppDialogButton(
+                        text = if (canSelfInstall) "安装" else "到仓库下载",
+                        onClick = {
+                            if (canSelfInstall) viewModel.installUpdate() else viewModel.openReleasePage(info.url)
+                        },
+                        emphasis = true,
+                    )
+                    is UpdateDownload.Failed, null -> AppDialogButton(
+                        text = if (info.apkUrl == null) "前往下载" else "应用内更新",
+                        onClick = {
+                            if (info.apkUrl == null) {
+                                viewModel.openReleasePage(info.url)
+                            } else {
+                                viewModel.downloadUpdate(info)
+                            }
+                        },
+                        emphasis = true,
+                    )
+                    else -> AppDialogButton(
+                        text = "取消下载",
+                        onClick = { viewModel.cancelUpdateDownload() },
+                        emphasis = true,
+                    )
+                }
+            },
+        ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (!canSelfInstall) {
                         // 旧版本（含 v2.13.1）缺少 REQUEST_INSTALL_PACKAGES，应用内安装必然失败
@@ -417,28 +466,10 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                         null -> Unit
                     }
                 }
-            },
-            confirmButton = {
-                when (download) {
-                    is UpdateDownload.Ready -> TextButton(onClick = {
-                        // 自身包装不了时系统安装器根本不会被唤起，直接给用户可行的出路
-                        if (canSelfInstall) viewModel.installUpdate() else viewModel.openReleasePage(info.url)
-                    }) { Text(if (canSelfInstall) "安装" else "到仓库下载") }
-                    is UpdateDownload.Failed, null -> TextButton(onClick = {
-                        if (info.apkUrl == null) viewModel.openReleasePage(info.url) else viewModel.downloadUpdate(info)
-                    }) { Text(if (info.apkUrl == null) "前往下载" else "应用内更新") }
-                    else -> TextButton(onClick = { viewModel.cancelUpdateDownload() }) { Text("取消下载") }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    if (updateBusy) viewModel.cancelUpdateDownload()
-                    updatePromptDismissed = true
-                }) { Text("稍后") }
-            },
-        )
+        }
     }
 }
+
 
 /** 主 Tab 页面：切换时按索引方向做小幅滑移 + 淡入淡出。 */
 @Composable

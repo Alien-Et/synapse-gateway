@@ -4,7 +4,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.wrapContentHeight
@@ -30,6 +29,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import io.synapse.app.ui.AppDialog
+import io.synapse.app.ui.AppDialogButton
 import io.synapse.app.ui.SectionCard
 import io.synapse.app.ui.SectionLabel
 import io.synapse.app.ui.providers.ProviderUi
@@ -337,43 +338,18 @@ object MCloudUi : ProviderUi {
             // 外观仍然是常规的居中卡片对话框。
             val pendingChallenge = challenge
             if (captchaDialogVisible && pendingChallenge != null) {
-                Dialog(
-                    onDismissRequest = { captchaDialogVisible = false },
-                    properties = DialogProperties(
-                        usePlatformDefaultWidth = false,
-                        dismissOnClickOutside = true,
-                    ),
+                // 走统一弹窗外观（AppDialog）：从前这里是自绘 Surface，圆角/内边距/标题
+                // 与其它页面各不相同。宽度给到 0.96（比默认 0.92 略宽）是因为里面嵌了
+                // WebView 滑块，太窄会拖不动。
+                AppDialog(
+                    title = "人机验证",
+                    subtitle = "在下方滑动验证，通过后验证码会自动发送",
+                    onDismiss = { captchaDialogVisible = false },
+                    modifier = Modifier.fillMaxWidth(0.96f),
+                    buttons = {
+                        AppDialogButton("关闭", { captchaDialogVisible = false })
+                    },
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        tonalElevation = 6.dp,
-                        modifier = Modifier
-                            .fillMaxWidth(0.94f)
-                            .wrapContentHeight(),
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    text = "人机验证",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                OutlinedButton(onClick = { captchaDialogVisible = false }) {
-                                    Text("关闭")
-                                }
-                            }
-                            Text(
-                                text = "在下方滑动验证，通过后验证码会自动发送",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
                             MCloudCaptchaWebView(
                                 url = pendingChallenge.webUrl,
                                 userAgent = pendingChallenge.userAgent,
@@ -393,8 +369,6 @@ object MCloudUi : ProviderUi {
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             )
-                        }
-                    }
                 }
             }
 

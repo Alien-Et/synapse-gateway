@@ -1,9 +1,7 @@
 package io.synapse.app.ui
 
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 
 /**
@@ -23,26 +21,27 @@ fun ConfirmDestructiveDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Text(
-                text = body,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+    // 外观统一走 AppDialog：从前这里是 Material3 AlertDialog，与系统原生、自绘三种并存，
+    // 同一类「删除确认」在不同页面长得不一样。
+    AppDialog(
+        title = title,
+        onDismiss = onDismiss,
+        buttons = {
+            AppDialogButton(dismissText, onDismiss)
+            AppDialogButton(
+                confirmText,
+                onClick = {
+                    onDismiss()
+                    onConfirm()
+                },
+                destructive = true,
             )
         },
-        confirmButton = {
-            TextButton(onClick = {
-                onDismiss()
-                onConfirm()
-            }) {
-                Text(confirmText, color = MaterialTheme.colorScheme.error)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text(dismissText) }
-        },
-    )
+    ) {
+        Text(
+            text = body,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }

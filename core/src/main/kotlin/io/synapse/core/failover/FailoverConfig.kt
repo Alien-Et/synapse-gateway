@@ -107,7 +107,7 @@ data class ModelFailoverSettings(
     val modelCooldown: ModelCooldownConfig = ModelCooldownConfig(),
 
     /**
-     * 国内外互通：同供应商下的「国内」与「国外」两个区域共享账号池。
+     * 跨区域（原名「国内外互通」）：同供应商下的「国内」与「国外」两个区域共享账号池。
      *
      * 默认开启。开启后，`腾讯国内/xxx` 在国内账号都用不了时，会顺延到国外账号继续跑
      * （反之亦然）——它们本来就是同一家供应商、能力相同，只是站点不同。
@@ -116,6 +116,15 @@ data class ModelFailoverSettings(
      * 用户在「设置 → 故障转移」里可以关掉它。
      */
     val crossRegionFailover: Boolean = true,
+
+    /**
+     * 跨供应商故障转移：默认**关闭**。
+     *
+     * 与上面两项完全独立的第三套机制：同供应商换号（始终）→ 跨区域（可关）→ 跨供应商（默认关）。
+     * 只有本家所有区域、所有账号都不可用时才会走到它；关闭时行为与改造前一致。
+     * 详见 [CrossProviderFailoverConfig]。
+     */
+    val crossProvider: CrossProviderFailoverConfig = CrossProviderFailoverConfig(),
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("enabled", enabled)
@@ -124,6 +133,7 @@ data class ModelFailoverSettings(
         add("concurrency", concurrency.toJson())
         add("modelCooldown", modelCooldown.toJson())
         addProperty("crossRegionFailover", crossRegionFailover)
+        add("crossProvider", crossProvider.toJson())
     }
 
     companion object {
@@ -141,6 +151,10 @@ data class ModelFailoverSettings(
                 modelCooldown = ModelCooldownConfig.fromJson(obj.getAsJsonObject("modelCooldown")),
                 // 老配置没有这个字段 → 默认 true（与「开关默认打开」一致）
                 crossRegionFailover = obj.get("crossRegionFailover")?.asBoolean ?: true,
+                // 老配置没有这个字段 → 默认关闭（不改变原有路由语义）
+                crossProvider = CrossProviderFailoverConfig.fromJson(
+                    obj.getAsJsonObject("crossProvider")?.toString(),
+                ),
             )
         }
     }

@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -204,31 +203,29 @@ private fun ProxyTypeDialog(
     onSelect: (ProxyType) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("代理类型") },
-        text = {
-            Column(Modifier.fillMaxWidth()) {
-                for (type in ProxyType.entries) {
-                    Text(
-                        text = type.label,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = if (type == current) FontWeight.SemiBold else null,
-                        color = if (type == current) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(type) }
-                            .padding(vertical = 12.dp),
-                    )
-                }
+    // 走统一弹窗：从前是 Material3 AlertDialog，和系统原生、自绘三种并存
+    AppDialog(
+        title = "代理类型",
+        onDismiss = onDismiss,
+        buttons = { AppDialogButton("取消", onDismiss) },
+    ) {
+        Column(Modifier.fillMaxWidth()) {
+            for (type in ProxyType.entries) {
+                Text(
+                    text = type.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = if (type == current) FontWeight.SemiBold else null,
+                    color = if (type == current) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(type) }
+                        .padding(vertical = 12.dp),
+                )
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
-        },
-    )
+        }
+    }
 }

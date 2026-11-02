@@ -97,6 +97,9 @@ data class BatchActionResult(
 /**
  * 批量任务进行中的进度事件（在后台线程发出，调用方自行切回 UI 线程）。
  * [done] 为已完成个数、[total] 为总个数，[nickname]/[uid] 是刚完成的那一个账号。
+ *
+ * [stage] 说明这一拍属于哪个阶段：批量签到这类动作是「执行动作 → 补刷额度」两段，
+ * 不区分阶段的话用户会看到「已完成 3/3」之后进度卡住不动（其实在刷额度），以为程序挂了。
  */
 data class BatchProgress(
     val done: Int,
@@ -104,7 +107,24 @@ data class BatchProgress(
     val providerId: String,
     val uid: String,
     val nickname: String,
+    val stage: BatchStage = BatchStage.ACTION,
+    /**
+     * true 表示这一拍是「开始处理某账号」，false 表示「某账号已完成」。
+     *
+     * 两种事件共用同一个回调：UI 据此把 [nickname] 显示成「当前：X」还是「刚完成：X」。
+     * [done] 在 started=true 时是**已完成的个数**（不是下标），否则进度条会随并发乱序倒退。
+     */
+    val started: Boolean = false,
 )
+
+/** 批量动作的阶段。 */
+enum class BatchStage {
+    /** 正在对账号执行动作本身（签到/领任务）。 */
+    ACTION,
+
+    /** 动作已完成，正在补刷额度。 */
+    REFRESH,
+}
 
 /** 流式拉取模型目录时，单个供应商的就绪事件（成功带 models，失败带 error）。 */
 data class ProviderModelsChunk(
@@ -381,6 +401,20 @@ class GatewayEngine(
     // ------------------------------------------------------------------ 故障转移与容灾调度
 
     fun failoverSettings(): io.synapse.core.failover.ModelFailoverSettings = failoverSettings
+
+    /**
+     * 某供应商当前**已缓存**的可用额度（该家所有账号的余额之和）。
+     *
+     * 只读缓存，**绝不触发上游请求**：这个值只用于「按额度」策略挑跨供应商候选，
+     * 挑选发生在一个请求的失败路径上，绝不能为了排序再打一轮额度接口。
+     * 未知时返回 null（不是 0）——「不知道」不该被当成「没有额度」。
+     */
+    fun cachedCreditsOf(providerId: String): Long? {
+        val statuses = pool.statuses(providerId)
+        val known = statuses.filter { it.creditsKnown }
+        if (known.isEmpty()) return null
+        return known.sumOf { it.credits }
+    }
 
     fun updateFailoverSettings(updated: io.synapse.core.failover.ModelFailoverSettings) {
         failoverSettings = updated
@@ -1153,13 +1187,34 @@ class GatewayEngine(
         val ordered = targets.distinctBy { it.providerId to it.uid }
         if (ordered.isEmpty()) return emptyList()
 
-        val results = runBounded(ordered, parallelism, onDone = { done, index ->
-            if (onProgress != null) {
-                val target = ordered[index]
-                val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
-                onProgress(BatchProgress(done, ordered.size, target.providerId, target.uid, nickname))
-            }
-        }) { target ->
+        val results = runBounded(
+            ordered,
+            parallelism,
+            onDone = { done, index ->
+                if (onProgress != null) {
+                    val target = ordered[index]
+                    val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                    onProgress(
+                        BatchProgress(
+                            done, ordered.size, target.providerId, target.uid, nickname, BatchStage.ACTION,
+                        ),
+                    )
+                }
+            },
+            onStart = { done, index ->
+                if (onProgress != null) {
+                    val target = ordered[index]
+                    val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                    // done 传当前已完成数（而不是 index）：并发下 index 乱序，用它会让进度条倒退
+                    onProgress(
+                        BatchProgress(
+                            done, ordered.size, target.providerId, target.uid, nickname,
+                            BatchStage.ACTION, started = true,
+                        ),
+                    )
+                }
+            },
+        ) { target ->
             // 单个账号抛异常也不能拖垮整批：就地转成失败结果。
             val outcome = runCatching { performActionRaw(target.providerId, target.uid, action, payload) }
             val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
@@ -1181,7 +1236,10 @@ class GatewayEngine(
         // 批量结束后统一刷一次额度，替掉原先「每个账号动作成功后立刻补刷」的逐账号额外请求。
         // 只刷动作成功、余额可能已变的账号：失败的账号余额没动，再打一次上游只会徒增噪音与风控。
         val succeeded = results.filter { it.ok }.map { BatchTarget(it.providerId, it.uid) }
-        if (succeeded.isNotEmpty()) refreshCreditsBounded(succeeded, parallelism)
+        if (succeeded.isNotEmpty()) {
+            // 刷新阶段也回推进度：否则界面停在「已完成 N/N」不动，用户以为卡死了
+            refreshCreditsBounded(succeeded, parallelism, onProgress = onProgress)
+        }
         return results
     }
 
@@ -1243,7 +1301,9 @@ class GatewayEngine(
             if (onProgress != null) {
                 val target = targets[index]
                 val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
-                onProgress(BatchProgress(done, targets.size, target.providerId, target.uid, nickname))
+                onProgress(
+                    BatchProgress(done, targets.size, target.providerId, target.uid, nickname, BatchStage.REFRESH),
+                )
             }
         },
     ) { target ->
@@ -1262,6 +1322,7 @@ class GatewayEngine(
         targets: List<BatchTarget>,
         parallelism: Int,
         onDone: ((done: Int, index: Int) -> Unit)? = null,
+        onStart: ((done: Int, index: Int) -> Unit)? = null,
         task: (BatchTarget) -> R,
     ): List<R> {
         if (targets.isEmpty()) return emptyList()
@@ -1276,6 +1337,9 @@ class GatewayEngine(
             val futures = targets.mapIndexed { index, target ->
                 executor.submit(Runnable {
                     try {
+                        // 先报「这个账号开始处理了」：并发跑时四个线程几乎同一时刻启动，
+                        // 只报完成事件的话，界面在最初几秒只能显示「准备中」。
+                        runCatching { onStart?.invoke(finished.get(), index) }
                         results.set(index, task(target))
                     } finally {
                         // 任务抛异常也要走完：否则进度少一拍、结果槽留 null，
@@ -1886,7 +1950,7 @@ class GatewayEngine(
         // 「腾讯国内/x」和「腾讯国外/x」共用同一个 providerId（codebuddy），字节同理。
         // 默认**区域是硬约束**，绝不跨区——否则国内号没额度时会静默跑到国外站点。
         //
-        // 例外：开启「国内外互通」（[allowCrossRegion] 且设置里的 crossRegionFailover 为真）时，
+        // 例外：开启「跨区域」（[allowCrossRegion] 且设置里的 crossRegionFailover 为真）时，
         // **先在本区域内找**，找不到才顺延到另一个区域。绝不能直接整池挑——
         // 那会让国内请求长期跑在国外号上，违背用户选区域的本意。
         val crossRegion = allowCrossRegion && failoverSettings.crossRegionFailover
@@ -1923,7 +1987,7 @@ class GatewayEngine(
         if (skipEmptyCredits) {
             pickBest(ignoreCreditFilter = true, sameRegionOnly = true)?.let { return it }
         }
-        // 第 3 轮（仅在开启国内外互通时）：跨区域兜底。
+        // 第 3 轮（仅在开启跨区域时）：跨区域兜底。
         // 走到这里说明本区域一个能用的号都没有了——要么都停用/凭证失效，
         // 要么（skipEmptyCredits 时）额度都是 0。
         if (!crossRegion) return null

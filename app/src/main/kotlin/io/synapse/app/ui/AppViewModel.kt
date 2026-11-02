@@ -26,6 +26,7 @@ import io.synapse.app.service.GatewayService
 import io.synapse.app.service.GatewayTileService
 import io.synapse.core.gateway.BatchActionResult
 import io.synapse.core.gateway.BatchProgress
+import io.synapse.core.gateway.BatchStage
 import io.synapse.core.gateway.BatchTarget
 import io.synapse.core.gateway.CreditRefreshResult
 import io.synapse.core.gateway.CustomProviderConfig
@@ -219,10 +220,26 @@ sealed interface ModelLoadState {
 }
 
 /**
- * 批量动作进行中的进度（供 UI 显示「已完成 X/N（当前：某账号）」）。
+ * 批量动作进行中的进度。
+ *
+ * 字段是为「过程可见」服务的：用户点了签到之后要能看到**正在对谁做、做到第几个、
+ * 以及刚做完的那个结果是什么**，否则界面只有一个转圈图标，看起来像程序没反应。
+ *
+ * - [stage] 区分「执行动作」与「补刷额度」两段（第二段不区分的话进度会停在 N/N 不动）；
+ * - [title] 这次批量叫什么（「批量签到」/「批量任务」），浮层标题直接用它；
+ * - [current] 正在处理的账号，[recent] 最近完成的账号结果（最多留几条，最新的在前）。
  */
 @Immutable
-data class BatchProgressUi(val done: Int, val total: Int, val current: String)
+data class BatchProgressUi(
+    val done: Int,
+    val total: Int,
+    val current: String,
+    val title: String = "处理中",
+    val stage: BatchStage = BatchStage.ACTION,
+    /** true 表示 [current] 是「正在处理」，false 表示「刚完成」。 */
+    val started: Boolean = false,
+    val recent: List<BatchItem> = emptyList(),
+)
 
 /** 批量结果里的单个失败账号条目。 */
 @Immutable
@@ -1692,7 +1709,10 @@ class AppViewModel(
     ) {
         viewModelScope.launch {
             // 先置空上一次的结果面板，避免新一轮的进度被旧面板挡住
-            _state.value = _state.value.copy(batchProgress = BatchProgressUi(0, 0, ""), batchOutcome = null)
+            _state.value = _state.value.copy(
+                batchProgress = BatchProgressUi(0, 0, "", title = busyText),
+                batchOutcome = null,
+            )
             val outcome = withContext(Dispatchers.IO) {
                 runCatching {
                     val results = block { progress -> onBatchProgress(progress) }
@@ -1746,9 +1766,37 @@ class AppViewModel(
 
     private fun onBatchProgress(progress: BatchProgress) {
         // 多个账号在后台线程并发回调：CAS 循环逐个重试，避免并发写把已完成数覆盖回去。
-        val next = BatchProgressUi(progress.done, progress.total, progress.nickname.ifEmpty { progress.uid })
         while (true) {
             val prev = _state.value
+            val previous = prev.batchProgress
+            val name = progress.nickname.ifEmpty { progress.uid }
+            val next = if (previous == null) {
+                BatchProgressUi(
+                    progress.done, progress.total, name, stage = progress.stage, started = progress.started,
+                )
+            } else {
+                // 补刷额度阶段的 total 是「成功账号数」，与动作阶段的 total 不同；
+                // 进度条与文案都按当前阶段自己的 total 走，避免百分比突然回跳。
+                //
+                // recent 只在「完成」事件里追加（开始事件没有结果可写），最多留 3 条最新的。
+                val recent = if (progress.started) {
+                    previous.recent
+                } else {
+                    // 这里拿不到动作的业务文案（引擎的进度事件只有账号标识），
+                    // 所以只记账号名，让用户看到「确实一个个在过」；详细结果在结束后的面板里。
+                    (listOf(BatchItem(name, "", ok = true)) + previous.recent)
+                        .distinctBy { it.account }
+                        .take(3)
+                }
+                previous.copy(
+                    done = progress.done,
+                    total = progress.total,
+                    current = name,
+                    stage = progress.stage,
+                    started = progress.started,
+                    recent = recent,
+                )
+            }
             if (_state.compareAndSet(prev, prev.copy(batchProgress = next))) return
         }
     }
