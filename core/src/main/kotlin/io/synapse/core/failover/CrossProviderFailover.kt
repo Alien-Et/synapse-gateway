@@ -75,8 +75,27 @@ data class CrossProviderFailoverConfig(
     }
 }
 
-/** 一个跨供应商候选：某家供应商的某个模型。 */
-data class CrossProviderCandidate(
+/**
+ * 勾选 / 取消一个候选，返回新配置。
+ *
+ * 勾上时**追加到末尾**：候选顺序就是「按顺序」策略的优先级，用户先勾的应该先用。
+ * 同一个候选重复勾不会产生重复条目（幂等），所以界面连点也不会把列表撑出两份。
+ * 取消时按 [CrossProviderCandidate.key] 移除。
+ *
+ * 放在 core 而不是界面里，是为了让「顺序 / 去重 / 幂等」这三条能被测试钉住——
+ * 它们直接决定故障转移时先发给谁。
+ */
+fun CrossProviderFailoverConfig.withCandidateToggled(
+    candidate: CrossProviderCandidate,
+    checked: Boolean,
+): CrossProviderFailoverConfig = if (checked) {
+    if (candidates.any { it.key == candidate.key }) this
+    else copy(candidates = candidates + candidate)
+} else {
+    copy(candidates = candidates.filterNot { it.key == candidate.key })
+}
+
+/** 一个跨供应商候选：某家供应商的某个模型。 */data class CrossProviderCandidate(
     val providerId: String,
     val model: String,
 ) {
