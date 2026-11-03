@@ -24,6 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import io.synapse.core.gateway.GatewaySettings
+import io.synapse.core.pool.AccountStatus
 import io.synapse.core.failover.CircuitBreakerConfig
 import io.synapse.core.failover.ConcurrencyConfig
 import io.synapse.core.failover.ModelCooldownConfig
@@ -114,27 +115,25 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
         )
     }
 
-    // 跨供应商候选配置：勾模型 + 选策略
+    // 跨供应商候选配置：勾模型 + 选策略。
+    // 勾选即保存（写透），所以这里没有「提交」分支——关窗的方式不影响结果。
     if (showCrossProviderDialog) {
         CrossProviderDialog(
             models = state.models,
-            initialCandidates = state.failover.crossProvider.candidates,
-            initialStrategy = state.failover.crossProvider.strategy,
-            onDismiss = { showCrossProviderDialog = false },
-            onConfirm = { candidates, strategy ->
-                viewModel.updateFailoverSettings(
-                    state.failover.copy(
-                        crossProvider = state.failover.crossProvider.copy(
-                            candidates = candidates,
-                            strategy = strategy,
-                            // 这里**不改** enabled：跨供应商默认关闭是用户明确要求的行为，
-                            // 选完候选就偷偷打开会让「关着」变成一句空话——用户以为没生效，
-                            // 实际已经绕过了「写哪家发哪家」的语义。要开就自己拨开关。
-                        ),
-                    ),
-                )
-                showCrossProviderDialog = false
+            modelsLoading = state.modelsLoading,
+            modelsError = state.modelsError,
+            candidates = state.failover.crossProvider.candidates,
+            strategy = state.failover.crossProvider.strategy,
+            providerCredits = remember(state.accounts) { providerCreditLabels(state.accounts) },
+            // 写透：勾一下就落盘，不等「保存」。读改写在 ViewModel 里基于 engine
+            // 权威值做，连点也不会丢更新（界面持有的 state 可能已过期）。
+            onToggleCandidate = { candidate, checked ->
+                viewModel.toggleCrossProviderCandidate(candidate, checked)
             },
+            onStrategyChange = { next -> viewModel.setCrossProviderStrategy(next) },
+            onEnsureModels = { viewModel.ensureModelsLoaded() },
+            onRefreshModels = { viewModel.refreshModels(silent = true) },
+            onDismiss = { showCrossProviderDialog = false },
         )
     }
 
@@ -423,9 +422,20 @@ private fun LargeBodyComponent(
     }
 }
 
+/**
+ * 各供应商的「剩余额度」文案，供候选弹窗的分组标题显示。
+ *
+ * 只统计**已知额度**的账号（`creditsKnown`）：上游没回数时留着不算，
+ * 否则会把「查不到」显示成「0」——那正是之前额度面板踩过的坑。
+ * 一个账号都没刷新过额度的供应商不会出现在结果里，界面就不显示这一行。
+ */
+private fun providerCreditLabels(accounts: List<AccountStatus>): Map<String, String> =
+    accounts.filter { it.creditsKnown }
+        .groupBy { it.providerId }
+        .mapValues { (_, list) -> "剩余 ${formatCount(list.sumOf { it.credits })}" }
+
 @Composable
-private fun ParamRow(title: String, value: String) {
-    Row(
+private fun ParamRow(title: String, value: String) {    Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,

@@ -31,6 +31,7 @@ import io.synapse.core.gateway.BatchTarget
 import io.synapse.core.gateway.CreditRefreshResult
 import io.synapse.core.gateway.CustomProviderConfig
 import io.synapse.core.gateway.GatewayEngine
+import io.synapse.core.failover.withCandidateToggled
 import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.gateway.LoginOutcome
 import io.synapse.core.gateway.ModelExposureSettings
@@ -811,6 +812,46 @@ class AppViewModel(
     fun updateFailoverSettings(updated: io.synapse.core.failover.ModelFailoverSettings) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { engine.updateFailoverSettings(updated) }
+            refresh()
+        }
+    }
+
+    /**
+     * 勾选/取消一个跨供应商候选，**立即落盘**。
+     *
+     * 为什么读改写放在这里、而不是让界面算好新列表再传进来：
+     * 界面持有的 `state` 是上一次快照，用户连点两下时第二次点用的是同一份旧列表，
+     * 会把第一次的勾选覆盖掉（丢了更新）。这里每次都从 engine 读当前值再改，
+     * 写的是权威状态，连点也不会丢。
+     *
+     * 勾选顺序即优先级（「按顺序」策略用），所以新勾的追加到末尾。
+     */
+    fun toggleCrossProviderCandidate(
+        candidate: io.synapse.core.failover.CrossProviderCandidate,
+        checked: Boolean,
+    ) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val current = engine.failoverSettings()
+                // 顺序 / 去重 / 幂等由 core 的 withCandidateToggled 保证，见它的注释与测试
+                val cross = current.crossProvider.withCandidateToggled(candidate, checked)
+                engine.updateFailoverSettings(current.copy(crossProvider = cross))
+            }
+            refresh()
+        }
+    }
+
+    /** 切换跨供应商候选的挑选策略，立即落盘。同样走 engine 权威值，避免覆盖。 */
+    fun setCrossProviderStrategy(strategy: io.synapse.core.failover.CrossProviderStrategy) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val current = engine.failoverSettings()
+                engine.updateFailoverSettings(
+                    current.copy(
+                        crossProvider = current.crossProvider.copy(strategy = strategy),
+                    ),
+                )
+            }
             refresh()
         }
     }
