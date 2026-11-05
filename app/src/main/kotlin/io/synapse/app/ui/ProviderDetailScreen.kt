@@ -108,10 +108,8 @@ fun ProviderDetailScreen(
                     .padding(6.dp),
             )
         },
-        // 自定义供应商不需要额外入口：页面本身就是编辑页
+        // 自定义供应商：直接复用新建页那套表单，两个入口卡片与功能完全一致
     ) {
-        // 自定义供应商：详情页就是编辑页（能改地址、自动拉模型、管账号），
-        // 不再需要右上角铅笔图标跳去另一个表单。
         if (providerId.startsWith(ProviderUiRegistry.CUSTOM_PREFIX)) {
             io.synapse.app.ui.providers.custom.CustomProviderDetailBody(
                 providerId = providerId,
