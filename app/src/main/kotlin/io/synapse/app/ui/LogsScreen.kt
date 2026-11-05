@@ -42,6 +42,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.snapshotFlow
@@ -272,12 +273,16 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
         // 若在 LaunchedEffect(条数) 里立刻 scrollToItem(0)，那时 LazyColumn 的
         // 子项还没扩容，滚到 0 等于原地不动，而 LaunchedEffect 之后不会再触发，
         // 于是表现为「日志不自动滚动」。这里显式等一帧（withFrameNanos）再滚。
-        LaunchedEffect(tab, if (tab == LogTab.Calls) calls.size else logs.size) {
+        // 不用「等一帧」那种脆弱时序：LaunchedEffect 触发时新条目可能还没进布局，
+        // withFrameNanos 等一帧在插入动画/重组合并时仍可能过早。
+        // 改成 snapshotFlow 持续观察 layoutInfo，等 totalItemsCount 真的反映新条数
+        // 后再滚到 0，滚完即退出收集（每次条数变化重新起一轮）。
+        val targetCount = if (tab == LogTab.Calls) calls.size else logs.size
+        LaunchedEffect(tab, targetCount) {
             if (userScrolledAway) return@LaunchedEffect
-            withFrameNanos { }                                  // 等新条目进入布局
-            if (listState.layoutInfo.totalItemsCount > 0) {
-                listState.scrollToItem(0)
-            }
+            snapshotFlow { listState.layoutInfo.totalItemsCount }
+                .first { it >= targetCount && it > 0 }
+            listState.scrollToItem(0)
         }
         LazyColumn(
             state = listState,

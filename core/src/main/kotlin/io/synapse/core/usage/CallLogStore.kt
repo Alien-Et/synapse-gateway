@@ -165,6 +165,32 @@ class CallLogStore(
      */
     private val dailyByProvider = mutableMapOf<String, MutableMap<Long, UsageStats>>()
 
+    /**
+     * 调用记录变更监听。
+     *
+     * 为什么必须有：`RequestLog` 早就有 listener，日志页能实时刷新请求日志文本；
+     * 但「调用记录」卡片写进 [CallLogStore] 时没有任何通知，界面只有进页面时拉一次，
+     * 表现为「新请求跑完了卡片不出现」。这里补上对等机制，由 ViewModel 订阅后
+     * 合并刷新（与 RequestLog 共用 120ms 合并窗口，避免高频写入拖卡 UI）。
+     *
+     * 与 QuotaAlerts / NoticeEvents 同一纪律：**回调抛异常绝不影响写入**，
+     * 监听器用 CopyOnWriteArrayList 保证网关线程可安全增删。
+     */
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<() -> Unit>()
+
+    fun addListener(listener: () -> Unit) {
+        listeners.add(listener)
+    }
+
+    fun removeListener(listener: () -> Unit) {
+        listeners.remove(listener)
+    }
+
+    private fun notifyChanged() {
+        if (listeners.isEmpty()) return
+        for (listener in listeners) runCatching { listener() }
+    }
+
     init {
         if (preloadOnConstruction) load()
     }
@@ -201,6 +227,9 @@ class CallLogStore(
             store.write(providerDayKeyOf(pid, day), providerUpdated.toJson().toString())
         }
         pruneDaily()
+        // 写在 @Synchronized 块内但**不持锁回调**：监听器可能反过来调 list()/add()，
+        // 持锁回调会有死锁风险；notifyChanged 里已逐个 catch，不会把异常带回写入路径。
+        notifyChanged()
     }
 
     /**

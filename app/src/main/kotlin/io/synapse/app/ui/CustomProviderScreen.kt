@@ -314,6 +314,10 @@ fun CustomProviderScreen(
                             // 启用状态不在这一页管理（账号级的开关在详情页），保持原值
                             enabled = existing?.enabled ?: true,
                             protocol = protocol,
+                            // ★ 必须把已有的自定义请求头带回去：这一页重建了整个
+                            // CustomProviderConfig，漏掉 headers 会让用户在详情页
+                            // 配好的头一点保存就全丢（界面与引擎当场不同步）。
+                            headers = existing?.headers.orEmpty(),
                             // 未选预设且字段全空 = 不查余额，别落一条空配置
                             balanceQuery = if (
                                 balancePreset.isEmpty() && balancePath.isBlank() && balanceField.isBlank()
