@@ -9,16 +9,17 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -42,13 +43,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -267,22 +266,26 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
 
-        // 新日志插入到 index 0 → 「保持最新可见」= 停在顶部。
-        //
-        // ⚠️ 时序是关键：新条目是**这一帧之后**才真正加入布局的。
-        // 若在 LaunchedEffect(条数) 里立刻 scrollToItem(0)，那时 LazyColumn 的
-        // 子项还没扩容，滚到 0 等于原地不动，而 LaunchedEffect 之后不会再触发，
-        // 于是表现为「日志不自动滚动」。这里显式等一帧（withFrameNanos）再滚。
-        // 不用「等一帧」那种脆弱时序：LaunchedEffect 触发时新条目可能还没进布局，
-        // withFrameNanos 等一帧在插入动画/重组合并时仍可能过早。
-        // 改成 snapshotFlow 持续观察 layoutInfo，等 totalItemsCount 真的反映新条数
-        // 后再滚到 0，滚完即退出收集（每次条数变化重新起一轮）。
-        val targetCount = if (tab == LogTab.Calls) calls.size else logs.size
-        LaunchedEffect(tab, targetCount) {
-            if (userScrolledAway) return@LaunchedEffect
-            snapshotFlow { listState.layoutInfo.totalItemsCount }
-                .first { it >= targetCount && it > 0 }
-            listState.scrollToItem(0)
+        // 自动跟随（最新在 index 0）：不依赖「条数变化」那种脆弱时序，
+        // 改成**持续守护**——只要用户没翻走、且首条不是 index 0，就拉回顶部。
+        // 这样无论新条目在哪一帧进布局、有没有插入动画，都一定跟得上。
+        // 用户往上翻历史时 userScrolledAway=true，循环立刻停止，不抢滚动。
+        LaunchedEffect(tab, listState) {
+            snapshotFlow {
+                val info = listState.layoutInfo
+                val first = info.visibleItemsInfo.firstOrNull()
+                Triple(
+                    first?.index ?: -1,
+                    first?.offset ?: 0,
+                    info.totalItemsCount,
+                )
+            }.collect { (firstIndex, firstOffset, total) ->
+                if (userScrolledAway || total <= 0) return@collect
+                // 首条不在 0（或虽在 0 但被新条目顶出可见区）时拉回顶部
+                if (firstIndex != 0 || firstOffset < -32) {
+                    listState.scrollToItem(0)
+                }
+            }
         }
         LazyColumn(
             state = listState,
