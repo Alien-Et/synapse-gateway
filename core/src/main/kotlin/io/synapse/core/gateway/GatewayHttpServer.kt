@@ -100,6 +100,10 @@ class GatewayHttpServer(
         addHeader("Access-Control-Allow-Origin", "*")
         addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         addHeader("Access-Control-Allow-Headers", "*")
+        // 非流式响应一律不复用连接：NanoHTTPD 的 keep-alive 是「处理完再阻塞读下一个请求」，
+        // 空闲连接会一直占着工作线程直到 socket 读超时（60s），并发一多线程就被这些空转连接吃光，
+        // 真正要转发的请求只能排队。OpenAI 客户端每次请求都新建连接，放弃复用代价极小。
+        if (this !is SseResponse) closeConnection(true)
     }
 
     // ------------------------------------------------------------------ 端点
@@ -368,6 +372,9 @@ class GatewayHttpServer(
         var lastHttpStatus = 0
         // 是否真正向某个上游发起过请求（用于决定 503 要不要记一条调用记录）
         var attemptedUpstream = false
+        // 是否有账号因为在途已满被拒：它既不是「没有账号」也不是上游限流，
+        // 对客要如实报并发上限（429 concurrency_limit），否则 agent 端会误判根因。
+        var concurrencyRejected = false
         // 本次请求所有失败尝试的分类：最终按主因决定给客户端的状态码与错误码
         // （从前一律 503 no_healthy_account，额度耗尽/凭证失效也报「没有可用账号」）
         val failureKinds = ArrayList<io.synapse.core.provider.ErrorKind>()
@@ -577,27 +584,69 @@ class GatewayHttpServer(
                 attempt++
                 // 兜底：上一笔上游尝试若在 continue 路径未显式收尾，这里先结束掉
                 finishActiveRequest()
-                // 选号：首选跳过「已知额度为 0」的账号（免得明知为空还白打一次上游）。
-                // 注意 skipEmptyCredits 内部有自愈：若同区域全被挡掉，它会自己退回不过滤的一轮，
-                // 所以这里不会因为一份过时的 0 而完全选不出人。
-                var picked = engine.pickAccount(
-                    currentRoute.providerId, tried, currentRoute.region, skipEmptyCredits = true, model = resolvedModel,
-                    allowCrossRegion = failoverCfg.crossRegionFailover,
-                )
-                // 熔断期间选定的「顶班」账号：本轮直接用它，试过就作废，之后回到正常轮换
+                // 选号与取许可必须在一起做：先选号再取许可的话，两个并发请求会同时选中同一个
+                // 空闲账号，后一个只好排队，看起来就是「多账号却在串行」，而且工作线程会被这些
+                // 等待占满，并发一多全部请求一起超时。
+                // 这里改成：占到一个空闲账号的许可才算选中；它已满载就换下一个空闲账号，
+                // 直到该供应商确实没有余量为止 —— 那时才对最后一个候选做一次有界排队。
+                var picked: ProviderAccount? = null
+                var gateHandleOrNull: io.synapse.core.failover.ConcurrencyGate.Handle? = null
+                while (true) {
+                    val candidate = engine.pickAccount(
+                        currentRoute.providerId, tried, currentRoute.region, skipEmptyCredits = true,
+                        model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover,
+                    ) ?: break
+                    val handle = engine.concurrencyGate.tryAcquireNow("${currentRoute.providerId}/${candidate.uid}")
+                    if (handle != null) {
+                        picked = candidate
+                        gateHandleOrNull = handle
+                        break
+                    }
+                    // 该账号在途已满：记入已试，换一个空闲账号再挑
+                    tried += candidate.uid
+                }
                 if (picked == null) {
+                    // 熔断期间选定的「顶班」账号：本轮直接用它，试过就作废，之后回到正常轮换。
+                    // 它也要过闸门，否则熔断兜底路径会绕过并发上限。
                     breakerAccountOverride?.let { alt ->
-                        if (alt.uid !in tried) picked = alt
+                        if (alt.uid !in tried) {
+                            engine.concurrencyGate.tryAcquireNow("${currentRoute.providerId}/${alt.uid}")?.let { h ->
+                                picked = alt
+                                gateHandleOrNull = h
+                            }
+                        }
                     }
                 }
                 breakerAccountOverride = if (picked != null && picked.uid == breakerAccountOverride?.uid) null else breakerAccountOverride
                 if (picked == null) {
-                    // 若池中有可用账号（如单账号或全部账号已轮过一轮），清空已试列表允许继续完成剩余重试配额。
-                    // 这一轮**不再跳过空额度账号**：能走到这里说明额度正常的号已经试过或被排除，
-                    // 剩下的就是「记录里是 0，但可能已充值/已重置」的号——让上游给出真实答案。
-                    if (engine.pickAccount(currentRoute.providerId, emptySet(), currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover) != null) {
-                        tried.clear()
-                        picked = engine.pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover)
+                    // 供应商内所有账号都满载（或都已试过）：短暂排队等一个许可（默认 30s），等不到才算并发上限。
+                    // 不能像原来那样对每个账号排 120s —— 那会让工作线程被占满，所有请求一起超时。
+                    val fallback = engine.pickAccount(
+                        currentRoute.providerId, emptySet(), currentRoute.region, model = resolvedModel,
+                        allowCrossRegion = failoverCfg.crossRegionFailover,
+                    )
+                    if (fallback != null) {
+                        // 允许继续完成剩余重试配额：清空已试列表再来一轮
+                        if (fallback.uid in tried && tried.size < maxAttempts) tried.clear()
+                        val h = engine.concurrencyGate.tryAcquire(
+                            "${currentRoute.providerId}/${fallback.uid}",
+                            failoverCfg.concurrency.queueTimeoutMs,
+                        )
+                        if (h == null) {
+                            concurrencyRejected = true
+                            val waitedSecs = failoverCfg.concurrency.queueTimeoutMs / 1000.0
+                            providerLastError = "并发已达上限（单账号=${failoverCfg.concurrency.maxPerAccount}，" +
+                                "全局=${failoverCfg.concurrency.maxGlobal}，等待 ${waitedSecs}s 超时）"
+                            log(
+                                "并发闸门拒入场（${currentRoute.providerId}/" +
+                                    "${fallback.nickname.ifEmpty { fallback.uid }}）：$providerLastError",
+                            )
+                            // 不记进 failureKinds：本地闸门满不是上游限流，混进去会让对客错误码
+                            // 变成 rate_limit_exceeded「上游限流」，属于归因造假
+                            break
+                        }
+                        picked = fallback
+                        gateHandleOrNull = h
                     }
                 }
                 if (picked == null) {
@@ -635,15 +684,10 @@ class GatewayHttpServer(
                     finalAccountRegion = regionAwareProvider.regionOf(picked) ?: routeRegion
                 }
 
-                // 上游并发闸门：在发起上游调用前取许可，会话结束后释放；取不到时本次换号重试不再尝试该账号
-                val gateHandle = engine.concurrencyGate.tryAcquire("${currentRoute.providerId}/${picked.uid}")
-                if (gateHandle != null) pendingGate = gateHandle
-                if (gateHandle == null) {
-                    val waitedSecs = failoverCfg.concurrency.queueTimeoutMs / 1000.0
-                    providerLastError = "并发已达上限（单账号=${failoverCfg.concurrency.maxPerAccount}，全局=${failoverCfg.concurrency.maxGlobal}，等待 ${waitedSecs}s 超时）"
-                    log("并发闸门拒入场（${currentRoute.providerId}/${picked.nickname.ifEmpty { picked.uid }}）：$providerLastError")
-                    continue
-                }
+                // 许可已在选号时一并取得（picked 与句柄总是成对赋值）；这里取出非空引用，
+                // 下游所有收尾路径直接用 gateHandle.release()
+                val gateHandle = gateHandleOrNull ?: break
+                pendingGate = gateHandle
 
                 // 单供应商内重试退避：非首次尝试时计算指数退避 + Jitter 抖动休眠，避免冲击上游
                 if (attempt > 1 && failoverCfg.enabled) {
@@ -1117,6 +1161,18 @@ class GatewayHttpServer(
         }
 
         val allErrors = routeErrors.joinToString("；")
+        // 有账号被本地并发闸门挡回：如实告诉客户端是并发满了（429），而不是误报 503「没有可用账号」
+        // 或 429「上游限流」——两种都会让 agent 端误判根因。
+        if (concurrencyRejected && (!attemptedUpstream || failureKinds.isEmpty())) {
+            val cfg = failoverCfg.concurrency
+            val message = if (allErrors.isEmpty()) {
+                "网关并发已满（单账号=${cfg.maxPerAccount}，全局=${cfg.maxGlobal}），请降低并发或稍后重试"
+            } else {
+                "网关并发已满（单账号=${cfg.maxPerAccount}，全局=${cfg.maxGlobal}）；$allErrors"
+            }
+            log("返回 429 concurrency_limit：$message")
+            return errorResponse(429, "concurrency_limit", message)
+        }
         val mappedFailure = GatewayErrorMapping.map(
             kinds = failureKinds,
             attemptedUpstream = attemptedUpstream,

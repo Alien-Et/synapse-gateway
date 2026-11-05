@@ -135,4 +135,25 @@ interface LoopbackOAuthSupport {
 
     /** 用回调 URL 里的 authorization code 换凭证。 */
     fun exchangeCode(code: String): ProviderAccount
+
+    /**
+     * 本地回调监听的端口。
+     *
+     * 默认沿用 Antigravity 的注册值（历史行为）。redirect_uri 是上游注册的常量，
+     * 需要自己回调地址的供应商（如 ChatGPT 的 `localhost:1455/auth/callback`）必须覆盖，
+     * 否则网关监听的端口对不上，回调永远收不到。
+     */
+    val callbackPort: Int get() = 51121
+
+    /** 本地回调监听的路径；理由同 [callbackPort]。 */
+    val callbackPath: String get() = "/oauth-callback"
+
+    /**
+     * 用完整回调 URL 完成登录；默认实现只取 code。
+     *
+     * 需要校验 state / 一次性消费 code 的供应商（如 ChatGPT）覆盖此方法拿完整 URL——
+     * 否则同一个回调链接可以被反复重放。
+     */
+    fun completeCallback(callbackUrl: String): ProviderAccount =
+        exchangeCode(queryParam(callbackUrl, "code") ?: throw IllegalStateException("回调里没有 code 参数"))
 }

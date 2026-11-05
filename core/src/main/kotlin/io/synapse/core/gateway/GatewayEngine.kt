@@ -1391,7 +1391,9 @@ class GatewayEngine(
             }
 
             provider is LoopbackOAuthSupport -> {
-                startCallbackServer(AntigravityProvider.CALLBACK_PORT, AntigravityProvider.CALLBACK_PATH) { url ->
+                // 回调端口/路径由 provider 自己声明：redirect_uri 是上游注册值，写死会让第二家
+                // loopback 供应商（如 ChatGPT 的 1455）永远收不到回调。
+                startCallbackServer(provider.callbackPort, provider.callbackPath) { url ->
                     val outcome = completeOAuth(providerId, url)
                     resultPage(outcome.ok, outcome.nickname.ifEmpty { outcome.uid }, outcome.error)
                 }
@@ -1589,7 +1591,9 @@ class GatewayEngine(
             return LoginOutcome(LoginState.FAILED, error = "回调校验失败（state 不匹配），请重新发起登录")
         }
         return try {
-            adopt(providerId, support.exchangeCode(code), "登录")
+            // 走 completeCallback 让供应商拿到**完整 URL**：需要校验 state / 一次性消费 code 的
+            // 供应商（如 ChatGPT）在那一层做防重放；默认实现等价于只取 code。
+            adopt(providerId, support.completeCallback(callbackUrl), "登录")
         } catch (e: Exception) {
             logWarn("OAuth 登录失败（$providerId）：${e.message}")
             LoginOutcome(LoginState.FAILED, error = e.message ?: "登录失败")
@@ -1691,10 +1695,20 @@ class GatewayEngine(
                 logWarn("拉取模型目录超时（$providerId，${MODELS_FETCH_TIMEOUT_SECONDS}s）")
                 failures[providerId] = "拉取模型目录超时"
                 continue
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                // 「没有账号」不是失败：登录前本就不该有模型。抛异常也按同一条约定兜住，
+                // 否则未登录的供应商会在模型页报红，看着像故障，其实只是还没登录。
+                if (pool.accounts(providerId).isEmpty()) continue
+                // 有账号却抛异常：这是真的拉取失败（网络/协议/解析），必须报给用户
+                failures[providerId] = e.message ?: "拉取失败"
                 continue
             }
             aggregated.addAll(chunk.models)
+            // 「没有账号」不是失败：登录前本就不该有模型，供应商自报的 error 也不该报红。
+            // 这条约定原本只靠各 Provider 自觉（历史上 ChatGPT 就违反了），在这里统一兜住：
+            // 新加一个供应商还没登录时，模型页不该显示「拉取模型目录时有报错：xxx: 未登录」，
+            // 那看着像故障，其实只是还没登录。
+            if (chunk.error != null && pool.accounts(providerId).isEmpty()) continue
             chunk.error?.let { failures[chunk.providerId] = it }
         }
         return ModelsCatalog(aggregated, failures)
@@ -2209,6 +2223,8 @@ class GatewayEngine(
             // 灵犀（原「移动云盘 / 139 云」）。旧标签保留为别名，老客户端配置不用改。
             "灵犀" -> "mcloud"
             "移动云盘" -> "mcloud"
+            "ChatGPT" -> "chatgpt"
+            "GPT" -> "chatgpt"
             else -> null
         }
     }
@@ -2258,6 +2274,7 @@ class GatewayEngine(
             "loomy" -> "讯飞"
             "raccoon" -> "商汤"
             "mcloud" -> "灵犀"
+            "chatgpt" -> "ChatGPT"
             // 未知供应商沿用 id，不硬编中文
             else -> return if (region == null) providerId else "$providerId-$region"
         }
