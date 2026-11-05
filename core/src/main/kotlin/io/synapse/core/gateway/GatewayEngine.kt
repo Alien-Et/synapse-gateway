@@ -905,12 +905,18 @@ class GatewayEngine(
                     priority = status?.priority ?: 0,
                 )
             }
-        // 只带与导出账号相关的自定义供应商，不相关的不带
+        // 带上「与导出账号相关」的自定义供应商，以及**全选导出时**所有已配置的
+        // 自定义供应商。
+        //
+        // 后者很重要：一家刚建好、只填了协议/地址/余额配置但还没加账号的自定义供应商，
+        // 按账号过滤会被排除，导入后那套配置就凭空消失了。全选（selection 为空）时
+        // 用户意图是「整个快照」，这些配置必须一起走。
         val ownerProviderIds = picked.map { it.providerId }.filter { it.startsWith(CUSTOM_PREFIX) }.toSet()
-        val providers = if (ownerProviderIds.isEmpty()) {
-            emptyList()
+        val allCustom = settingsRepository.loadCustomProviders()
+        val providers = if (selection.isEmpty()) {
+            allCustom
         } else {
-            settingsRepository.loadCustomProviders().filter { it.providerId in ownerProviderIds }
+            allCustom.filter { it.providerId in ownerProviderIds }
         }
         return AccountTransfer.encode(
             accounts = snapshots,

@@ -3,6 +3,7 @@ package io.synapse.core.pool
 import io.synapse.core.provider.ProviderAccount
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
@@ -103,5 +104,65 @@ class AccountTransferTest {
         val json = """{"format":"aigw-accounts","version":3,"exportedAt":0,"accounts":[{"providerId":"trae","uid":"a"}]}"""
         val e = assertFailsWith<IllegalArgumentException> { AccountTransfer.decode(json) }
         assertTrue(e.message!!.contains("没有可用的账号"), e.message!!)
+    }
+
+    @Test
+    fun `自定义供应商的新字段导入导出往返一致`() {
+        // 覆盖新增的 protocol / headers / balanceQuery(含 method/body/preset/unit)
+        val cfg = io.synapse.core.gateway.CustomProviderConfig(
+            key = "mysite",
+            name = "我的站点",
+            baseUrl = "https://api.mysite.com/v1",
+            apiKeys = emptyList(),
+            protocol = "anthropic",
+            models = listOf("claude-3-5", "claude-4"),
+            enabled = false,
+            headers = listOf(
+                io.synapse.core.gateway.HttpHeader("X-Tenant", "acme"),
+                io.synapse.core.gateway.HttpHeader("x-api-key", "override"),
+            ),
+            balanceQuery = io.synapse.core.gateway.BalanceQueryConfig(
+                path = "/api/user/self",
+                field = "data.quota,balance",
+                scale = 500_000.0,
+                divide = true,
+                unit = "$",
+                method = "POST",
+                body = """{"scope":"all"}""",
+                preset = "new_api",
+            ),
+        )
+        val json = AccountTransfer.encode(
+            accounts = listOf(AccountSnapshot(ProviderAccount("custom:mysite", "uid1", "k1", "{}"))),
+            exportedAt = 999L,
+            providers = listOf(cfg),
+        )
+        val decoded = AccountTransfer.decode(json)
+        assertEquals(1, decoded.providers.size)
+        val got = decoded.providers.first()
+        assertEquals(cfg.key, got.key)
+        assertEquals("anthropic", got.protocol)
+        assertEquals(cfg.models, got.models)
+        assertEquals(false, got.enabled)
+        assertEquals(cfg.headers, got.headers, "自定义请求头不能丢")
+        assertEquals(cfg.balanceQuery, got.balanceQuery, "余额配置（含 POST body / preset）不能丢")
+    }
+
+    @Test
+    fun `老版本导出文件缺少新字段时回退到默认值`() {
+        // v3 里没有 method/body/preset 的旧文件仍能导入
+        val legacy = """{"format":"aigw-accounts","version":3,"exportedAt":1,
+            "accounts":[{"providerId":"trae","uid":"u1","nickname":"n","secret":"{}","enabled":true,"priority":0}],
+            "providers":[{"key":"old","name":"old","baseUrl":"https://x/v1",
+            "protocol":"openai","enabled":true,"models":[],"balanceQuery":
+            {"url":"","path":"/api/x","field":"balance","scale":1.0,"divide":false,"unit":""}}]}"""
+        val decoded = AccountTransfer.decode(legacy)
+        assertEquals(1, decoded.providers.size)
+        val bq = decoded.providers.first().balanceQuery
+        assertNotNull(bq)
+        val q = bq
+        assertEquals("GET", q.method)
+        assertEquals("", q.body)
+        assertEquals("", q.preset)
     }
 }

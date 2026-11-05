@@ -439,7 +439,8 @@ class AppViewModel(
      */
     private var pendingLogRefresh = false
 
-    private val requestLogListener: () -> Unit = {
+    /** 请求日志 / 调用记录共用同一个合并刷新：120ms 内的多次写入只刷一次 UI。 */
+    private val logChangedListener: () -> Unit = {
         if (!pendingLogRefresh) {
             pendingLogRefresh = true
             viewModelScope.launch {
@@ -463,8 +464,11 @@ class AppViewModel(
 
     init {
         engine.activeRequests.addListener(activeRequestsListener)
-        // 日志实时刷新：新日志写入就推一次，取代 5 秒轮询
-        engine.requestLog.addListener(requestLogListener)
+        // 日志实时刷新：请求日志与调用记录**两边都要订阅**。
+        // 以前只挂了 requestLog，调用记录写入时界面收不到通知，
+        // 表现为「新请求跑完了卡片不出现」。
+        engine.requestLog.addListener(logChangedListener)
+        engine.callLogStore.addListener(logChangedListener)
         val initialActive = engine.activeRequests.snapshot()
         lastActiveSignature = initialActive.joinToString(";") { "${it.id}:${it.providerId}:${it.phase}" }
         _state.value = _state.value.copy(activeRequests = initialActive)
@@ -499,7 +503,8 @@ class AppViewModel(
 
     override fun onCleared() {
         engine.activeRequests.removeListener(activeRequestsListener)
-        engine.requestLog.removeListener(requestLogListener)
+        engine.requestLog.removeListener(logChangedListener)
+        engine.callLogStore.removeListener(logChangedListener)
         engine.onAccountsChanged = null
         engine.setStartupDataReadyListener(null)
     }
@@ -1936,6 +1941,13 @@ class AppViewModel(
         engine.settingsRepository.saveCustomProviders(list)
         engine.reloadCustomProviders()
         engine.syncCustomAccounts(config)
+        // ★ 立刻把最新的配置列表推回 state：reloadCustomProviders 只换了
+        // registry 里的实例，界面持有的 state.customProviders 仍是旧快照。
+        // 不同步就会出现「界面显示旧协议/旧余额配置，引擎已按新的跑」。
+        _state.value = _state.value.copy(
+            customProviders = engine.settingsRepository.loadCustomProviders(),
+            providers = engine.providers(),
+        )
     }
 
     fun removeCustomProvider(key: String) = action {
@@ -1947,6 +1959,10 @@ class AppViewModel(
         val list = engine.settingsRepository.loadCustomProviders().filterNot { it.key == key }
         engine.settingsRepository.saveCustomProviders(list)
         engine.reloadCustomProviders()
+        _state.value = _state.value.copy(
+            customProviders = engine.settingsRepository.loadCustomProviders(),
+            providers = engine.providers(),
+        )
         "供应商已删除"
     }
 

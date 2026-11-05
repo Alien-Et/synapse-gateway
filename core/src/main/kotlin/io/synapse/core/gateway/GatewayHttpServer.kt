@@ -75,7 +75,15 @@ class GatewayHttpServer(
         engine.noticeEvents.emit(kind, message, dedupKey)
         // 同时进日志：吐司一闪而过，事后要能查到当时到底换去了哪
         log("Toast[$kind]：$message")
-        if (cooldownAlerted.size > 200) cooldownAlerted.clear()
+        // 只清掉已经过期的冷却键（键尾是截止毫秒），不能无脑 clear：
+        // 那会把「当前仍在冷却中的模型」的静默标记一起抹掉，下一笔请求又弹一次。
+        if (cooldownAlerted.size > 200) {
+            val now = System.currentTimeMillis()
+            cooldownAlerted.removeIf { key ->
+                val until = key.substringAfterLast('|').toLongOrNull()
+                until != null && until <= now
+            }
+        }
     }
 
     fun listeningAddress(): String = (hostname ?: "0.0.0.0") + ":" + listeningPort
@@ -742,7 +750,11 @@ class GatewayHttpServer(
                 routeErrors.add(skipReason)
                 // 「只提醒一次」：同一模型在本次冷却期内只发一次横幅+常驻通知。
                 // 客户端后续继续命中该模型时不再打扰，静默按既定模式走故障转移。
-                val cooldownKey = "cooldown|${providerId}|$resolvedModel|$waitSec"
+                // 去重键必须在一轮冷却内**恒定**：以前拼了 waitSec（剩余秒数），
+                // 每次请求都不同，等于没去重——「只提醒一次」实际失效。
+                // 改用「冷却截止时刻」：同一轮冷却里它不变，解封后新一轮自动换新键。
+                val cooldownUntil = System.currentTimeMillis() + remainMs
+                val cooldownKey = "cooldown|${providerId}|$resolvedModel|$cooldownUntil"
                 if (!failoverCfg.cooldownNotifyOnce || cooldownAlerted.add(cooldownKey)) {
                     engine.quotaAlerts.emit(
                         QuotaAlert(
@@ -1042,11 +1054,9 @@ class GatewayHttpServer(
                                 ),
                                 QuotaAlert.Level.MODEL_UNAVAILABLE,
                             )
-                            emitFailoverToast(
-                                NoticeKind.MODEL_BANNED,
-                                "「$label/$resolvedModel」今天反复失败，已禁用 ${hours} 小时，后续请求将自动转移",
-                                "banned-once|$providerId|$resolvedModel",
-                            )
+                            // 横幅+常驻通知（上面 quotaAlerts）已经是强提醒，
+                            // 这里不再叠一条同类 Toast，避免同一件事两种提醒一前一后重复。
+                            // 后续命中禁用模型时的 BANNED_FAILOVER 吐司仍保留（那是新动作）。
                         }
                         // 撞墙的这个号立刻记该模型冷却：选号时会自动跳过它，
                         // 「换号继续」才有依据（否则每轮都会重新挑到同一个号）。
@@ -1177,11 +1187,7 @@ class GatewayHttpServer(
                                 ),
                                 QuotaAlert.Level.MODEL_UNAVAILABLE,
                             )
-                            emitFailoverToast(
-                                NoticeKind.MODEL_BANNED,
-                                "「$label/$resolvedModel」今天反复失败，已禁用 ${hours} 小时",
-                                "banned-once|$providerId|$resolvedModel",
-                            )
+                            // 同上：触发点只走横幅+常驻通知，不叠吐司
                         }
                     }
 
