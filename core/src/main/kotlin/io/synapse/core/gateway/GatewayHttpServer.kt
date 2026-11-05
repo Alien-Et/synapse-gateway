@@ -18,6 +18,7 @@ import io.synapse.core.util.longOrNull
 import io.synapse.core.util.newCompletionId
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.stringOrNull
+import io.synapse.core.gateway.NoticeKind
 import fi.iki.elonen.NanoHTTPD
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -51,6 +52,32 @@ class GatewayHttpServer(
      */
     private val bodyReadSlots = BodyReadSlots(GatewaySettings.MAX_MAX_BODY_CONCURRENCY)
 
+    /**
+     * 已经发过「模型冷却」横幅+常驻通知的 key 集合。
+     *
+     * 需求原话：「当账号某个模型冷却时，只提醒一次（横幅+常驻通知栏），
+     * 如果客户端继续命中该模型，不用再重复提醒，直接按已设定的模式走故障转移逻辑。」
+     *
+     * key 里带 waitSec 是为了**冷却解封后自动重新允许提醒**：
+     * 一轮冷却的 waitSec 与下一轮大概率不同；即使相同，
+     * [ModelBanTracker] 的解封也会把连续失败计数带走，不会永久静默。
+     * 集合只保留最近一轮，避免长跑后无限涨。
+     */
+    private val cooldownAlerted = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * 发一条「已自动故障转移」的系统吐司。
+     *
+     * 文案在这里统一：所有故障转移场景（冷却/禁用/熔断/额度/跨供应商）都用同一种句式，
+     * 用户不用分辨是哪一套机制，只要知道「请求没断，已经换到别处了」。
+     */
+    private fun emitFailoverToast(kind: NoticeKind, message: String, dedupKey: String) {
+        engine.noticeEvents.emit(kind, message, dedupKey)
+        // 同时进日志：吐司一闪而过，事后要能查到当时到底换去了哪
+        log("Toast[$kind]：$message")
+        if (cooldownAlerted.size > 200) cooldownAlerted.clear()
+    }
+
     fun listeningAddress(): String = (hostname ?: "0.0.0.0") + ":" + listeningPort
 
     override fun serve(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
@@ -74,6 +101,9 @@ class GatewayHttpServer(
                 session.method == NanoHTTPD.Method.GET && uri == "/healthz" ->
                     NanoHTTPD.newFixedLengthResponse(SimpleStatus(200, "OK"), "text/plain; charset=utf-8", "ok")
                 session.method == NanoHTTPD.Method.GET && uri == "/authorize" -> authorize(session)
+                // 生图/语音/向量/重排/审核/视频等：声明了能力的供应商原样透传
+                io.synapse.core.provider.ApiEndpoints.match(uri)?.kind ==
+                    io.synapse.core.provider.EndpointKind.PASSTHROUGH -> passthrough(session, uri)
                 else -> run {
                     // 错误响应前先消费掉请求体：残留字节会被 keep-alive 上的下一个请求当成请求行，
                     // 客户端看到的就是 NanoHTTPD 的「BAD REQUEST: Missing URI. Usage: GET /example/file.html」
@@ -299,6 +329,124 @@ class GatewayHttpServer(
         return json(200, root.toString())
     }
 
+    /**
+     * 非对话端点的通用透传（生图 / 语音 / 向量 / 重排 / 审核 / 视频 / 模型列表）。
+     *
+     * ## 为什么不做容灾重试
+     *
+     * 生图与语音都是**计费**动作：失败了换号重试会出现「同一张图生成两遍、扣两次钱」。
+     * 所以这里只选一个可用账号发一次，失败如实回传上游错误，由客户端决定要不要重试。
+     *
+     * ## 为什么按模型名选供应商
+     *
+     * 这些端点同样带 `model` 字段（生图模型 `seedream-4.0`、语音 `whisper-1`），
+     * 路由规则与对话一致：`标签/模型名` 决定发给谁。没写标签就报错，
+     * 不做「猜一个供应商试试」——猜错了会拿着生图请求去撞对话端点。
+     *
+     * ## 响应体为什么原样透传
+     *
+     * 图片是 base64、语音是二进制、向量是几万个数。任何「解析再序列化」都可能
+     * 损坏内容（浮点精度、字段顺序、二进制编码），而且完全没有必要——客户端自己会解析。
+     */
+    private fun passthrough(session: NanoHTTPD.IHTTPSession, uri: String): NanoHTTPD.Response {
+        if (!authorized(session)) return unauthorized(session)
+        val endpoint = io.synapse.core.provider.ApiEndpoints.match(uri)
+            ?: return errorResponse(404, "not_found", "未知路径：$uri")
+
+        val (body, readResult) = readBody(session, engine.settings().effectiveBodyLimitBytes())
+        if (readResult == BodyReadResult.OVER_LIMIT) {
+            return errorResponse(413, "payload_too_large", "请求体超过上限")
+        }
+
+        // 生图/向量类一定带 model；GET 类（如模型列表）没有 body
+        val requestedModel = runCatching {
+            JsonParser.parseString(body).asJsonObject.get("model")?.asString.orEmpty()
+        }.getOrNull().orEmpty()
+
+        if (requestedModel.isBlank()) {
+            return errorResponse(
+                400,
+                "invalid_request",
+                "${endpoint.label}请求缺少 model 参数（写成「标签/模型名」，例如「灵犀/seedream-4.0」）",
+            )
+        }
+        val route = engine.resolveRoute(requestedModel)
+            ?: return errorResponse(
+                400,
+                "model_not_found",
+                "无法识别模型「$requestedModel」：请写成「标签/模型名」，标签必须是已登录的供应商",
+            )
+
+        val provider = engine.registry.get(route.providerId)
+            ?: return errorResponse(404, "provider_not_found", "未知供应商 ${route.providerId}")
+
+        // 该供应商是否声明支持这个端点：不支持就明确告知，别把请求打到错误端点换回一句 400
+        val normalizedPath = endpoint.allPaths.firstOrNull {
+            it.equals(uri.trimEnd('/'), ignoreCase = true)
+        } ?: uri
+        if (provider.passthroughPaths.none { it.equals(normalizedPath, ignoreCase = true) }) {
+            val supported = provider.passthroughPaths
+                .filter { it.startsWith("/v1/") }
+                .joinToString("、")
+                .ifEmpty { "无" }
+            return errorResponse(
+                501,
+                "endpoint_not_supported",
+                "${routeLabelOf(route.providerId, route.region)} 不支持「${endpoint.label}」接口。" +
+                    "该供应商支持：$supported",
+            )
+        }
+
+        val account = engine.pickAccount(
+            route.providerId, region = route.region, skipEmptyCredits = true, model = route.model,
+        ) ?: engine.pickAccount(route.providerId, region = route.region)
+            ?: return errorResponse(
+                503,
+                "no_healthy_account",
+                "${routeLabelOf(route.providerId, route.region)} 没有可用账号",
+            )
+
+        val call = try {
+            provider.passthrough(account, session.method.name, normalizedPath, body.ifEmpty { null })
+        } catch (e: Exception) {
+            log("透传 ${endpoint.label} 失败（${route.providerId}）：${e.message}")
+            null
+        } ?: return errorResponse(
+            501,
+            "endpoint_not_supported",
+            "${routeLabelOf(route.providerId, route.region)} 未实现「${endpoint.label}」",
+        )
+
+        try {
+            // 上游拒绝：把状态码与错误体原样回传，客户端才能看到真实原因
+            if (call.status !in 200..299) {
+                val reason = call.errorBody.ifEmpty { "HTTP ${call.status}" }
+                log("透传 ${endpoint.label} 被上游拒绝（${route.providerId}，HTTP ${call.status}）：${reason.take(200)}")
+                return errorResponse(
+                    call.status.coerceIn(400, 599),
+                    "upstream_error",
+                    reason.take(600),
+                )
+            }
+
+            // 二进制/流式（语音合成）：原样写出去
+            val stream = call.stream
+            if (stream != null) {
+                return NanoHTTPD.newChunkedResponse(
+                    SimpleStatus(200, "OK"),
+                    "application/octet-stream",
+                    stream,
+                ).apply { closeConnection(true) }
+            }
+
+            // 普通 JSON：原样透传（不解析、不改写）
+            val text = call.aggregated.orEmpty()
+            return json(200, text)
+        } finally {
+            runCatching { call.close() }
+        }
+    }
+
     private fun chatCompletions(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         if (!authorized(session)) return unauthorized(session)
 
@@ -386,6 +534,10 @@ class GatewayHttpServer(
         // 否则失败卡片上只有「失败」两个字，看不出是哪个号挂的。
         var lastAccountUid = ""
         var lastAccountNickname = ""
+        // 记录最后一次实际尝试的供应商与模型，供日志卡片判定「禁用」标签。
+        // 跨供应商转移后 primaryRoute 仍是原始那家，不能用它查禁用状态。
+        var lastProviderId = primaryRoute.providerId
+        var lastResolvedModel = primaryRoute.model
         // 本次请求试过的所有账号（按顺序、去重）：日志卡片据此打多个账号标签，
         // 否则「所有候选账号都不可用」看不出到底试了哪几个号。
         val attemptedAccountNames = LinkedHashSet<String>()
@@ -431,6 +583,11 @@ class GatewayHttpServer(
             val candidate = verdict.candidate
             val label = routeLabelOf(candidate.providerId, null)
             log("跨供应商故障转移：${verdict.reason} → 改发 $label/${candidate.model}")
+            emitFailoverToast(
+                NoticeKind.CROSS_PROVIDER_FAILOVER,
+                "当前供应商不可用，已故障转移到「$label/${candidate.model}」",
+                "cross-provider|$requestedModel",
+            )
             routeErrors.add("${currentRoute.providerId}(${verdict.reason})")
             crossProviderTried += candidate.key
             currentRoute = Route(candidate.providerId, candidate.model, region = null)
@@ -455,10 +612,12 @@ class GatewayHttpServer(
         while (true) {
             val providerId = currentRoute.providerId
             triedProviders.add(providerId)
+            lastProviderId = providerId
             val provider = engine.registry.get(providerId) ?: break
 
             val pMetrics = engine.metricsOf(providerId)
             val resolvedModel = provider.resolveModel(currentRoute.model)
+            lastResolvedModel = resolvedModel
 
             val tried = HashSet<String>()
             var attempt = 0
@@ -493,6 +652,12 @@ class GatewayHttpServer(
                     log(
                         "供应商 [$providerId] 熔断隔离中（剩余 ${breakerRemainingMs / 1000}s），" +
                             "同家还有可用账号 ${alt.nickname.ifEmpty { alt.uid }}，换号继续",
+                    )
+                    emitFailoverToast(
+                        NoticeKind.CIRCUIT_FAILOVER,
+                        "「${routeLabelOf(providerId, currentRoute.region)}」熔断中，" +
+                            "已自动换到同家的 ${alt.nickname.ifEmpty { alt.uid }} 继续",
+                        "circuit|$providerId|${alt.uid}",
                     )
                     routeErrors.add("$providerId(熔断中，已换同家其它账号继续)")
                 } else {
@@ -538,6 +703,31 @@ class GatewayHttpServer(
             // ⚠️ 判定范围必须和选号一致：开启「跨区域」时，本区域号全冷却了
             // 还能跨区继续跑，所以这里也要按**全供应商**统计，否则会出现
             // 「国外只有一个号被冷却 → 整家被判定全冷却 → 连国内号都一起废掉」。
+            // 1a. 模型禁用（**跨账号**）：解封后当天仍连续失败 N 次，禁用 24 小时。
+            // 禁用期间连账号都不必挑，直接把请求让给故障转移；日志卡片会带「禁用」标签。
+            if (engine.isModelBanned(providerId, resolvedModel)) {
+                val remainMs = engine.modelBansOf().remainingBanMs(providerId, resolvedModel)
+                val hours = (remainMs / (60 * 60 * 1000)).coerceAtLeast(1)
+                val skipReason = "$providerId/$resolvedModel(已被禁用，约 ${hours}h 后恢复)"
+                log("模型 [$resolvedModel] 在 [$providerId] 处于禁用期，跳过此候选...")
+                routeErrors.add(skipReason)
+                // 吐司：每次命中都提示，但同一模型 2 分钟内只弹一次
+                emitFailoverToast(
+                    NoticeKind.BANNED_FAILOVER,
+                    "「${routeLabelOf(providerId, currentRoute.region)}/$resolvedModel」已被禁用，" +
+                        "已自动走故障转移（约 ${hours}h 后恢复）",
+                    "banned|${providerId}|$resolvedModel",
+                )
+                if (tryCrossProvider(
+                        io.synapse.core.failover.CrossProviderSwitchDecider.Trigger
+                            .ModelFullyCooling(providerId, resolvedModel, remainMs / 1000),
+                    )
+                ) {
+                    continue
+                }
+                break
+            }
+
             val coolingUids = engine.modelCooldownOf().coolingAccounts(providerId, resolvedModel)
             val crossRegion = failoverCfg.crossRegionFailover
             val scopeRegion = if (crossRegion) null else currentRoute.region
@@ -550,15 +740,26 @@ class GatewayHttpServer(
                 val skipReason = "$providerId/$resolvedModel(同家${scopeLabel}账号全部冷却中，约 ${waitSec}s 后恢复)"
                 log("模型 [$resolvedModel] 在 [$providerId] 的所有可用账号都在冷却，跳过此候选...")
                 routeErrors.add(skipReason)
-                engine.quotaAlerts.emit(
-                    QuotaAlert(
-                        routeLabelOf(currentRoute.providerId, currentRoute.region),
-                        "全部账号",
-                        requestedModel,
-                        "该模型在同供应商所有账号上都被限流，约 ${waitSec}s 后自动恢复；" +
-                            "也可以改用其它供应商的模型或换一个模型",
-                    ),
-                    QuotaAlert.Level.MODEL_UNAVAILABLE,
+                // 「只提醒一次」：同一模型在本次冷却期内只发一次横幅+常驻通知。
+                // 客户端后续继续命中该模型时不再打扰，静默按既定模式走故障转移。
+                val cooldownKey = "cooldown|${providerId}|$resolvedModel|$waitSec"
+                if (!failoverCfg.cooldownNotifyOnce || cooldownAlerted.add(cooldownKey)) {
+                    engine.quotaAlerts.emit(
+                        QuotaAlert(
+                            routeLabelOf(currentRoute.providerId, currentRoute.region),
+                            "全部账号",
+                            requestedModel,
+                            "该模型在同供应商所有账号上都被限流，约 ${waitSec}s 后自动恢复；" +
+                                "也可以改用其它供应商的模型或换一个模型",
+                        ),
+                        QuotaAlert.Level.MODEL_UNAVAILABLE,
+                    )
+                }
+                emitFailoverToast(
+                    NoticeKind.COOLDOWN_FAILOVER,
+                    "「${routeLabelOf(providerId, currentRoute.region)}/$resolvedModel」已冷却，" +
+                        "已自动走故障转移（约 ${waitSec}s 后恢复）",
+                    cooldownKey,
                 )
                 // 模型级冷却默认也只是「这家暂时不行」，不跨家；
                 // 用户开启跨供应商后，才好换到别家同名/同能力的模型
@@ -793,6 +994,11 @@ class GatewayHttpServer(
                     if (failure.kind == ErrorKind.SESSION_DEAD) {
                         engine.pool.disable(currentRoute.providerId, account.uid, failure.message)
                         log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${failure.message}")
+                        emitFailoverToast(
+                            NoticeKind.ACCOUNT_DISABLED,
+                            "账号 ${account.nickname.ifEmpty { account.uid }} 登录已失效，已自动停用并改用其它账号",
+                            "account-disabled|${currentRoute.providerId}|${account.uid}",
+                        )
                         // 凭证失效是账号级问题，不代表供应商故障，不计入熔断
                         providerLastError = failure.message
                         accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
@@ -809,6 +1015,39 @@ class GatewayHttpServer(
                     // 1. 同家还有没试过的号 → 继续换号（不冷却、不告警）；
                     // 2. 同家都试完了 → 才冷却该模型 + 告警告知用户。
                     if (failure.kind == ErrorKind.MODEL_LIMIT) {
+                        // 「解封后当天仍连续失败 3 次 → 禁用 24 小时」。
+                        //
+                        // 关键在「解封后」：冷却期内的失败不该累计，那只是同一个问题在重复报。
+                        // 所以只在**本次并非冷却命中**且该模型当前未被禁用时计数；
+                        // 已经处于禁用中的候选在更早的分支就跳过了，不会走到这里。
+                        val banMs = failoverCfg.modelBanHours.toLong() * 60 * 60 * 1000
+                        val justBanned = engine.modelBansOf().recordFailure(
+                            providerId = currentRoute.providerId,
+                            model = resolvedModel,
+                            threshold = failoverCfg.modelBanThreshold,
+                            banDurationMs = banMs,
+                        )
+                        if (justBanned) {
+                            val hours = failoverCfg.modelBanHours
+                            val label = routeLabelOf(currentRoute.providerId, currentRoute.region)
+                            log("模型 [$resolvedModel] 在 [$providerId] 解封后当天连续失败达阈值，禁用 ${hours}h")
+                            // 强提醒：横幅 + 常驻通知（一次性，不带去重键）
+                            engine.quotaAlerts.emit(
+                                QuotaAlert(
+                                    label,
+                                    "全部账号",
+                                    requestedModel,
+                                    "该模型今天反复失败，已自动禁用 ${hours} 小时。" +
+                                        "禁用期间会直接改走其它候选模型，${hours} 小时后自动恢复。",
+                                ),
+                                QuotaAlert.Level.MODEL_UNAVAILABLE,
+                            )
+                            emitFailoverToast(
+                                NoticeKind.MODEL_BANNED,
+                                "「$label/$resolvedModel」今天反复失败，已禁用 ${hours} 小时，后续请求将自动转移",
+                                "banned-once|$providerId|$resolvedModel",
+                            )
+                        }
                         // 撞墙的这个号立刻记该模型冷却：选号时会自动跳过它，
                         // 「换号继续」才有依据（否则每轮都会重新挑到同一个号）。
                         val cooldownMs = failoverCfg.modelCooldown.cooldownMs
@@ -918,6 +1157,34 @@ class GatewayHttpServer(
                         return errorResponse(mappedAbort.status, mappedAbort.code, error.message)
                     }
 
+                    // 与流内 MODEL_LIMIT 同一套禁用判定：HTTP 层返回的模型级限流也计入
+                    // 「解封后当天连续失败」，否则只走流内错误的供应商永远禁不掉。
+                    if (error.kind == ErrorKind.MODEL_LIMIT) {
+                        val banMs = failoverCfg.modelBanHours.toLong() * 60 * 60 * 1000
+                        val justBanned = engine.modelBansOf().recordFailure(
+                            providerId = currentRoute.providerId,
+                            model = resolvedModel,
+                            threshold = failoverCfg.modelBanThreshold,
+                            banDurationMs = banMs,
+                        )
+                        if (justBanned) {
+                            val hours = failoverCfg.modelBanHours
+                            val label = routeLabelOf(currentRoute.providerId, currentRoute.region)
+                            engine.quotaAlerts.emit(
+                                QuotaAlert(
+                                    label, "全部账号", requestedModel,
+                                    "该模型今天反复失败，已自动禁用 ${hours} 小时，期间自动改走其它候选模型。",
+                                ),
+                                QuotaAlert.Level.MODEL_UNAVAILABLE,
+                            )
+                            emitFailoverToast(
+                                NoticeKind.MODEL_BANNED,
+                                "「$label/$resolvedModel」今天反复失败，已禁用 ${hours} 小时",
+                                "banned-once|$providerId|$resolvedModel",
+                            )
+                        }
+                    }
+
                     if (error.kind == ErrorKind.SESSION_DEAD || decision == io.synapse.core.failover.FailoverDecision.SWITCH_NEXT_PROVIDER) {
                         if (error.kind == ErrorKind.SESSION_DEAD) {
                             engine.pool.disable(currentRoute.providerId, account.uid, error.message)
@@ -978,6 +1245,12 @@ class GatewayHttpServer(
                     // 这是主人要的优先级：账号没额度不是「这一家不行」，先跑完同家其它账号，
                     // 真的全都没额度了才升级为「供应商没额度」的强提醒。
                     if (error.kind == ErrorKind.QUOTA) {
+                        emitFailoverToast(
+                            NoticeKind.QUOTA_FAILOVER,
+                            "「${routeLabelOf(currentRoute.providerId, currentRoute.region)}」当前账号额度耗尽，" +
+                                "已自动换用其它账号继续",
+                            "quota|$providerId|$resolvedModel",
+                        )
                         val providerName = provider.displayName
                         val accountName = account.nickname.ifEmpty { account.uid }
 
@@ -1059,6 +1332,9 @@ class GatewayHttpServer(
                 // 成功链路：记录熔断器成功与度量指标，模型统一归一化为客户端请求的名称
                 cb.recordSuccess()
                 engine.modelCooldownOf().clear(currentRoute.providerId, account.uid, resolvedModel)
+                // 成功一次说明这个模型其实能用：清掉「连续失败」计数，
+                // 否则三次偶发失败（中间夹着成功）也会被误禁用。
+                engine.modelBansOf().recordSuccess(currentRoute.providerId, resolvedModel)
                 pMetrics.record(true, System.currentTimeMillis() - attemptStart)
                 val transparentModel = requestedModel
 
@@ -1209,6 +1485,8 @@ class GatewayHttpServer(
                 didFailover = attemptedAccountNames.size > 1,
                 routeRegion = routeRegion,
                 finalAccountRegion = finalAccountRegion,
+                modelBanned = engine.isModelBanned(primaryRoute.providerId, requestedModel) ||
+                    engine.isModelBanned(lastProviderId, lastResolvedModel),
             )
         }
         return errorResponse(mappedFailure.status, mappedFailure.code, reason)
@@ -1810,6 +2088,8 @@ class GatewayHttpServer(
         didFailover: Boolean = false,
         routeRegion: String = "",
         finalAccountRegion: String = "",
+        /** 本次请求命中的模型是否处于禁用中（日志卡片据此打「禁用」标签）。 */
+        modelBanned: Boolean = false,
     ) {
         // 调用记录开关：关闭时不写任何记录（原文动辄几 KB，是存储的主要来源）；
         // 记录一 failover 链路的语义不变，只是不留痕。
@@ -1830,6 +2110,7 @@ class GatewayHttpServer(
                 didFailover = didFailover,
                 routeRegion = routeRegion,
                 finalAccountRegion = finalAccountRegion,
+                modelBanned = modelBanned,
                 streaming = streaming,
                 status = status,
                 httpStatus = httpStatus,

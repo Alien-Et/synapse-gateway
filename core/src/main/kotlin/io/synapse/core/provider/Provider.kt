@@ -118,6 +118,40 @@ interface Provider {
     /** 发起一次对话。 */
     fun openChat(account: ProviderAccount, openAiBody: String): ChatCall
 
+    /**
+     * 该供应商支持的**非对话端点**（OpenAI 兼容路径，如 `/v1/images/generations`）。
+     *
+     * 网关收到这些路径的请求时会按模型名选号，再调 [passthrough] 原样转发。
+     * 默认空集 = 只支持对话，其它路径直接报「该供应商不支持」。
+     *
+     * 为什么用「声明路径 + 一个通用转发」而不是给每个端点写一个方法：
+     * 生图/语音/向量/重排这些端点的**转发逻辑完全相同**（拼 URL、带 Key、透传
+     * body 与响应），差别只在路径。写十几个方法等于把同一段代码抄十几遍，
+     * 新增端点还要改接口。
+     */
+    val passthroughPaths: Set<String> get() = emptySet()
+
+    /**
+     * 把一次非对话请求原样转发给上游。
+     *
+     * [path] 是完整的 OpenAI 风格路径（如 `/v1/images/generations`，已去掉 baseUrl 前缀）；
+     * [body] 是客户端原始请求体（JSON 字符串，可能为空——GET 类端点）；
+     * [method] 是 HTTP 方法。
+     *
+     * 默认返回 null 表示**不支持**——调用方据此给用户一句明确的「该供应商不支持该接口」，
+     * 而不是把请求打到错误的端点上换回一句看不懂的 400。
+     *
+     * 返回的 [ChatCall] 语义与对话一致：非 2xx 时 [ChatCall.errorBody] 是上游错误原文，
+     * 2xx 时 [ChatCall.aggregated] 是**原始响应体**（不解析、不改写，包括图片的二进制
+     * base64 字段）；流式端点（如语音合成）用 [ChatCall.stream]。
+     */
+    fun passthrough(
+        account: ProviderAccount,
+        method: String,
+        path: String,
+        body: String?,
+    ): ChatCall? = null
+
     /** 预刷新凭证；返回新账号表示 token 发生轮换（调用方需原子写回）。 */
     fun refreshAccount(account: ProviderAccount, skewSeconds: Long): ProviderAccount? = null
 

@@ -235,6 +235,12 @@ class GatewayEngine(
      */
     val quotaAlerts = QuotaAlerts()
 
+    /**
+     * 系统吐司事件总线：告诉用户「系统刚刚自动做了什么」（已冷却/已禁用/已转移）。
+     * 与 [quotaAlerts] 分工：那边是横幅+震动+常驻通知的强提醒，这里是一闪而过的轻提示。
+     */
+    val noticeEvents = NoticeEvents(nowMillis)
+
     @Volatile
     private var failoverSettings: io.synapse.core.failover.ModelFailoverSettings =
         io.synapse.core.failover.ModelFailoverSettings.fromJson(store.read(io.synapse.core.failover.ModelFailoverSettings.STORE_KEY))
@@ -244,6 +250,18 @@ class GatewayEngine(
 
     /** 模型级冷却表：该 (供应商, 模型) 暂时不可用时直接跳过，换号无意义。仅内存。 */
     private val modelCooldown = io.synapse.core.failover.ModelCooldownTracker(nowMillis)
+
+    /**
+     * 模型禁用表：**跨账号**禁用某个模型 N 小时。
+     *
+     * 与冷却的分工见 [io.synapse.core.failover.ModelBanTracker] 的类注释：
+     * 冷却是「这个号用这个模型不行」（10 分钟、仅内存），
+     * 禁用是「这个模型这阵子别用了」（24 小时、落盘）。
+     *
+     * 落盘是必须的：24 小时的窗口远长于一次 App 启动周期，
+     * 不落盘的话用户重启一次 App 就白禁了。
+     */
+    private val modelBans = io.synapse.core.failover.ModelBanTracker(store, nowMillis)
 
     /** 上游请求并发闸门：配置随 failoverSettings 动态生效。 */
     val concurrencyGate = io.synapse.core.failover.ConcurrencyGate { failoverSettings.concurrency }
@@ -435,6 +453,16 @@ class GatewayEngine(
         providerMetrics.computeIfAbsent(providerId) { io.synapse.core.failover.ProviderMetricsTracker() }
 
     fun modelCooldownOf(): io.synapse.core.failover.ModelCooldownTracker = modelCooldown
+
+    fun modelBansOf(): io.synapse.core.failover.ModelBanTracker = modelBans
+
+    /**
+     * 该供应商的该模型是否已被禁用。
+     *
+     * 供路由层在选号前判一次：禁用中的模型**直接跳过**，连账号都不必挑。
+     */
+    fun isModelBanned(providerId: String, model: String): Boolean =
+        modelBans.isBanned(providerId, model)
 
     // ------------------------------------------------------------------ 模型开放名单
 
@@ -2087,18 +2115,36 @@ class GatewayEngine(
         val account = pickAccount(providerId, region = region)
             ?: return ProbeResult(-1L, "没有可用账号")
         val resolvedModel = provider.resolveModel(modelId)
+        // 生图模型不认 chat/completions：拿文本消息去探它必然被上游拒
+        // （「模型测试」在生图模型上报错就是这么来的）。
+        // 这里按能力分流：生图模型用最小的 images/generations 请求探活。
+        val isImageModel = runCatching {
+            provider.listModels(account).models
+                .firstOrNull { it.id == modelId || it.id == resolvedModel }
+                ?.isImageGeneration
+        }.getOrNull() ?: false
+
         // 不指定 max_tokens：上游对 max_output_tokens 有下限（传 1 会被模型提供方
         // 以 11133 integer_below_min_value 拒绝），而探测只需要建连与首字节时间。
-        val probeBody = JsonObject().apply {
-            addProperty("model", resolvedModel)
-            addProperty("stream", false)
-            add("messages", com.google.gson.JsonArray().apply {
-                add(JsonObject().apply {
-                    addProperty("role", "user")
-                    addProperty("content", "ping")
+        val probeBody = if (isImageModel) {
+            JsonObject().apply {
+                addProperty("model", resolvedModel)
+                addProperty("prompt", "ping")
+                addProperty("n", 1)
+                addProperty("size", "1024x1024")
+            }.toString()
+        } else {
+            JsonObject().apply {
+                addProperty("model", resolvedModel)
+                addProperty("stream", false)
+                add("messages", com.google.gson.JsonArray().apply {
+                    add(JsonObject().apply {
+                        addProperty("role", "user")
+                        addProperty("content", "ping")
+                    })
                 })
-            })
-        }.toString()
+            }.toString()
+        }
 
         val start = System.currentTimeMillis()
         val call = try {
@@ -2220,9 +2266,10 @@ class GatewayEngine(
             "谷歌" -> "antigravity"
             "讯飞" -> "loomy"
             "商汤" -> "raccoon"
-            // 灵犀（原「移动云盘 / 139 云」）。旧标签保留为别名，老客户端配置不用改。
+            // 灵犀（中国移动的 AI 通道）。**只保留这一个标签**：
+            // 「移动云盘」「139云」这类旧名已按需求删除——它们指的是同一家，
+            // 多留几个别名只会让人在模型页看到一串重复的名字，不知道该写哪个。
             "灵犀" -> "mcloud"
-            "移动云盘" -> "mcloud"
             "ChatGPT" -> "chatgpt"
             "GPT" -> "chatgpt"
             else -> null

@@ -90,6 +90,15 @@ data class CallRecord(
     val responseBody: String,
     /** 返回原文（截断保存）：流式为上游逐行报文，非流式为完整 JSON；排查 503/空回复用。 */
     val rawResponse: String = "",
+
+    /**
+     * 本次请求**命中的模型是否已被禁用**（24 小时那种跨账号禁用）。
+     *
+     * 与「故障转移」标签分开：禁用是「这个模型别再用了」的长期状态，
+     * 用户看到这个标签就知道要换模型，而不是等一会儿重试。
+     * 日志卡片据此显示一枚红色「禁用」标签。
+     */
+    val modelBanned: Boolean = false,
 )
 
 /** 用量统计聚合。 */
@@ -446,6 +455,7 @@ class CallLogStore(
                     requestBody = obj.get("requestBody")?.asString.orEmpty(),
                     responseBody = obj.get("responseBody")?.asString.orEmpty(),
                     rawResponse = obj.get("rawResponse")?.asString.orEmpty(),
+                    modelBanned = obj.get("modelBanned")?.asBoolean ?: false,
                 ),
             )
         }
@@ -622,6 +632,7 @@ private fun CallRecord.toJson(): JsonObject = JsonObject().apply {
     addProperty("requestBody", requestBody)
     addProperty("responseBody", responseBody)
     addProperty("rawResponse", rawResponse)
+    addProperty("modelBanned", modelBanned)
 }
 
 private operator fun UsageStats.plus(record: CallRecord) = copy(

@@ -381,6 +381,51 @@ class ChatGPTProvider(
         }
     }
 
+    /**
+     * ChatGPT 订阅通道支持的端点。
+     *
+     * 只声明**上游真的实现了**的：Codex 后端有对话（Responses）、模型列表、用量查询，
+     * 没有生图/语音/向量——那些是 OpenAI **API** 的能力，订阅通道不提供。
+     * 声明全集再让上游 404，用户会以为是自己配错了。
+     */
+    override val passthroughPaths: Set<String> = setOf(
+        "/v1/models", "/models",
+    )
+
+    override fun passthrough(
+        account: ProviderAccount,
+        method: String,
+        path: String,
+        body: String?,
+    ): ChatCall? {
+        // 只实现模型列表：其它端点已通过 passthroughPaths 挡在外面
+        if (!path.trimEnd('/').endsWith("/models")) return null
+        val credential = runCatching { credentialOf(account) }.getOrNull()
+            ?: return FailedChatCall(401, "ChatGPT 账号凭证损坏，请重新登录")
+        return try {
+            val models = fetchModels(credential)
+            // 组装成 OpenAI /v1/models 的形状，客户端才能直接解析
+            val data = com.google.gson.JsonArray()
+            for (model in models) {
+                data.add(com.google.gson.JsonObject().apply {
+                    addProperty("id", model.id)
+                    addProperty("object", "model")
+                    addProperty("owned_by", id)
+                    if (model.name.isNotEmpty() && model.name != model.id) {
+                        addProperty("display_name", model.name)
+                    }
+                })
+            }
+            val root = com.google.gson.JsonObject().apply {
+                addProperty("object", "list")
+                add("data", data)
+            }
+            AggregatedChatCall(200, root.toString())
+        } catch (e: Exception) {
+            FailedChatCall(0, e.message ?: "模型列表拉取失败")
+        }
+    }
+
     override fun hosts(): List<String> = listOf("chatgpt.com", "auth.openai.com", "api.openai.com")
 
     // ------------------------------------------------------------------ 内部工具

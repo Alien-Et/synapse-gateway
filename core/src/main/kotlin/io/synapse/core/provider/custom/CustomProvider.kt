@@ -41,6 +41,22 @@ class CustomProvider(
     override val authKind: AuthKind = AuthKind.NONE
     override val capabilities: Set<ProviderCapability> = setOf(ProviderCapability.CREDIT_REFRESH)
 
+    /**
+     * 自定义供应商**声明支持全部透传端点**。
+     *
+     * 这里不做「按配置声明子集」：用户填的就是一个 OpenAI 兼容站，
+     * 它到底实现了哪些端点只有上游知道。声明全集 + 上游 404 如实回传，
+     * 比让用户先在配置里勾一遍「我这家支持生图」要省事得多——
+     * 勾错了反而更难查（明明支持却被网关自己挡住）。
+     */
+    override val passthroughPaths: Set<String> =
+        io.synapse.core.provider.ApiEndpoints.PASSTHROUGH.flatMap { it.allPaths }.toSet() +
+            protocol().extraPaths
+
+    /** 本供应商采用的协议（决定端点路径与鉴权头）。 */
+    private fun protocol(): io.synapse.core.gateway.ProviderProtocol =
+        io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
+
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView =
         ProviderModelCatalogView(
             models = config.models.map { ProviderModel(id = it, name = it) },
@@ -76,7 +92,7 @@ class CustomProvider(
         val model = requestedModel(openAiBody)
 
         val conn = try {
-            openConnection(chatUrl(config.baseUrl), key, openAiBody, "POST", config.headers)
+            openConnection(chatUrl(config), key, openAiBody, "POST", config.headers, protocol())
         } catch (e: Exception) {
             return FailedChatCall(0, NetworkErrorText.describe(e))
         }
@@ -146,6 +162,69 @@ class CustomProvider(
         return obj.get("choices")?.isJsonArray == true
     }
 
+    /**
+     * 把非对话端点原样转发给上游。
+     *
+     * 走这条路的有:生图、图生图、语音转写/合成、向量、重排、审核、视频、模型列表。
+     * 它们的共同点是**网关不需要理解响应内容**——原样透传即可,客户端自己会解析。
+     *
+     * 几个刻意的选择:
+     * - 不做容灾重试:生图/语音都是**计费**动作,失败换号重试会出现「同一张图扣两次钱」;
+     * - 不改写响应体:图片是 base64、语音是二进制,任何「解析再序列化」都可能损坏内容;
+     * - 路径拼接尊重 baseUrl 的已有后缀:用户填 `https://x.com/v1` 就拼 `/images/generations`,
+     *   填 `https://x.com` 则补全 `/v1/images/generations`——两种写法都常见。
+     */
+    override fun passthrough(
+        account: ProviderAccount,
+        method: String,
+        path: String,
+        body: String?,
+    ): ChatCall? {
+        if (config.baseUrl.isBlank()) {
+            return FailedChatCall(0, "供应商「${config.name.ifEmpty { config.key }}」还没填接口地址，请到供应商详情页补全")
+        }
+        val key = parseKey(account) ?: return FailedChatCall(401, "凭证无法解析")
+        val url = passthroughUrl(config.baseUrl, path)
+
+        val conn = try {
+            openConnection(url, key, body, method, config.headers, protocol())
+        } catch (e: Exception) {
+            return FailedChatCall(0, NetworkErrorText.describe(e))
+        }
+        val status = try {
+            conn.responseCode
+        } catch (e: Exception) {
+            conn.disconnect()
+            return FailedChatCall(0, NetworkErrorText.describe(e))
+        }
+        if (status !in 200..299) {
+            val errBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
+            conn.disconnect()
+            return FailedChatCall(status, errBody)
+        }
+
+        // 二进制/流式响应（语音合成返回 audio/mpeg）：原样交给网关写出去
+        val contentType = conn.contentType.orEmpty()
+        val isBinary = contentType.isNotEmpty() &&
+            !contentType.contains("json", ignoreCase = true) &&
+            !contentType.contains("text/", ignoreCase = true) &&
+            !contentType.contains("event-stream", ignoreCase = true)
+        if (isBinary) {
+            return StreamingChatCall(status, conn.inputStream) { conn.disconnect() }
+        }
+
+        val text = try {
+            conn.inputStream.use { HttpSupport.readLimited(it) }
+        } catch (e: Exception) {
+            conn.disconnect()
+            return FailedChatCall(0, NetworkErrorText.describe(e))
+        } finally {
+            runCatching { conn.disconnect() }
+        }
+        // 空 body 但 2xx：如实返回空（不伪造内容）；调用方会按「上游返回空响应」处理
+        return AggregatedChatCall(status, text)
+    }
+
     override fun classify(status: Int, body: String): UpstreamError {
         val message = extractMessage(body).ifEmpty { "上游 HTTP $status" + bodySnippet(body) }
         val kind = when {
@@ -171,14 +250,20 @@ class CustomProvider(
      * ——有些中转站要求 `x-api-key` 或裸 Key，硬塞 Bearer 反而是错的。
      */
     override fun creditInfo(account: ProviderAccount): CreditInfo? {
-        val query = config.balanceQuery ?: return null
+        val raw = config.balanceQuery ?: return null
+        // 预设先补空：用户选了预设但没逐项填时，这里把路径/字段/方法补齐；
+        // 用户手改过的字段优先（BalancePresets.apply 只填空）。
+        val query = io.synapse.core.gateway.BalancePresets.apply(raw)
         val key = parseKey(account) ?: return CreditInfo(0, known = false, detail = "凭证无法解析")
         val url = balanceUrl(query)
         if (url.isEmpty()) {
             return CreditInfo(0, known = false, detail = "余额地址为空：请在供应商设置里填完整地址或相对路径")
         }
         return try {
-            val conn = openConnection(url, key, null, "GET", config.headers)
+            // 部分大厂余额接口是 POST 且要带 JSON body（比如按时间窗查用量）
+            val method = query.method.uppercase().takeIf { it == "POST" || it == "PUT" } ?: "GET"
+            val body = if (method == "GET") null else query.body.ifEmpty { "{}" }
+            val conn = openConnection(url, key, body, method, config.headers, protocol())
             val status = try {
                 conn.responseCode
             } catch (e: Exception) {
@@ -212,7 +297,10 @@ class CustomProvider(
     private fun parseBalance(text: String, query: io.synapse.core.gateway.BalanceQueryConfig): CreditInfo {
         val root = runCatching { JsonParser.parseString(text) }.getOrNull()
             ?: return CreditInfo(0, known = false, detail = "余额响应不是 JSON：${text.trim().take(120)}")
-        val raw = pickByPath(root, query.field)
+        // 允许用逗号列多个候选字段：各家字段名不统一，写全一点能少改几次配置
+        val candidates = query.field.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        val paths = candidates.ifEmpty { listOf("") }
+        val raw = paths.firstNotNullOfOrNull { pickByPath(root, it) }
             ?: return CreditInfo(
                 0,
                 known = false,
@@ -318,7 +406,7 @@ class CustomProvider(
 
     /** 打一次 `/models`，拿状态码与响应体（探针用，不解析模型）。 */
     private fun rawModelsStatus(apiKey: String): Pair<Int, String> {
-        val conn = openConnection(modelsUrl(config.baseUrl), apiKey, null, "GET", config.headers)
+        val conn = openConnection(modelsUrl(config), apiKey, null, "GET", config.headers)
         return try {
             val status = conn.responseCode
             val text = runCatching {
@@ -391,8 +479,13 @@ class CustomProvider(
          */
         fun fetchModels(baseUrl: String, apiKey: String): List<String> {
             if (baseUrl.isBlank()) return emptyList()
+            // 静态入口拿不到协议（新建页还没保存），按 OpenAI 兼容路径探测；
+            // 保存后 ViewModel 会用带协议的实例方法再拉一次。
+            val probeConfig = io.synapse.core.gateway.CustomProviderConfig(
+                key = "probe", name = "probe", baseUrl = baseUrl, apiKeys = emptyList(),
+            )
             val conn = try {
-                openConnection(modelsUrl(baseUrl), apiKey, null, "GET", emptyList())
+                openConnection(modelsUrl(probeConfig), apiKey, null, "GET", emptyList())
             } catch (_: Exception) {
                 return emptyList()
             }
@@ -419,12 +512,25 @@ class CustomProvider(
             body: String?,
             method: String,
             extraHeaders: List<io.synapse.core.gateway.HttpHeader>,
+            proto: io.synapse.core.gateway.ProviderProtocol =
+                io.synapse.core.gateway.ProviderProtocols.OPENAI,
         ): HttpURLConnection {
             // 用 LinkedHashMap 而不是 buildMap：用户填的多个同名头（某些站要两条
             // X-Forwarded-* 之类）必须都能留下来，Map 会去重成一条。
             val headers = LinkedHashMap<String, String>()
             headers["Accept"] = "text/event-stream, application/json"
-            if (key.isNotEmpty()) headers["Authorization"] = "Bearer $key"
+            if (key.isNotEmpty()) {
+                when (proto.auth) {
+                    io.synapse.core.gateway.ProtocolAuth.BEARER -> headers["Authorization"] = "Bearer $key"
+                    // Anthropic 原生要 x-api-key + anthropic-version，缺后者直接 400
+                    io.synapse.core.gateway.ProtocolAuth.X_API_KEY -> {
+                        headers["x-api-key"] = key
+                        headers["anthropic-version"] = "2023-06-01"
+                    }
+                    // Gemini 的 Key 走查询参数，不在头里（下面拼 URL 时补）
+                    io.synapse.core.gateway.ProtocolAuth.QUERY_KEY -> Unit
+                }
+            }
             if (body != null) headers["Content-Type"] = "application/json"
             // 用户自定义头最后应用：同名覆盖内置值（尤其是 Authorization：
             // 有些站点要 x-api-key 或裸 Key，硬塞 Bearer 一定验不过）
@@ -440,18 +546,53 @@ class CustomProvider(
             return HttpSupport.open(url, method, headers, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
         }
 
-        private fun chatUrl(baseUrl: String): String {
+        /**
+         * 拼非对话端点的完整地址。
+         *
+         * baseUrl 的三种常见写法都要能拼对:
+         * - `https://x.com/v1`        → `https://x.com/v1/images/generations`(去重 /v1)
+         * - `https://x.com`           → `https://x.com/v1/images/generations`(补 /v1)
+         * - `https://x.com/v1/`       → 同第一种(尾部斜杠已 trim)
+         *
+         * 已经带完整端点路径时直接用它(用户可能把 baseUrl 填成了完整地址)。
+         */
+        private fun passthroughUrl(baseUrl: String, path: String): String {
             val base = baseUrl.trim().trimEnd('/')
-            return if (base.endsWith("/chat/completions")) base else "$base/chat/completions"
+            val normalizedPath = path.trim().let { if (it.startsWith("/")) it else "/$it" }
+            // baseUrl 已经是完整端点(含该 path):直接用,别再拼一次
+            if (base.endsWith(normalizedPath, ignoreCase = true)) return base
+            // 去掉 base 尾部的 /v1,统一由 path 决定版本段
+            val root = base.removeSuffix("/v1").removeSuffix("/v1beta")
+            return root + normalizedPath
         }
 
-        private fun modelsUrl(baseUrl: String): String {
-            val base = baseUrl.trim().trimEnd('/')
-            return when {
-                base.endsWith("/chat/completions") -> base.removeSuffix("/chat/completions") + "/models"
-                base.endsWith("/models") -> base
-                else -> "$base/models"
-            }
+        /**
+         * 按协议拼对话地址。
+         *
+         * 用户填的 baseUrl 通常已经含版本段（`https://api.deepseek.com` 或 `.../v1`），
+         * 协议里的 chatPath 也含版本段，直接拼会变成 `/v1/v1/chat/completions`。
+         * 这里统一：把 baseUrl 尾部的版本段去掉，再用协议的完整路径补回来。
+         */
+        private fun chatUrl(config: io.synapse.core.gateway.CustomProviderConfig): String {
+            val proto = io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
+            val base = config.baseUrl.trim().trimEnd('/')
+            // 用户已经填了完整端点：直接用，不再拼
+            if (base.endsWith(proto.chatPath, ignoreCase = true)) return base
+            val root = base
+                .removeSuffix("/v1").removeSuffix("/v1beta")
+                .removeSuffix("/chat/completions").removeSuffix("/messages")
+            return root + proto.chatPath
+        }
+
+        private fun modelsUrl(config: io.synapse.core.gateway.CustomProviderConfig): String {
+            val proto = io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
+            val base = config.baseUrl.trim().trimEnd('/')
+            val path = proto.modelsPath
+            if (path.isEmpty()) return "$base/models" // 该协议没列目录接口，仍试一次标准路径
+            if (base.endsWith(path, ignoreCase = true)) return base
+            val root = base.removeSuffix("/v1").removeSuffix("/v1beta")
+                .removeSuffix("/chat/completions").removeSuffix("/messages")
+            return root + path
         }
 
         /** 自定义供应商的账号 uid 由 key 派生（只用于区分账号，不泄露完整 key）。 */

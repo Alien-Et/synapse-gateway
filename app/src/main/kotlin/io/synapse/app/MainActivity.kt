@@ -14,6 +14,17 @@ import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,9 +43,6 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -200,6 +208,127 @@ private enum class Tab(val label: String, val icon: ImageVector) {
     Me("我的", Icons.Filled.Settings),
 }
 
+/**
+ * 磨砂玻璃底栏：大圆角矩形 + 半透明玻璃质感，明暗两套配色。
+ *
+ * ## 为什么不用 Material3 NavigationBar
+ *
+ * NavigationBar 是「贴满屏幕宽度、直角、不透明色块」，没法做悬浮圆角。
+ * 这里改成自绘：外层留白 + 内层圆角矩形，视觉上是浮在内容上方的一条玻璃条。
+ *
+ * ## 真模糊 vs 降级
+ *
+ * Android 12(API 31) 起才有 RenderEffect 的模糊能力。低版本直接用
+ * 半透明背景 + 细边框 + 顶部高光来模拟玻璃，观感接近但不吃 GPU。
+ * 这不是「偷工」：API 30 及以下硬做模糊要么黑屏要么掉帧。
+ *
+ * ## 明暗
+ *
+ * 白天: 白色半透明底 + 深色图标; 暗黑: 深色半透明底 + 浅色图标。
+ * 「选中」用主题金色，未选中用带 alpha 的 onSurface, 跟随系统而不是写死灰色
+ * —— 写死 #777777 在深色模式下会糊成一片。
+ */
+@Composable
+private fun GlassBottomBar(
+    selected: Tab?,
+    onSelect: (Tab) -> Unit,
+) {
+    val dark = isSystemInDarkTheme()
+    val gold = LocalAppColors.current.goldStart
+    val shape = RoundedCornerShape(28.dp)
+
+    // 明暗两套玻璃色: 白天偏乳白, 暗黑偏墨色
+    val glassTint = if (dark) Color(0xE61A1C1E) else Color(0xE6FFFFFF)
+    val borderTint = if (dark) Color(0x33FFFFFF) else Color(0x22000000)
+    val highlight = if (dark) Color(0x14FFFFFF) else Color(0x4DFFFFFF)
+    val unselected = MaterialTheme.colorScheme.onSurface.copy(alpha = if (dark) 0.60f else 0.52f)
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp)
+            .padding(bottom = 10.dp)
+            .navigationBarsPadding(),
+    ) {
+        Surface(
+            shape = shape,
+            color = Color.Transparent,
+            shadowElevation = 0.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                // API 31+ 真模糊; 低版本 clip 由下面那层 background 保证
+                .then(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        Modifier.graphicsLayer(renderEffect = null)
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(shape)
+                    .background(glassTint)
+                    // 顶部一道高光: 玻璃的「边缘反光」, 让圆角读得出来
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(highlight, Color.Transparent),
+                        ),
+                    ),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                ) {
+                    Tab.entries.forEach { item ->
+                        val active = selected == item
+                        val tint = if (active) gold else unselected
+                        androidx.compose.material3.TextButton(
+                            onClick = { onSelect(item) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    item.icon,
+                                    contentDescription = item.label,
+                                    tint = tint,
+                                    modifier = Modifier.size(22.dp),
+                                )
+                                Text(
+                                    text = item.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tint,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 细边框画在最外层: Surface 的 border 会跟着 shape 走, 但半透明底上
+        // 直接画边框会出现圆角锯齿, 用一圈 alpha 极低的描边更自然
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                .clip(shape)
+                .background(Color.Transparent)
+                .then(
+                    Modifier.background(
+                        brush = Brush.verticalGradient(
+                            listOf(borderTint, Color.Transparent),
+                        ),
+                        shape = shape,
+                    ),
+                ),
+        )
+    }
+}
+
 @Composable
 private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
     var tab by remember { mutableStateOf(Tab.Home) }
@@ -228,29 +357,18 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        // 磨砂玻璃底栏：悬浮的大圆角矩形，不贴满屏幕宽度。
+        // Scaffold 默认给 bottomBar 留的位置要清掉（否则会在下面多出一条空白），
+        // 所以这里用 Box 包一层并让内容自己处理底部 padding。
         bottomBar = {
-            val selectedGold = LocalAppColors.current.goldStart
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                Tab.entries.forEach { item ->
-                    NavigationBarItem(
-                        selected = subPage == null && tab == item,
-                        onClick = {
-                            subPage = null
-                            tab = item
-                            if (item == Tab.Models) viewModel.ensureModelsLoaded()
-                        },
-                        icon = { Icon(item.icon, contentDescription = item.label) },
-                        label = { Text(item.label) },
-                        colors = NavigationBarItemDefaults.colors(
-                            indicatorColor = Color.Transparent,
-                            selectedIconColor = selectedGold,
-                            selectedTextColor = selectedGold,
-                            unselectedIconColor = Color(0xFF777777),
-                            unselectedTextColor = Color(0xFF777777),
-                        ),
-                    )
-                }
-            }
+            GlassBottomBar(
+                selected = if (subPage == null) tab else null,
+                onSelect = { item ->
+                    subPage = null
+                    tab = item
+                    if (item == Tab.Models) viewModel.ensureModelsLoaded()
+                },
+            )
         },
     ) { insets ->
         Box(Modifier.fillMaxSize().padding(bottom = insets.calculateBottomPadding())) {

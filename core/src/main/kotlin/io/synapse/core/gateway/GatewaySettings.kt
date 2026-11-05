@@ -345,6 +345,16 @@ data class BalanceQueryConfig(
     val divide: Boolean = false,
     /** 单位名（显示用），如「点」「元」。空串表示不显示单位。 */
     val unit: String = "",
+    /** HTTP 方法，默认 GET。部分大厂余额接口是 POST（要带 JSON body）。 */
+    val method: String = "GET",
+    /** method=POST 时的请求体（原样发送）。 */
+    val body: String = "",
+    /**
+     * 余额接口预设：填了就由网关自动补全路径/字段/方法，用户不必逐项查文档。
+     *
+     * 见 [BalancePresets]。空串表示「完全自定义」（仍按上面的字段逐个生效）。
+     */
+    val preset: String = "",
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("url", url)
@@ -353,6 +363,9 @@ data class BalanceQueryConfig(
         addProperty("scale", scale)
         addProperty("divide", divide)
         addProperty("unit", unit)
+        addProperty("method", method)
+        addProperty("body", body)
+        addProperty("preset", preset)
     }
 
     companion object {
@@ -369,6 +382,9 @@ data class BalanceQueryConfig(
                 scale = obj.get("scale")?.takeIf { it.isJsonPrimitive }?.asDouble?.takeIf { it > 0 } ?: 1.0,
                 divide = obj.get("divide")?.asBoolean ?: false,
                 unit = obj.get("unit")?.asString.orEmpty(),
+                method = obj.get("method")?.asString.orEmpty().trim().uppercase().ifEmpty { "GET" },
+                body = obj.get("body")?.asString.orEmpty(),
+                preset = obj.get("preset")?.asString.orEmpty(),
             )
         }
     }
