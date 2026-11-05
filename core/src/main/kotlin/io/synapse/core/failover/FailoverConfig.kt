@@ -125,6 +125,25 @@ data class ModelFailoverSettings(
      * 详见 [CrossProviderFailoverConfig]。
      */
     val crossProvider: CrossProviderFailoverConfig = CrossProviderFailoverConfig(),
+
+    /**
+     * 模型禁用：解封后当天连续失败到这个次数，就把该模型禁用 [modelBanHours] 小时。
+     *
+     * 默认 3 次：一次失败可能只是上游抖一下，两次也还值得换号再试，
+     * 三次都撞同一道墙就说明这个模型这阵子真不行了，别再浪费账号与超时。
+     */
+    val modelBanThreshold: Int = io.synapse.core.failover.ModelBanTracker.DEFAULT_THRESHOLD,
+
+    /** 禁用时长（小时），默认 24。 */
+    val modelBanHours: Int = 24,
+
+    /**
+     * 冷却提示是否「只提醒一次」。
+     *
+     * 关掉的话每个命中冷却模型的请求都会弹一次横幅+通知，批量请求时能把屏幕刷满。
+     * 打开后同一模型在**冷却期内**只提醒第一次，后续静默走故障转移。
+     */
+    val cooldownNotifyOnce: Boolean = true,
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("enabled", enabled)
@@ -134,6 +153,9 @@ data class ModelFailoverSettings(
         add("modelCooldown", modelCooldown.toJson())
         addProperty("crossRegionFailover", crossRegionFailover)
         add("crossProvider", crossProvider.toJson())
+        addProperty("modelBanThreshold", modelBanThreshold)
+        addProperty("modelBanHours", modelBanHours)
+        addProperty("cooldownNotifyOnce", cooldownNotifyOnce)
     }
 
     companion object {
@@ -155,6 +177,12 @@ data class ModelFailoverSettings(
                 crossProvider = CrossProviderFailoverConfig.fromJson(
                     obj.getAsJsonObject("crossProvider")?.toString(),
                 ),
+                modelBanThreshold = io.synapse.core.failover.ModelBanTracker.clampThreshold(
+                    obj.get("modelBanThreshold")?.asInt
+                        ?: io.synapse.core.failover.ModelBanTracker.DEFAULT_THRESHOLD,
+                ),
+                modelBanHours = (obj.get("modelBanHours")?.asInt ?: 24).coerceIn(1, 24 * 30),
+                cooldownNotifyOnce = obj.get("cooldownNotifyOnce")?.asBoolean ?: true,
             )
         }
     }

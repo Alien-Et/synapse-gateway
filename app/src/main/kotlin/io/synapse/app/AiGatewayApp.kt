@@ -7,6 +7,7 @@ import android.content.Context
 import androidx.core.content.getSystemService
 import io.synapse.app.data.EncryptedKeyValueStore
 import io.synapse.app.data.LanAddresses
+import io.synapse.app.service.GatewayNoticeNotifier
 import io.synapse.app.service.QuotaAlertNotifier
 import io.synapse.core.gateway.GatewayEngine
 
@@ -44,6 +45,10 @@ class AiGatewayApp : Application() {
         // 监听器只做「震动 + 通知」，不参与调度。
         QuotaAlertNotifier.createChannel(this)
         QuotaAlertNotifier.install(this, created)
+
+        // 系统吐司：故障转移/冷却/禁用等「系统已自动处理」的轻提示。
+        // 与上面的强提醒分开挂，避免一批请求同时触发时把 Toast 刷成弹窗。
+        GatewayNoticeNotifier.install(created)
 
         getSystemService<NotificationManager>()?.apply {
             createNotificationChannel(

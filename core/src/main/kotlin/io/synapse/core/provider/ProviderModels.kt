@@ -7,7 +7,51 @@ data class ProviderModel(
     val contextWindow: Long = 0,
     /** provider 私有的附加信息（Trae 的倍率说明、Loomy 的能力位等），由各自 UI 组件解读。 */
     val extra: Map<String, String> = emptyMap(),
-)
+) {
+    /**
+     * 这个模型是不是**生成图片**的（而不是对话）。
+     *
+     * 为什么要单独判：生图模型（`seedream`、`qwen-image`、`gpt-image` 等）不认
+     * `chat/completions`，拿文本消息去探它必然被上游拒——「模型测试」在生图模型上报错
+     * 就是这么来的。探测与转发都得按这个分流。
+     *
+     * 判定依据**优先用上游给的字段**（各家口径不同，见下），名称只是最后的兜底：
+     * - 腾讯/字节：`extra["tags"]` 或 `extra["category"]` 含 image
+     * - 灵犀：`extra["ability"]` 里带「图片/生图/绘图」
+     * - 通用：模型 id 里出现 image / seedream / dall-e / flux 等已知词根
+     */
+    val isImageGeneration: Boolean get() {
+        val markers = listOf("image", "生图", "图片", "绘图", "文生图", "t2i")
+        for (key in listOf("tags", "category", "ability", "modality", "type", "output")) {
+            val value = extra[key]?.lowercase().orEmpty()
+            if (value.isEmpty()) continue
+            if (markers.any { value.contains(it) }) return true
+        }
+        val id = id.lowercase()
+        return IMAGE_ID_HINTS.any { id.contains(it) }
+    }
+
+    /** 这个模型是否支持图片输入（识图/多模态）。 */
+    val supportsImageInput: Boolean get() {
+        val v = extra["vision"]?.trim()?.lowercase()
+        val a = extra["attachment"]?.trim()?.lowercase()
+        return v == "true" || v == "1" || a == "true" || a == "1"
+    }
+
+    companion object {
+        /**
+         * 生图模型的 id 词根。
+         *
+         * 只放**确定是生图**的：`vision` / `vl` / `omni` 这类是「能看图」不是「画图」，
+         * 混进来会把识图模型错判成生图模型，反而让正常对话探测被跳过。
+         */
+        val IMAGE_ID_HINTS = listOf(
+            "seedream", "dall-e", "dalle", "gpt-image", "imagen",
+            "flux", "stable-diffusion", "sdxl", "qwen-image", "kolors",
+            "text2image", "t2i", "cogview", "hunyuan-image", "wanx",
+        )
+    }
+}
 
 /** 模型目录视图。 */
 data class ProviderModelCatalogView(

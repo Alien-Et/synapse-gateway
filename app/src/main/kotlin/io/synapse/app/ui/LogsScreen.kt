@@ -404,6 +404,11 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
                     dot = false,
                 )
                 TagPill(text = finalName, tone = tone, dot = true)
+                // 「禁用」是长期状态（24 小时），与「冷却」不同：
+                // 看到它就知道该换模型了，等一会儿也没用。
+                if (record.modelBanned) {
+                    TagPill(text = "禁用", tone = MaterialTheme.colorScheme.error, dot = false)
+                }
             }
         }
         Text(
@@ -452,6 +457,16 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             // 兜底：老记录没有 attemptedAccounts，退回单个账号，别让失败卡片一片空白
             finalName.isNotEmpty() -> listOf(finalName)
             else -> emptyList()
+        }
+        // 失败卡片没有上面的「路由/故障转移」行，禁用标签要在这里单独补，
+        // 否则只有成功转移的记录才能看到「这个模型被禁用了」。
+        if (!ok && record.modelBanned) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                TagPill(text = "禁用", tone = MaterialTheme.colorScheme.error, dot = false)
+            }
         }
         if (failedAccounts.isNotEmpty()) {
             FlowRow(

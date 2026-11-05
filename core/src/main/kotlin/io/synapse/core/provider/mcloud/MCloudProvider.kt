@@ -73,6 +73,43 @@ class MCloudProvider(
         ProviderCapability.POINTS_BILLS,
     )
 
+    /**
+     * 灵犀支持的透传端点。
+     *
+     * 它的对话通道本身就是标准 OpenAI 协议（`/api/llm/<channel>/v1/chat/completions`），
+     * 而模型清单里确实有生图与视频模型（seedream、qwen-image 等），说明上游在同一套
+     * 通道下也实现了这些端点。**只声明这三个**：语音/向量/重排上游没有，
+     * 声明了再让上游 404 只会让用户以为是自己配错。
+     */
+    override val passthroughPaths: Set<String> = setOf(
+        "/v1/images/generations", "/images/generations",
+        "/v1/videos/generations", "/videos/generations",
+        "/v1/video/generations", "/video/generations",
+        "/v1/models", "/models",
+    )
+
+    /**
+     * 灵犀的透传：把路径改写成它自己的通道前缀再发。
+     *
+     * 对话端点是 `/api/llm/<channelId>/v1/chat/completions`，生图同理挂在
+     * `/api/llm/<channelId>/v1/images/generations` 下——不能直接拼在域名根上。
+     */
+    override fun passthrough(
+        account: ProviderAccount,
+        method: String,
+        path: String,
+        body: String?,
+    ): ChatCall? {
+        val mcloud = parseOrNull(account) ?: return FailedChatCall(401, "灵犀账号凭证无法解析")
+        val normalized = path.trim().let { if (it.startsWith("/")) it else "/$it" }
+        val url = "${MCloudConstants.AI_BASE}/api/llm/${MCloudConstants.CHANNEL_ID}$normalized"
+        return try {
+            MCloudChatClient.passthrough(mcloud, method, url, body)
+        } catch (e: Exception) {
+            FailedChatCall(0, e.message ?: "请求失败")
+        }
+    }
+
     // ------------------------------------------------------------------ 模型
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView {

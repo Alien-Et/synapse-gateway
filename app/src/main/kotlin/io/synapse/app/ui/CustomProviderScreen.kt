@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package io.synapse.app.ui
 
 import androidx.compose.foundation.clickable
@@ -9,6 +11,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,6 +52,15 @@ fun CustomProviderScreen(
     var key by remember { mutableStateOf(existing?.key.orEmpty()) }
     var name by remember { mutableStateOf(existing?.name.orEmpty()) }
     var baseUrl by remember { mutableStateOf(existing?.baseUrl.orEmpty()) }
+
+    // 上游协议：决定对话/模型端点路径与鉴权头。默认 OpenAI 兼容（兼容老配置）。
+    var protocol by remember { mutableStateOf(existing?.protocol.orEmpty().ifEmpty { "openai" }) }
+    // 余额查询：选一个预设就自动补全路径/字段，也可以完全自定义。
+    var balancePreset by remember { mutableStateOf(existing?.balanceQuery?.preset.orEmpty()) }
+    var balancePath by remember { mutableStateOf(existing?.balanceQuery?.path.orEmpty()) }
+    var balanceField by remember { mutableStateOf(existing?.balanceQuery?.field.orEmpty()) }
+    var balanceMethod by remember { mutableStateOf(existing?.balanceQuery?.method.orEmpty().ifEmpty { "GET" }) }
+    var balanceUnit by remember { mutableStateOf(existing?.balanceQuery?.unit.orEmpty()) }
 
     // API Key：一个输入框搞定，**点保存即生效**，不需要先点「添加」再保存。
     //
@@ -100,6 +114,115 @@ fun CustomProviderScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+        }
+
+        // ---------------- 上游协议 ----------------
+        SectionCard {
+            SectionLabel("接入协议")
+            val choices = io.synapse.core.gateway.ProviderProtocols.choices()
+            var expanded by remember { mutableStateOf(false) }
+            val current = io.synapse.core.gateway.ProviderProtocols.of(protocol)
+            ExposedDropdownMenuBox(
+                expanded = expanded,
+                onExpandedChange = { expanded = it },
+            ) {
+                OutlinedTextField(
+                    value = current.label,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("协议") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor(),
+                )
+                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    choices.forEach { (id, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = { protocol = id; expanded = false },
+                        )
+                    }
+                }
+            }
+            Text(
+                text = current.hint,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "对话端点：${current.chatPath}　鉴权：" +
+                    when (current.auth) {
+                        io.synapse.core.gateway.ProtocolAuth.BEARER -> "Bearer"
+                        io.synapse.core.gateway.ProtocolAuth.X_API_KEY -> "x-api-key"
+                        io.synapse.core.gateway.ProtocolAuth.QUERY_KEY -> "?key="
+                    },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // ---------------- 余额查询 ----------------
+        SectionCard {
+            SectionLabel("余额查询（可选）")
+            val presets = io.synapse.core.gateway.BalancePresets.choices()
+            var presetExpanded by remember { mutableStateOf(false) }
+            val presetLabel = io.synapse.core.gateway.BalancePresets.of(balancePreset)?.label
+                ?: if (balancePreset.isEmpty()) "自定义 / 不查余额" else balancePreset
+            ExposedDropdownMenuBox(
+                expanded = presetExpanded,
+                onExpandedChange = { presetExpanded = it },
+            ) {
+                OutlinedTextField(
+                    value = presetLabel,
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("余额接口预设") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = presetExpanded) },
+                    modifier = Modifier.fillMaxWidth().menuAnchor(),
+                )
+                ExposedDropdownMenu(expanded = presetExpanded, onDismissRequest = { presetExpanded = false }) {
+                    presets.forEach { (id, label) ->
+                        DropdownMenuItem(
+                            text = { Text(label) },
+                            onClick = {
+                                balancePreset = id
+                                // 选了预设就把已知形状预填进输入框（用户仍可改）
+                                io.synapse.core.gateway.BalancePresets.of(id)?.let { p ->
+                                    balancePath = p.path
+                                    balanceField = p.field
+                                    balanceMethod = p.method
+                                    balanceUnit = p.unit
+                                }
+                                presetExpanded = false
+                            },
+                        )
+                    }
+                }
+            }
+            // 选「自定义」或选了预设后想微调，都能直接改这些字段
+            if (balancePreset.isNotEmpty()) {
+                OutlinedTextField(
+                    value = balancePath,
+                    onValueChange = { balancePath = it },
+                    label = { Text("相对路径（可改）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = balanceField,
+                    onValueChange = { balanceField = it },
+                    label = { Text("取值字段（可用逗号列多个）") },
+                    supportingText = { Text("点分路径，支持数组下标；留空表示响应就是数字") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = balanceUnit,
+                    onValueChange = { balanceUnit = it },
+                    label = { Text("单位（可留空）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
 
         // ---------------- API Key ----------------
@@ -190,6 +313,21 @@ fun CustomProviderScreen(
                             models = existing?.models.orEmpty(),
                             // 启用状态不在这一页管理（账号级的开关在详情页），保持原值
                             enabled = existing?.enabled ?: true,
+                            protocol = protocol,
+                            // 未选预设且字段全空 = 不查余额，别落一条空配置
+                            balanceQuery = if (
+                                balancePreset.isEmpty() && balancePath.isBlank() && balanceField.isBlank()
+                            ) {
+                                null
+                            } else {
+                                io.synapse.core.gateway.BalanceQueryConfig(
+                                    path = balancePath.trim(),
+                                    field = balanceField.trim(),
+                                    method = balanceMethod,
+                                    unit = balanceUnit.trim(),
+                                    preset = balancePreset,
+                                )
+                            },
                         ),
                         // 只用第一个 Key 去拉模型（拉目录不需要多账号）；留空则用账号池里已有的
                         parsedKeys.firstOrNull(),
