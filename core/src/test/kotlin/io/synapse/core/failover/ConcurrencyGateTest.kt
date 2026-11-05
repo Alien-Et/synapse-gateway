@@ -216,4 +216,108 @@ class ConcurrencyGateTest {
         val legacy = ModelFailoverSettings.fromJson("""{"enabled":true}""")
         assertEquals(ConcurrencyConfig(), legacy.concurrency)
     }
+
+    // ---------------------------------------------------------------- 非阻塞取许可
+
+    /**
+     * 这组测试锁住「选号阶段不许阻塞」这条约定。
+     *
+     * 背景：原实现里 HTTP 层是「先选号，再 tryAcquire」——两个并发请求会同时选中同一个空闲
+     * 账号，后一个就在 HTTP 线程上排队（默认 120s），于是多账号也串行、并发一多线程全被
+     * 等待占满、所有请求一起超时。改成「选号与取许可一起做」之后，选号阶段必须用非阻塞的
+     * tryAcquireNow，这条行为不能被悄悄改回阻塞版。
+     */
+    @Test
+    fun `tryAcquireNow 满载时立刻返回 null 而不阻塞`() {
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxPerAccount = 1, maxGlobal = 0) }
+        val first = gate.tryAcquireNow("p/a")
+        assertNotNull(first)
+
+        val startedAt = System.nanoTime()
+        val second = gate.tryAcquireNow("p/a")
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertNull(second, "满载时必须立刻拒绝")
+        // 非阻塞：远小于任何排队超时（这里是 30s 量级）
+        assertTrue(elapsedMs < 500, "tryAcquireNow 不能等待，实际耗时 ${elapsedMs}ms")
+        first.release()
+        assertNotNull(gate.tryAcquireNow("p/a"), "释放后应能立刻取到")
+    }
+
+    @Test
+    fun `tryAcquireNow 不影响其他账号`() {
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxPerAccount = 1, maxGlobal = 0) }
+        val a = gate.tryAcquireNow("p/a")
+        assertNotNull(a)
+        // 同供应商另一个账号不受 a 的占用影响——多账号才能真并行
+        val b = gate.tryAcquireNow("p/b")
+        assertNotNull(b)
+        a.release()
+        b.release()
+    }
+
+    @Test
+    fun `hasCapacity 是只读探测不占许可`() {
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxPerAccount = 1, maxGlobal = 0) }
+        assertTrue(gate.hasCapacity("p/a"), "空闲时应有余量")
+        // 反复探测不能把许可吃掉
+        repeat(5) { assertTrue(gate.hasCapacity("p/a")) }
+        assertEquals(0, gate.inFlightOf("p/a"), "探测不能改变在途计数")
+
+        val h = gate.tryAcquireNow("p/a")
+        assertNotNull(h)
+        assertFalse(gate.hasCapacity("p/a"), "占满后应报无余量")
+        assertEquals(1, gate.inFlightOf("p/a"))
+        h.release()
+        assertTrue(gate.hasCapacity("p/a"))
+    }
+
+    @Test
+    fun `全局满载时 hasCapacity 对所有账号都返回 false`() {
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxPerAccount = 0, maxGlobal = 1) }
+        val h = gate.tryAcquireNow("p/a")
+        assertNotNull(h)
+        assertFalse(gate.hasCapacity("p/a"))
+        assertFalse(gate.hasCapacity("p/b"), "全局上限对每个账号都生效")
+        h.release()
+        assertTrue(gate.hasCapacity("p/b"))
+    }
+
+    @Test
+    fun `取许可失败不泄漏全局计数`() {
+        // maxPerAccount 已满而 maxGlobal 未满：失败的那次必须把全局计数回滚，
+        // 否则全局计数会一路涨到上限，最后所有请求都取不到许可。
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxPerAccount = 1, maxGlobal = 5) }
+        val h = gate.tryAcquireNow("p/a")
+        assertNotNull(h)
+        repeat(10) { assertNull(gate.tryAcquireNow("p/a")) }
+        assertEquals(1, gate.inFlightGlobal(), "失败的尝试不能留下全局计数")
+        h.release()
+        assertEquals(0, gate.inFlightGlobal())
+    }
+
+    @Test
+    fun `带超时的 tryAcquire 在别人释放后能取到`() {
+        val gate = ConcurrencyGate { ConcurrencyConfig(maxPerAccount = 1, maxGlobal = 0) }
+        val h = gate.tryAcquireNow("p/a")
+        assertNotNull(h)
+
+        val released = CountDownLatch(1)
+        thread {
+            Thread.sleep(150)
+            h.release()
+            released.countDown()
+        }
+        // 给足 3s：应当在前一条释放后立刻接上，而不是等到超时
+        val second = gate.tryAcquire("p/a", timeoutMs = 3_000)
+        assertNotNull(second, "前一条释放后应能接上")
+        assertTrue(released.await(1, TimeUnit.SECONDS))
+        second.release()
+    }
+
+    @Test
+    fun `queueTimeout 默认值已收紧到 30 秒`() {
+        // 120s 太长：工作线程会被这些等待占满，所有请求一起超时
+        assertEquals(30_000L, ConcurrencyConfig().queueTimeoutMs)
+    }
 }

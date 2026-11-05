@@ -64,9 +64,28 @@ class ModelsStreamingTest {
         }
     }
 
+    /**
+     * 注册供应商，并给每家塞一个账号。
+     *
+     * 必须带账号：从「无账号不算拉取失败」那次改动起，没账号的供应商自报的 error 会被统一
+     * 吞掉（登录前本就不该有模型，报红会让人误以为出故障）。本文件要验证的是「供应商真的
+     * 报错时错误要进 failures」，所以前提是它确实已登录。
+     */
     private fun engineWith(vararg providers: Provider): GatewayEngine {
         val engine = GatewayEngine(InMemoryKeyValueStore())
-        for (provider in providers) engine.registry.register(provider)
+        for (provider in providers) {
+            engine.registry.register(provider)
+            // 必须用 upsert 而不是 saveAccount：后者只更新「已存在」的条目，
+            // 新账号会被静默忽略，测试前提（已登录）就不成立了。
+            engine.pool.upsert(
+                ProviderAccount(
+                    providerId = provider.id,
+                    uid = "uid-${provider.id}",
+                    nickname = provider.id,
+                    secret = "{}",
+                ),
+            )
+        }
         return engine
     }
 
