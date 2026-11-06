@@ -2123,8 +2123,14 @@ class GatewayEngine(
         val resolvedModel = provider.resolveModel(modelId)
         // 生图模型不认 chat/completions：拿文本消息去探它必然被上游拒
         // （「模型测试」在生图模型上报错就是这么来的）。
-        // 这里按能力分流：生图模型用最小的 images/generations 请求探活。
-        val isImageModel = runCatching {
+        //
+        // C4：先按模型 id 判断（零成本）。绝大多数生图模型的名字里就带
+        // seedream / qwen-image / flux 这些词根，不需要为此全量拉一次模型目录。
+        // 只有「名字看不出来」时才查目录补一次，避免每次测试都白打上游。
+        val looksLikeImage = runCatching {
+            io.synapse.core.provider.ProviderModel(modelId, modelId).isImageGeneration
+        }.getOrDefault(false)
+        val isImageModel = if (looksLikeImage) true else runCatching {
             provider.listModels(account).models
                 .firstOrNull { it.id == modelId || it.id == resolvedModel }
                 ?.isImageGeneration

@@ -45,7 +45,7 @@ data class ProviderModel(
          * 只放**确定是生图**的：`vision` / `vl` / `omni` 这类是「能看图」不是「画图」，
          * 混进来会把识图模型错判成生图模型，反而让正常对话探测被跳过。
          */
-        val IMAGE_ID_HINTS = listOf(
+        private val IMAGE_ID_HINTS = listOf(
             "seedream", "dall-e", "dalle", "gpt-image", "imagen",
             "flux", "stable-diffusion", "sdxl", "qwen-image", "kolors",
             "text2image", "t2i", "cogview", "hunyuan-image", "wanx",

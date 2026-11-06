@@ -432,7 +432,7 @@ private fun LargeBodyComponent(
 private fun providerCreditLabels(accounts: List<AccountStatus>): Map<String, String> =
     accounts.filter { it.creditsKnown }
         .groupBy { it.providerId }
-        .mapValues { (_, list) -> "剩余 ${formatCount(list.sumOf { it.credits })}" }
+        .mapValues { (_, list) -> "剩余 ${formatGroupedCount(list.sumOf { it.credits })}" }
 
 @Composable
 private fun ParamRow(title: String, value: String) {    Row(

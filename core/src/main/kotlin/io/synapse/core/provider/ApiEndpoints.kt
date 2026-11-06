@@ -40,6 +40,8 @@ data class ApiEndpoint(
     val label: String,
     val aliases: List<String> = emptyList(),
     val binaryResponse: Boolean = false,
+    /** 请求体里是否必须带 model（用于选供应商）；false 的端点允许无 body。 */
+    val requiresModel: Boolean = true,
 ) {
     /** 这个端点所有可接受的路径写法。 */
     val allPaths: List<String> get() = listOf(path) + aliases
@@ -86,6 +88,7 @@ object ApiEndpoints {
         kind = EndpointKind.PASSTHROUGH,
         label = "语音转文字",
         aliases = listOf("/audio/transcriptions"),
+        requiresModel = false,
     )
 
     val AUDIO_TRANSLATIONS = ApiEndpoint(
@@ -93,6 +96,7 @@ object ApiEndpoints {
         kind = EndpointKind.PASSTHROUGH,
         label = "语音翻译",
         aliases = listOf("/audio/translations"),
+        requiresModel = false,
     )
 
     val AUDIO_SPEECH = ApiEndpoint(
@@ -101,6 +105,7 @@ object ApiEndpoints {
         label = "语音合成",
         aliases = listOf("/audio/speech"),
         binaryResponse = true,
+        requiresModel = false,
     )
 
     // ---------------------------------------------------------------- 向量与重排
@@ -147,6 +152,7 @@ object ApiEndpoints {
         kind = EndpointKind.PASSTHROUGH,
         label = "模型列表",
         aliases = listOf("/models"),
+        requiresModel = false,
     )
 
     /** 所有透传类端点(不含对话)。 */

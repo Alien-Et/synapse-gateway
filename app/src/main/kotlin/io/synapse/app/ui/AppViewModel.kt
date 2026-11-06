@@ -540,7 +540,16 @@ class AppViewModel(
                     liveNotification = io.synapse.app.data.KeepAlivePrefs.liveNotificationEnabled(engine.store()),
                 )
             }
-            _state.value = _state.value.copy(
+            val current = _state.value
+            // C1/C2：calls/logs 是大列表（100 条带正文 + 300 条日志）。
+            // 23 处 refresh() 若日志没变化就不该替换引用，否则下游
+            // remember(state.calls) / LogsScreen 的 filter 会白白重算一遍。
+            // 判据与 refreshRecords() 一致：size + 首条 id/seq。
+            val callsChanged = snapshot.calls.size != current.calls.size ||
+                snapshot.calls.firstOrNull()?.id != current.calls.firstOrNull()?.id
+            val logsChanged = snapshot.logs.size != current.logs.size ||
+                snapshot.logs.firstOrNull()?.seq != current.logs.firstOrNull()?.seq
+            _state.value = current.copy(
                 running = snapshot.running,
                 port = snapshot.port,
                 localUrl = snapshot.localUrl,
@@ -553,8 +562,8 @@ class AppViewModel(
                 providers = snapshot.providers,
                 accounts = snapshot.accounts,
                 customProviders = snapshot.customProviders,
-                calls = snapshot.calls,
-                logs = snapshot.logs,
+                calls = if (callsChanged) snapshot.calls else current.calls,
+                logs = if (logsChanged) snapshot.logs else current.logs,
                 settings = snapshot.settings,
                 proxy = snapshot.proxy,
                 keepAlive = snapshot.keepAlive,

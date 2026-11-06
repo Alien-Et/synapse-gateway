@@ -206,26 +206,32 @@ class CallLogStore(
         )
         spillOverflows(record)
         records.addFirst(excerpt)
-        store.write(keyOf(record.id), excerpt.toJson().toString())
+        // C5：把「记录本身 + 三处聚合」合成一次批量写。
+        // 以前是 4 次独立 store.write()，加密存储每次都同步 commit 一次；
+        // 高频请求下这是最明显的 I/O 放大点。合成事务后 I/O 降为 1/4，
+        // 而且这几份聚合本就该原子更新，中途崩溃不会留下半套统计。
+        val batch = LinkedHashMap<String, String>()
+        batch[keyOf(record.id)] = excerpt.toJson().toString()
         while (records.size > capacity) {
             val evicted = records.removeLast()
             store.delete(keyOf(evicted.id))
             deleteSpill(evicted.id)
         }
         totalAgg = totalAgg + record
-        store.write(TOTAL_KEY, totalAgg.toJson().toString())
+        batch[TOTAL_KEY] = totalAgg.toJson().toString()
         val day = startOfDay(record.startedAtMillis)
         val updated = (daily[day] ?: UsageStats()) + record
         daily[day] = updated
-        store.write(dayKeyOf(day), updated.toJson().toString())
+        batch[dayKeyOf(day)] = updated.toJson().toString()
         // 同时单独记一份该供应商的：换算率要按家算，不能混
         val pid = record.providerId
         if (pid.isNotEmpty()) {
             val perProvider = dailyByProvider.getOrPut(pid) { mutableMapOf() }
             val providerUpdated = (perProvider[day] ?: UsageStats()) + record
             perProvider[day] = providerUpdated
-            store.write(providerDayKeyOf(pid, day), providerUpdated.toJson().toString())
+            batch[providerDayKeyOf(pid, day)] = providerUpdated.toJson().toString()
         }
+        store.writeBatch(batch)
         pruneDaily()
         // 写在 @Synchronized 块内但**不持锁回调**：监听器可能反过来调 list()/add()，
         // 持锁回调会有死锁风险；notifyChanged 里已逐个 catch，不会把异常带回写入路径。
