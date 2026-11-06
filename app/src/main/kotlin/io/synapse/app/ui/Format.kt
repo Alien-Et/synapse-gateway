@@ -2,8 +2,13 @@ package io.synapse.app.ui
 
 import java.util.Locale
 
-/** 千分位计数（如 1,234,567）。 */
-fun formatCount(value: Long): String = String.format(Locale.US, "%,d", value)
+/**
+ * 千分位计数（如 1,234,567）。
+ *
+ * 改名自 formatCount：core 层有一个同名但行为不同（压缩成 23.2K）的函数，
+ * 同名不同义在跨模块改代码时极易引错包。
+ */
+fun formatGroupedCount(value: Long): String = String.format(Locale.US, "%,d", value)
 
 /**
  * 余额/积分缩写：12500 → 12.5K、3800000 → 3.8M。
@@ -17,13 +22,9 @@ fun formatCredits(value: Long): String = when {
     else -> value.toString()
 }
 
-/** 人类友好缩写：3.82M / 276.6K。 */
-fun formatTokens(tokens: Long): String = when {
-    tokens >= 1_000_000_000L -> String.format(Locale.US, "%.2fB", tokens / 1_000_000_000.0)
-    tokens >= 1_000_000L -> String.format(Locale.US, "%.2fM", tokens / 1_000_000.0)
-    tokens >= 1_000L -> String.format(Locale.US, "%.1fK", tokens / 1_000.0)
-    else -> tokens.toString()
-}
+/** 人类友好缩写：3.82M / 276.6K。委托 core 的统一实现，避免两份私有副本各写各的。 */
+fun formatTokens(tokens: Long): String =
+    io.synapse.core.util.formatTokenCount(tokens)
 
 /** 耗时缩写：850ms / 22.3s / 5m12s / 1h03m。记录页胶囊用它代替动辄五位的毫秒值。 */
 fun formatDuration(millis: Long): String {

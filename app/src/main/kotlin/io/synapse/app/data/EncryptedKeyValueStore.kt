@@ -23,6 +23,19 @@ class EncryptedKeyValueStore(context: Context) : KeyValueStore {
         prefs.edit().putString(key, value).commit()
     }
 
+    /**
+     * 一次 put 全部键、只 commit 一次。
+     *
+     * 每笔调用记录要同时更新「记录本身 / 总计 / 当日 / 按供应商当日」四处，
+     * 逐条 commit 等于四次同步加密写盘。合成一次事务后 I/O 降为 1/4，
+     * 且这些聚合数据在语义上本就该原子更新（中途崩溃不会留下半套统计）。
+     */
+    override fun writeBatch(entries: Map<String, String>) {
+        val editor = prefs.edit()
+        for ((key, value) in entries) editor.putString(key, value)
+        editor.commit()
+    }
+
     override fun delete(key: String) {
         prefs.edit().remove(key).commit()
     }

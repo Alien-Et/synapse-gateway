@@ -18,10 +18,18 @@ import java.util.concurrent.CopyOnWriteArrayList
  * [NoticeKind] 枚举了目前支持的类型。新增提醒场景只要加一个枚举值 + 在转发层
  * 发一条 [NoticeEvent]，App 侧不需要改接线。
  *
- * ## 去重
+ * ## 去重（三套提醒的统一口径）
  *
  * 同一个 key 在 [DEDUP_WINDOW_MS] 内只发一次：批量请求同时触发故障转移时，
  * 连着弹十条一样的 Toast 只会让人烦。key 由调用方给（通常是「类型|模型」）。
+ *
+ * 项目里共有三层去重，各有分工、但**窗口统一用 [DEDUP_WINDOW_MS]**：
+ * 1. [io.synapse.core.failover.ModelCooldownTracker] + GatewayHttpServer 的
+ *    cooldownAlerted —— 按「一轮冷却」去重，解封后自动失效（业务级，最严格）；
+ * 2. [QuotaAlerts] → App 侧 QuotaAlertNotifier —— 横幅/震动/常驻通知去重；
+ * 3. 本类 —— 系统 Toast 去重。
+ * 第 1 层是语义去重（一轮冷却只提醒一次），第 2/3 层是防刷屏（时间窗），
+ * 它们叠加不冲突：第 1 层拦住的事件根本不会走到后两层。
  *
  * 线程约定：回调可能在任意网关线程，App 侧需自行切主线程再弹 Toast。
  */

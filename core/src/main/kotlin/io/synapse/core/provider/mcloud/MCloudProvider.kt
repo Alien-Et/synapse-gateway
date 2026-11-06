@@ -1,5 +1,6 @@
 package io.synapse.core.provider.mcloud
 
+import io.synapse.core.util.formatTokenCount
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import io.synapse.core.provider.AggregatedChatCall
@@ -348,7 +349,7 @@ class MCloudProvider(
             return CreditInfo(
                 balance = 0,
                 known = false,
-                detail = "剩余额度未知（权益接口未返回总量）· 本月已用 ${formatTokens(credit.monthlyTokens)}",
+                detail = "剩余额度未知（权益接口未返回总量）· 本月已用 ${formatTokenCount(credit.monthlyTokens)}",
                 actionHint = if (canRefresh) "点「刷新额度」重试" else "点「重新登录」用手机号收验证码登录一次",
                 memberLevel = credit.memberLevel,
             )
@@ -375,12 +376,12 @@ class MCloudProvider(
      */
     private fun buildCreditDetail(credit: MCloudCredit): String {
         val parts = mutableListOf<String>()
-        parts += "剩余 ${formatTokens(credit.remainTokens)} tokens"
-        parts += "总量 ${formatTokens(credit.totalTokens)}"
+        parts += "剩余 ${formatTokenCount(credit.remainTokens)} tokens"
+        parts += "总量 ${formatTokenCount(credit.totalTokens)}"
         if (credit.monthlyKnown) {
-            parts += "本月已用 ${formatTokens(credit.monthlyTokens)}（${credit.monthLabel}）"
+            parts += "本月已用 ${formatTokenCount(credit.monthlyTokens)}（${credit.monthLabel}）"
         } else {
-            parts += "累计已用 ${formatTokens(credit.usedTokens)}"
+            parts += "累计已用 ${formatTokenCount(credit.usedTokens)}"
         }
         if (!credit.isActive && credit.benefitStatus.isNotEmpty()) {
             parts += "权益未生效"
@@ -389,14 +390,6 @@ class MCloudProvider(
     }
 
     /** tokens 数值美化：≥1 万用「万」，≥1 亿用「亿」，保留一位小数。 */
-    private fun formatTokens(tokens: Long): String {
-        val v = tokens.toDouble()
-        return when {
-            v >= 100_000_000 -> String.format("%.2f亿", v / 100_000_000)
-            v >= 10_000 -> String.format("%.1f万", v / 10_000)
-            else -> tokens.toString()
-        }
-    }
 
     /**
      * AI tokens 消耗明细（`vip.yun.139.com/m4c/benefit/getAiTokenConsumptionRecords`）。

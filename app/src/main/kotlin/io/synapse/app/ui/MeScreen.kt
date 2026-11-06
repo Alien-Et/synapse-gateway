@@ -123,7 +123,7 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 "02.4",
                 "额度中心 · CREDITS",
                 "按供应商查看额度包明细",
-                if (state.pool.creditsKnown > 0) formatCount(state.pool.totalCredits) else "",
+                if (state.pool.creditsKnown > 0) formatGroupedCount(state.pool.totalCredits) else "",
             ) { open(SubPage.CreditCenter) }
             EditorialRow("02.5", "用量统计 · TELEMETRY", "请求数、token 与成功率", formatTokens(state.today.totalTokens)) {
                 open(SubPage.Usage)
@@ -371,10 +371,10 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
             SectionLabel("今日")
             CacheHitGauge(state.today)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatCell(formatCount(state.today.requests), "请求")
-                StatCell(formatCount(state.today.success), "成功")
-                StatCell(formatCount(state.today.failed), "失败")
-                StatCell(formatCount(state.today.aborted), "中断")
+                StatCell(formatGroupedCount(state.today.requests), "请求")
+                StatCell(formatGroupedCount(state.today.success), "成功")
+                StatCell(formatGroupedCount(state.today.failed), "失败")
+                StatCell(formatGroupedCount(state.today.aborted), "中断")
             }
         }
 
@@ -382,10 +382,10 @@ fun UsageScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
             SectionLabel("累计")
             CacheHitGauge(state.total)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                StatCell(formatCount(state.total.requests), "请求")
-                StatCell(formatCount(state.total.success), "成功")
-                StatCell(formatCount(state.total.failed), "失败")
-                StatCell(formatCount(state.total.aborted), "中断")
+                StatCell(formatGroupedCount(state.total.requests), "请求")
+                StatCell(formatGroupedCount(state.total.success), "成功")
+                StatCell(formatGroupedCount(state.total.failed), "失败")
+                StatCell(formatGroupedCount(state.total.aborted), "中断")
             }
         }
 

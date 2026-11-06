@@ -86,6 +86,42 @@ class GatewayHttpServer(
         }
     }
 
+    /**
+     * 记一次「模型级整体失败」，达阈值就禁用并发横幅。
+     *
+     * 流内错误与 HTTP 错误共用这一处，避免两处各写一遍、也避免一次失败被计两次。
+     * 只在调用方确认「同家账号已全试完」时调用；单个账号的限流走换号，不计入。
+     */
+    private fun recordModelLimitFailure(
+        providerId: String,
+        resolvedModel: String,
+        failoverCfg: io.synapse.core.failover.ModelFailoverSettings,
+    ) {
+        val banMs = failoverCfg.modelBanHours.toLong() * 60 * 60 * 1000
+        val justBanned = engine.modelBansOf().recordFailure(
+            providerId = providerId,
+            model = resolvedModel,
+            threshold = failoverCfg.modelBanThreshold,
+            banDurationMs = banMs,
+        )
+        if (!justBanned) return
+        val hours = failoverCfg.modelBanHours
+        val label = routeLabelOf(providerId, null)
+        log("模型 [$resolvedModel] 在 [$providerId] 解封后当天连续失败达阈值，禁用 ${hours}h")
+        // 强提醒只走横幅 + 常驻通知；不叠同类 Toast（后续命中禁用模型的
+        // BANNED_FAILOVER 吐司是另一个动作，仍保留）。
+        engine.quotaAlerts.emit(
+            QuotaAlert(
+                label,
+                "全部账号",
+                resolvedModel,
+                "该模型今天反复失败，已自动禁用 ${hours} 小时。" +
+                    "禁用期间会直接改走其它候选模型，${hours} 小时后自动恢复。",
+            ),
+            QuotaAlert.Level.MODEL_UNAVAILABLE,
+        )
+    }
+
     fun listeningAddress(): String = (hostname ?: "0.0.0.0") + ":" + listeningPort
 
     override fun serve(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
@@ -366,24 +402,31 @@ class GatewayHttpServer(
             return errorResponse(413, "payload_too_large", "请求体超过上限")
         }
 
-        // 生图/向量类一定带 model；GET 类（如模型列表）没有 body
+        // 生图/向量/重排类需要 model 来选供应商；模型列表/语音转写这类端点
+        // 没有 model 字段，也就不该被强制校验（以前一律 400，等于这些端点全废）。
         val requestedModel = runCatching {
             JsonParser.parseString(body).asJsonObject.get("model")?.asString.orEmpty()
         }.getOrNull().orEmpty()
 
-        if (requestedModel.isBlank()) {
+        // 无 model 端点：允许从「第一个支持该端点的自定义供应商」里选号
+        val route = if (requestedModel.isNotBlank()) {
+            engine.resolveRoute(requestedModel)
+                ?: return errorResponse(
+                    400, "model_not_found",
+                    "无法识别模型「$requestedModel」：请写成「标签/模型名」，标签必须是已登录的供应商",
+                )
+        } else if (!endpoint.requiresModel) {
+            pickPassthroughRoute(endpoint)
+                ?: return errorResponse(
+                    404, "provider_not_found",
+                    "没有已登录且支持「${endpoint.label}」的供应商",
+                )
+        } else {
             return errorResponse(
-                400,
-                "invalid_request",
+                400, "invalid_request",
                 "${endpoint.label}请求缺少 model 参数（写成「标签/模型名」，例如「灵犀/seedream-4.0」）",
             )
         }
-        val route = engine.resolveRoute(requestedModel)
-            ?: return errorResponse(
-                400,
-                "model_not_found",
-                "无法识别模型「$requestedModel」：请写成「标签/模型名」，标签必须是已登录的供应商",
-            )
 
         val provider = engine.registry.get(route.providerId)
             ?: return errorResponse(404, "provider_not_found", "未知供应商 ${route.providerId}")
@@ -453,6 +496,25 @@ class GatewayHttpServer(
         } finally {
             runCatching { call.close() }
         }
+    }
+
+    /**
+     * 无 model 的透传端点（如 /v1/models、语音转写）怎么选供应商：
+     * 取第一个「声明支持该端点 + 有可用账号」的供应商。
+     *
+     * 不用「随便挑一个」是因为内置供应商大多没实现 passthrough；
+     * 而自定义供应商声明了全集，所以实际几乎总是落到自定义供应商上。
+     */
+    private fun pickPassthroughRoute(endpoint: io.synapse.core.provider.ApiEndpoint): Route? {
+        for (provider in engine.registry.all()) {
+            if (provider.passthroughPaths.none { path ->
+                    endpoint.allPaths.any { it.equals(path, ignoreCase = true) }
+                }
+            ) continue
+            if (engine.pool.size(provider.id) <= 0) continue
+            return Route(provider.id, "", null)
+        }
+        return null
     }
 
     private fun chatCompletions(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
@@ -1032,32 +1094,7 @@ class GatewayHttpServer(
                         // 关键在「解封后」：冷却期内的失败不该累计，那只是同一个问题在重复报。
                         // 所以只在**本次并非冷却命中**且该模型当前未被禁用时计数；
                         // 已经处于禁用中的候选在更早的分支就跳过了，不会走到这里。
-                        val banMs = failoverCfg.modelBanHours.toLong() * 60 * 60 * 1000
-                        val justBanned = engine.modelBansOf().recordFailure(
-                            providerId = currentRoute.providerId,
-                            model = resolvedModel,
-                            threshold = failoverCfg.modelBanThreshold,
-                            banDurationMs = banMs,
-                        )
-                        if (justBanned) {
-                            val hours = failoverCfg.modelBanHours
-                            val label = routeLabelOf(currentRoute.providerId, currentRoute.region)
-                            log("模型 [$resolvedModel] 在 [$providerId] 解封后当天连续失败达阈值，禁用 ${hours}h")
-                            // 强提醒：横幅 + 常驻通知（一次性，不带去重键）
-                            engine.quotaAlerts.emit(
-                                QuotaAlert(
-                                    label,
-                                    "全部账号",
-                                    requestedModel,
-                                    "该模型今天反复失败，已自动禁用 ${hours} 小时。" +
-                                        "禁用期间会直接改走其它候选模型，${hours} 小时后自动恢复。",
-                                ),
-                                QuotaAlert.Level.MODEL_UNAVAILABLE,
-                            )
-                            // 横幅+常驻通知（上面 quotaAlerts）已经是强提醒，
-                            // 这里不再叠一条同类 Toast，避免同一件事两种提醒一前一后重复。
-                            // 后续命中禁用模型时的 BANNED_FAILOVER 吐司仍保留（那是新动作）。
-                        }
+                        recordModelLimitFailure(currentRoute.providerId, resolvedModel, failoverCfg)
                         // 撞墙的这个号立刻记该模型冷却：选号时会自动跳过它，
                         // 「换号继续」才有依据（否则每轮都会重新挑到同一个号）。
                         val cooldownMs = failoverCfg.modelCooldown.cooldownMs
@@ -1167,30 +1204,6 @@ class GatewayHttpServer(
                         return errorResponse(mappedAbort.status, mappedAbort.code, error.message)
                     }
 
-                    // 与流内 MODEL_LIMIT 同一套禁用判定：HTTP 层返回的模型级限流也计入
-                    // 「解封后当天连续失败」，否则只走流内错误的供应商永远禁不掉。
-                    if (error.kind == ErrorKind.MODEL_LIMIT) {
-                        val banMs = failoverCfg.modelBanHours.toLong() * 60 * 60 * 1000
-                        val justBanned = engine.modelBansOf().recordFailure(
-                            providerId = currentRoute.providerId,
-                            model = resolvedModel,
-                            threshold = failoverCfg.modelBanThreshold,
-                            banDurationMs = banMs,
-                        )
-                        if (justBanned) {
-                            val hours = failoverCfg.modelBanHours
-                            val label = routeLabelOf(currentRoute.providerId, currentRoute.region)
-                            engine.quotaAlerts.emit(
-                                QuotaAlert(
-                                    label, "全部账号", requestedModel,
-                                    "该模型今天反复失败，已自动禁用 ${hours} 小时，期间自动改走其它候选模型。",
-                                ),
-                                QuotaAlert.Level.MODEL_UNAVAILABLE,
-                            )
-                            // 同上：触发点只走横幅+常驻通知，不叠吐司
-                        }
-                    }
-
                     if (error.kind == ErrorKind.SESSION_DEAD || decision == io.synapse.core.failover.FailoverDecision.SWITCH_NEXT_PROVIDER) {
                         if (error.kind == ErrorKind.SESSION_DEAD) {
                             engine.pool.disable(currentRoute.providerId, account.uid, error.message)
@@ -1229,6 +1242,12 @@ class GatewayHttpServer(
                         }
                         val waitSec = (cooldownMs / 1000).coerceAtLeast(1)
                         log("模型级不可用（已试完同家账号），各号均已冷却 $cooldownMs ms（${currentRoute.providerId}/$resolvedModel）：${error.message}")
+                        // 「解封后当天连续失败 N 次 → 禁用」的**唯一**HTTP 计数点。
+                        // 以前在 HTTP 错误分支入口提前计一次、这里又走到同一分支，
+                        // 一次 429 会累加 2 次，默认阈值 3 实际 2 次就禁用了。
+                        // 现在只在「同家账号全试完、确认整体不可用」时计一次，
+                        // 与「先换号、实在不行才认输」的语义一致。
+                        recordModelLimitFailure(currentRoute.providerId, resolvedModel, failoverCfg)
                         engine.quotaAlerts.emit(
                             QuotaAlert(
                                 provider.displayName,
@@ -1491,8 +1510,11 @@ class GatewayHttpServer(
                 didFailover = attemptedAccountNames.size > 1,
                 routeRegion = routeRegion,
                 finalAccountRegion = finalAccountRegion,
-                modelBanned = engine.isModelBanned(primaryRoute.providerId, requestedModel) ||
-                    engine.isModelBanned(lastProviderId, lastResolvedModel),
+                // 禁用表用的 key 是「providerId | 上游模型名」（见 recordModelLimitFailure），
+                // 不能用 requestedModel（带标签，如 腾讯国内/qwen-max）——那个永远查不到，
+                // 日志卡片上的「禁用」标签会永远不显示。
+                modelBanned = engine.isModelBanned(lastProviderId, lastResolvedModel) ||
+                    engine.isModelBanned(primaryRoute.providerId, primaryRoute.model),
             )
         }
         return errorResponse(mappedFailure.status, mappedFailure.code, reason)
@@ -1959,11 +1981,29 @@ class GatewayHttpServer(
         return null
     }
 
-    /** 从一行 SSE 里取统计信息。纯旁路：解析失败返回 null 即可，转发已经先做完了。 */
+    /**
+     * 从一行 SSE 里取统计信息。纯旁路：解析失败返回 null 即可，转发已经先做完了。
+     *
+     * ## C3 性能
+     *
+     * 以前**每个 chunk**都做一次 `JsonParser.parseString`——长输出（几千个文本 chunk）
+     * 时这是每请求最重的 CPU 活，而绝大多数 chunk 只是一句 content，解析出来的
+     * JsonObject 里 99% 的字段都不需要。
+     *
+     * 现在分两级：
+     * 1. 纯文本 chunk（不含任何结构关键字）走 [parseTextOnlyChunk]，只做一次
+     *    `indexOf("\"content\"")` 的字符串切片，完全不建 JsonObject；
+     * 2. 含 usage / points / error / tool_calls / images / reasoning_content 的帧才解析 JSON。
+     *
+     * 「纯文本」判定用 `structureMarker` 预检：只要 payload 里没有这些关键字，
+     * 就说明这一帧不可能带 usage/积分/错误/工具调用，跳过解析是安全的。
+     */
     private fun parseChunk(line: String): ChunkInfo? {
         if (!line.startsWith("data:")) return null
         val payload = line.removePrefix("data:").trim()
         if (payload.isEmpty() || payload == "[DONE]") return null
+        val needsStructure = STRUCTURE_MARKERS.any { payload.contains(it) }
+        if (!needsStructure) return parseTextOnlyChunk(payload)
         val obj = JsonParser.parseString(payload).takeIf { it.isJsonObject }?.asJsonObject ?: return null
         val delta = obj.arrayOrNull("choices")?.firstOrNull()?.asObjectOrNull()?.objOrNull("delta")
         val usage = obj.objOrNull("usage")
@@ -1991,6 +2031,68 @@ class GatewayHttpServer(
         val content: String,
         val hasPayload: Boolean,
         val pointsConsumed: Long,
+    )
+
+    /**
+     * 纯文本帧的轻量解析：不建 JsonObject，直接从 `"content":"..."` 里抠出文本。
+     *
+     * 转义处理交给 Gson 的 JsonPrimitive 解析单值（比解析整个对象便宜得多）；
+     * 解析不出来就返回 null，调用方按「没有内容」处理——转发早已完成，不影响客户端。
+     */
+    private fun parseTextOnlyChunk(payload: String): ChunkInfo? {
+        val key = "\"content\""
+        val at = payload.indexOf(key)
+        if (at < 0) return null
+        val colon = payload.indexOf(':', at + key.length)
+        if (colon < 0) return null
+        var i = colon + 1
+        while (i < payload.length && payload[i].isWhitespace()) i++
+        if (i >= payload.length || payload[i] != '"') return null
+        val sb = StringBuilder()
+        i++
+        while (i < payload.length) {
+            val ch = payload[i]
+            if (ch == '\\' && i + 1 < payload.length) {
+                val next = payload[i + 1]
+                when (next) {
+                    'n' -> sb.append('\n')
+                    'r' -> sb.append('\r')
+                    't' -> sb.append('\t')
+                    '"' -> sb.append('"')
+                    '\\' -> sb.append('\\')
+                    'u' -> {
+                        // 极少见的 unicode 转义：交给 Gson 解这一段，避免自己实现 \uXXXX
+                        if (i + 5 < payload.length) {
+                            val hex = payload.substring(i + 2, i + 6)
+                            hex.toIntOrNull(16)?.let { sb.append(it.toChar()) }
+                            i += 6
+                            continue
+                        }
+                    }
+                    else -> sb.append(next)
+                }
+                i += 2
+                continue
+            }
+            if (ch == '"') break
+            sb.append(ch)
+            i++
+        }
+        val text = sb.toString()
+        if (text.isEmpty()) return null
+        return ChunkInfo(
+            usage = null,
+            error = null,
+            content = text,
+            hasPayload = true,
+            pointsConsumed = 0L,
+        )
+    }
+
+    /** 出现这些关键字的帧才需要完整 JSON 解析。 */
+    private val STRUCTURE_MARKERS = listOf(
+        "\"usage\"", "\"points", "\"error\"", "\"tool_calls\"",
+        "\"images\"", "\"reasoning_content\"", "\"finish_reason\"",
     )
 
     /**

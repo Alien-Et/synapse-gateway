@@ -609,7 +609,7 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
                         label = "todayRequests",
                     ) { reqCount ->
                         Text(
-                            text = if (reqCount > 0) formatCount(reqCount) else "—",
+                            text = if (reqCount > 0) formatGroupedCount(reqCount) else "—",
                             style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
                             fontWeight = FontWeight.Bold,
                             color = if (reqCount > 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2270,7 +2270,7 @@ private fun ModelsTile(state: AppUiState, modifier: Modifier) {
 @Composable
 private fun RequestsTile(state: AppUiState, modifier: Modifier) {
     Tile(modifier, "今日请求 · REQUESTS") {
-        BigNumber(formatCount(state.today.requests))
+        BigNumber(formatGroupedCount(state.today.requests))
         // 增长需要真实昨日数据：daily 末尾是今天，倒数第二个才是昨天。
         val yesterday = if (state.daily.size >= 2) state.daily[state.daily.size - 2] else null
         if (yesterday != null && yesterday.requests > 0) {
@@ -2364,7 +2364,7 @@ private fun CreditSummaryTwo(report: CreditReport, goldText: Color, state: AppUi
             modifier = Modifier.weight(1f),
         )
         BigNumber(
-            value = formatCount(report.pointsBalance),
+            value = formatGroupedCount(report.pointsBalance),
             suffix = "积分",
             color = goldText,
             modifier = Modifier.weight(1f),
@@ -2383,7 +2383,7 @@ private fun CreditSummaryTwo(report: CreditReport, goldText: Color, state: AppUi
 private fun CreditSummaryOne(report: CreditReport, goldText: Color) {
     val isToken = report.tokensBalance > 0
     BigNumber(
-        value = if (isToken) formatTokens(report.tokensBalance) else formatCount(report.pointsBalance),
+        value = if (isToken) formatTokens(report.tokensBalance) else formatGroupedCount(report.pointsBalance),
         suffix = if (isToken) "token" else "积分",
         color = goldText,
     )

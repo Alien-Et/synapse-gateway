@@ -190,7 +190,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** 主 Tab 的顺序；图标与文案由 [TelegramNavItems] 统一提供，这里只管顺序与路由。 */
+/** 主 Tab 的顺序；图标与文案由 [AppNavItems] 统一提供，这里只管顺序与路由。 */
 private enum class Tab(val label: String) {
     Home("首页"),
     Providers("供应商"),

@@ -9,6 +9,17 @@ import java.io.File
 interface KeyValueStore {
     fun read(key: String): String?
     fun write(key: String, value: String)
+
+    /**
+     * 一次事务写多个键。
+     *
+     * 默认逐条写（兼容所有实现）；加密存储可覆盖成一个 `commit()` 批量提交，
+     * 避免「一笔调用记录要连续 4~5 次同步写盘」——那是高频请求下最明显的 I/O 放大点。
+     */
+    fun writeBatch(entries: Map<String, String>) {
+        for ((key, value) in entries) write(key, value)
+    }
+
     fun delete(key: String)
     /** 返回该前缀下的全部键。 */
     fun keys(prefix: String): List<String>

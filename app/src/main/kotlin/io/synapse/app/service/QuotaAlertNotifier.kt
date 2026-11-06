@@ -40,8 +40,15 @@ object QuotaAlertNotifier {
 
     const val CHANNEL_ID = "aigw_quota"
 
-    /** 同一账号的重复告警在这么短时间内只提醒一次，避免一批请求连发时连续震动。 */
-    private const val DEDUP_WINDOW_MS = 30_000L
+    /**
+     * 同类告警去重窗口。
+     *
+     * 以前这里是 30s、[io.synapse.core.gateway.NoticeEvents] 是 120s，
+     * 两套口径不一致会出现「横幅静默了但 Toast 还在弹」。现在统一引用同一个常量，
+     * 排查「为什么没提醒」只需看一处。
+     */
+    private val DEDUP_WINDOW_MS get() =
+        io.synapse.core.gateway.NoticeEvents.DEDUP_WINDOW_MS
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
