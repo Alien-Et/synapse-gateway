@@ -76,6 +76,7 @@ import io.synapse.app.ui.ProviderDetailScreen
 import io.synapse.app.ui.ProviderListScreen
 import io.synapse.app.ui.ProviderCreditsScreen
 import io.synapse.app.ui.ProxyScreen
+import io.synapse.app.ui.AutoCheckinScreen
 import io.synapse.app.ui.ResilienceScreen
 import io.synapse.app.ui.SecurityProtectionScreen
 import io.synapse.app.ui.SubPage
@@ -341,6 +342,7 @@ private fun AppRoot(viewModel: AppViewModel, state: AppUiState) {
                 SubPage.Resilience -> ResilienceScreen(state, viewModel) { subPage = null }
                 SubPage.AppearanceTheme -> AppearanceThemeScreen(state, viewModel) { subPage = null }
                 SubPage.AccountTransfer -> AccountTransferScreen(state, viewModel) { subPage = null }
+                SubPage.AutoCheckin -> AutoCheckinScreen(state, viewModel) { subPage = null }
                 null -> MainTabs(
                     viewModel = viewModel,
                     state = state,

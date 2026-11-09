@@ -19,6 +19,7 @@
 | [13](13.排查方法.md) | 怎么拿原始响应、常见故障怎么查 | — |
 | [14](14.总结.md) | 总结与改动守则 | — |
 | [15](15.模型目录与刷新.md) | 目录来源、流式加载、云端变更检测 | `gateway/GatewayEngine.kt`、`ui/ModelsScreen.kt` |
+| [16](16.自动签到.md) | 两条触发路径、时区与抖动、登录后检查、提醒方式 | `gateway/AutoCheckin*.kt`、`ui/AutoCheckinScreen.kt` |
 
 ## 其它文档
 

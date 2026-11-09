@@ -152,7 +152,14 @@ fun MeScreen(state: AppUiState, viewModel: AppViewModel, open: (SubPage) -> Unit
                 "账号导入导出 · ACCOUNTS BACKUP",
                 "按供应商与账号备份、迁移凭证",
                 "${state.pool.total} 个账号",
-            ) { open(SubPage.AccountTransfer) }        }
+            ) { open(SubPage.AccountTransfer) }
+            EditorialRow(
+                "02.10",
+                "自动签到 · AUTO CHECK-IN",
+                "当天首次启动 / 挂后台到点自动签到",
+                autoCheckinMeta(state),
+            ) { open(SubPage.AutoCheckin) }
+        }
 
         EditorialGroupHeader("03", "架构关于 · ABOUT THE ENGINE")
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -517,6 +524,21 @@ private fun GaugeLegend(label: String, tokens: Long, color: androidx.compose.ui.
  * 写成紧凑形式（不带空格）：这一行的标题是全页最长（「并发与容错 · RESILIENCE」），
  * 元信息再用「并发 单账号 1 / 全局 0」这种长文案会把英文标签挤到第二行。
  */
+/**
+ * 「我的」页上自动签到那一行的右侧摘要。
+ *
+ * 只报**当前会真的发生什么**，不报配置详情 —— 两个开关都没开时说「未启用」，
+ * 这样用户一眼就知道自己有没有打开过这个功能。
+ */
+private fun autoCheckinMeta(state: AppUiState): String {
+    val cfg = state.autoCheckin
+    val parts = buildList {
+        if (cfg.onLaunchEnabled) add("启动时")
+        if (cfg.scheduledEnabled) add(cfg.timeLabel())
+    }
+    return if (parts.isEmpty()) "未启用" else parts.joinToString(" + ")
+}
+
 private fun concurrencySummary(failover: io.synapse.core.failover.ModelFailoverSettings): String {
     val concurrency = failover.concurrency
     return when {
