@@ -88,17 +88,20 @@ fun TaskCenterScreen(
                     enabled = taskTargets.isNotEmpty(),
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("批量任务")
+                    Text("只接单领奖")
                 }
             }
-            // 自动完成：比「批量任务」更进一步——不只接单领奖，连任务进度一起推进。
+            // 两个任务按钮的差别只在「要不要替用户推进任务进度」：
+            // 上一个只接单 + 领奖；这个会按官方客户端行为把进度一起推进后再领奖。
+            // 刻意不合并成一个：推进进度的风控等级明显更高（要模拟真实对话埋点），
+            // 留一个「我只想领奖、别替我动」的低风险选项是有意为之。
             // 只有声明了 TASK_AUTO_COMPLETE 的供应商会进这条流程（目前是 WorkBuddy 成长中心）。
             OutlinedButton(
                 onClick = { viewModel.runAllTaskAutoComplete() },
                 enabled = autoTargets.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("自动完成任务")
+                Text("自动推进并领奖")
             }
             Button(onClick = { viewModel.refreshAllCredits() }, modifier = Modifier.fillMaxWidth()) {
                 Text("刷新全部额度")
@@ -112,13 +115,13 @@ fun TaskCenterScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "任务：" + taskTargets.describeTargets("没有支持批量任务的账号") +
+                text = "只接单领奖：" + taskTargets.describeTargets("没有支持批量任务的账号") +
                     "（新手任务、成长中心）",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "自动完成：" + autoTargets.describeTargets("没有支持自动完成的账号") +
+                text = "自动推进并领奖：" + autoTargets.describeTargets("没有支持自动完成的账号") +
                     "（会按官方客户端行为推进任务进度后再领奖）",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

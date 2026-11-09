@@ -36,6 +36,10 @@ class GatewayService : Service() {
         if (started) {
             engine.requestLog.info("前台服务已拉起，通知已发布")
             acquireLocks()
+            // 自动签到的定时排程跟着网关生命周期走：服务在跑才排，服务停了就撤。
+            // 复用共享 scheduler，不额外占线程（每天只醒一次）。
+            runCatching { engine.refreshAutoCheckinSchedule() }
+                .onFailure { engine.requestLog.warn("自动签到排程失败：${it.message}") }
             applyOverlay(engine)
             // 实时状态通知：仅在网关运行期间存在，跟随在途请求增删（onDestroy 一并注销）
             LiveStatusNotifier.setProviderLabelResolver { providerId ->
@@ -57,6 +61,8 @@ class GatewayService : Service() {
     }
 
     override fun onDestroy() {
+        // 服务都停了就不该还在后台签到
+        runCatching { applicationContext.gatewayEngine.stopAutoCheckinSchedule() }
         // 网关没跑就不该有「实时状态」通知
         LiveStatusNotifier.stop()
         FloatingKeepAlive.hide(this)

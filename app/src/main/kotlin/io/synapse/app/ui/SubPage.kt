@@ -38,4 +38,7 @@ sealed interface SubPage {
 
     /** 账号导入导出：备份与迁移（含明文凭证）。 */
     data object AccountTransfer : SubPage
+
+    /** 自动签到：当天首次启动与挂后台到点的自动签到（两个开关默认关）。 */
+    data object AutoCheckin : SubPage
 }

@@ -8,6 +8,7 @@ import io.synapse.core.pool.AccountStatus
 import io.synapse.core.pool.AccountTransfer
 import io.synapse.core.pool.PoolSummary
 import io.synapse.core.provider.ACTION_CHECKIN
+import io.synapse.core.provider.ACTION_COMPLETE_TASKS
 import io.synapse.core.provider.AuthKind
 import io.synapse.core.provider.CreditInfo
 import io.synapse.core.provider.DeviceAuthPoll
@@ -269,6 +270,23 @@ class GatewayEngine(
     @Volatile
     private var securitySettings: io.synapse.core.security.SecuritySettings =
         io.synapse.core.security.SecuritySettings.fromJson(store.read(io.synapse.core.security.SecuritySettings.STORE_KEY))
+
+    @Volatile
+    private var autoCheckinSettings: AutoCheckinSettings =
+        AutoCheckinSettings.fromJson(store.read(AutoCheckinSettings.STORE_KEY).orEmpty())
+
+    /**
+     * 自动签到的当天去重锁。
+     *
+     * 「先落盘再执行」是这套逻辑的核心：`store.write` 在 App 端是**同步**的
+     * （加密存储必须同步，见 EncryptedKeyValueStore 的说明），所以一旦落盘，
+     * 当天就被标记为已跑，并发的两个入口（启动 + 定时）里只会有一个真的执行。
+     */
+    private val autoCheckinLock = Any()
+
+    /** 已排程的定时签到任务；改设置或服务停止时取消它。 */
+    @Volatile
+    private var autoCheckinTimer: java.util.concurrent.ScheduledFuture<*>? = null
 
     @Volatile
     private var settings: GatewaySettings = settingsRepository.load()
@@ -1684,6 +1702,7 @@ class GatewayEngine(
         log("$verb 成功：${pool.displayNameOf(account.providerId, account.uid)}（$providerId）")
         onAccountsChanged?.invoke()
         claimDesktopLoginRewardSoon(providerId, account.uid)
+        checkNewAccountDailyStateSoon(providerId, account.uid)
         return LoginOutcome(LoginState.SUCCESS, account.uid, account.nickname)
     }
 
@@ -1707,6 +1726,192 @@ class GatewayEngine(
                     }
                 }
                 .onFailure { logWarn("桌面端登录奖励自动领取异常（$nickname）：${it.message}") }
+        }
+    }
+
+    // ------------------------------------------------------------------ 自动签到
+
+    /**
+     * 当天自动签到的去重键（**本地日期** `yyyy-MM-dd`）。
+     *
+     * 必须落盘：只放内存的话，用户重启一次 App 就重新签一遍，
+     * 「当天只跑一次」这条约束等于不存在。
+     *
+     * 用本地日期而不是 UTC 天数，理由见 [AutoCheckinPlan] 的类注释
+     * （东八区 00:05 签到，UTC 那边还没翻篇）。
+     */
+    private fun autoCheckinLastDay(): String = store.read(AUTO_CHECKIN_LAST_DAY_KEY).orEmpty()
+
+    fun autoCheckinSettings(): AutoCheckinSettings = autoCheckinSettings
+
+    fun updateAutoCheckinSettings(updated: AutoCheckinSettings) {
+        autoCheckinSettings = updated
+        store.write(AutoCheckinSettings.STORE_KEY, updated.toJson().toString())
+        log(
+            "自动签到设置已更新（启动时=${if (updated.onLaunchEnabled) "开" else "关"}，" +
+                "定时=${if (updated.scheduledEnabled) "开 ${updated.timeLabel()}" else "关"}" +
+                "，抖动=${updated.jitterMinutes} 分钟，" +
+                "登录后自动做任务=${if (updated.autoCompleteTasksOnLogin) "开" else "关"}）",
+        )
+        refreshAutoCheckinSchedule()
+    }
+
+    /**
+     * 重排定时签到（幂等：先取消旧的，再按当前设置排下一个目标时刻）。
+     *
+     * 三个调用时机：设置被改、定时触发后重排下一天、网关服务启停。
+     *
+     * 复用共享 [scheduler]，不另起线程池 —— 这只是一个每天醒一次的任务。
+     */
+    fun refreshAutoCheckinSchedule() {
+        autoCheckinTimer?.cancel(false)
+        autoCheckinTimer = null
+        val cfg = autoCheckinSettings
+        if (!cfg.scheduledEnabled) return
+        val delay = AutoCheckinPlan.millisUntilNextTarget(
+            nowMillis(), cfg.scheduledMinuteOfDay, cfg.jitterMinutes,
+        )
+        autoCheckinTimer = scheduler.schedule(
+            {
+                // 无论成败都重排下一天：失败后不再排 = 从此再也不签到；
+                // 「失败立刻重试」则可能变成打上游的死循环，两者都不可取。
+                runCatching { runAutoCheckin("定时") }
+                runCatching { refreshAutoCheckinSchedule() }
+            },
+            delay,
+            TimeUnit.MILLISECONDS,
+        )
+        log("自动签到已排程：${(delay + 59_999) / 60_000} 分钟后（每天 ${cfg.timeLabel()}，抖动 ${cfg.jitterMinutes} 分钟）")
+    }
+
+    /** 取消排程（网关服务停止时调，避免服务都停了还在后台签到）。 */
+    fun stopAutoCheckinSchedule() {
+        autoCheckinTimer?.cancel(false)
+        autoCheckinTimer = null
+    }
+
+    /**
+     * 「当天第一次打开 App」这条路径的入口。
+     *
+     * 只在开关打开时才跑；「今天已经跑过」由 [runAutoCheckin] 统一判断，
+     * 所以它和定时那条路径天然不会重复（两条路共用一个日期键）。
+     */
+    fun maybeRunAutoCheckinOnLaunch(): Boolean {
+        if (!autoCheckinSettings.onLaunchEnabled) return false
+        return runCatching { runAutoCheckin("启动") }.getOrDefault(false)
+    }
+
+    /**
+     * 跑一次自动签到（两条触发路径共用）。
+     *
+     * 先落盘再执行：落盘那一刻起今天就算跑过了，重入与并发都会被挡住。
+     *
+     * @return true 表示这次真的执行了；false 表示今天已跑过、或不值得跑（没有目标）。
+     */
+    private fun runAutoCheckin(trigger: String): Boolean {
+        val today = AutoCheckinPlan.localDate(nowMillis())
+        synchronized(autoCheckinLock) {
+            if (autoCheckinLastDay() == today) return false
+            store.write(AUTO_CHECKIN_LAST_DAY_KEY, today)
+        }
+        val targets = autoCheckinTargets()
+        if (targets.isEmpty()) {
+            log("自动签到（$trigger）：没有支持签到的可用账号，跳过")
+            return false
+        }
+        log("自动签到（$trigger）开始：${targets.size} 个账号")
+        // performActionAll 会在动作成功后统一补刷一次额度 —— 正好满足「签到完刷新额度」，
+        // 不需要再单独打一轮刷新接口。
+        val results = runCatching { performActionAll(targets, ACTION_CHECKIN) }
+            .getOrElse { e ->
+                logWarn("自动签到（$trigger）异常：${e.message}")
+                return false
+            }
+        val ok = results.count { it.ok }
+        val failed = results.filterNot { it.ok }
+        if (failed.isEmpty()) {
+            log("自动签到（$trigger）完成：$ok/${results.size} 个账号成功，额度已刷新")
+            noticeEvents.emit(NoticeKind.INFO, "自动签到完成：$ok 个账号，额度已刷新", "auto-checkin|done")
+        } else {
+            val detail = failed.joinToString("；") { "${it.nickname}：${it.message}" }
+            logWarn("自动签到（$trigger）部分失败：成功 $ok、失败 ${failed.size} —— $detail")
+            noticeEvents.emit(
+                NoticeKind.INFO,
+                "自动签到：成功 $ok、失败 ${failed.size}（$detail）",
+                "auto-checkin|partial",
+            )
+        }
+        return true
+    }
+
+    /**
+     * 自动签到的目标。
+     *
+     * 三道过滤缺一不可：
+     * 1. 供应商**声明了签到能力**（不然打过去只会拿到「不支持」）；
+     * 2. 账号 `usable`（未被手动停用、凭证未失效）—— 用户手动停用的号必须排除，
+     *    绕过去替他签到等于把他的开关当摆设；
+     * 3. `supportsAction`（区域/企业账号本就没有签到入口，选目标时就该排掉）。
+     */
+    private fun autoCheckinTargets(): List<BatchTarget> =
+        registry.all()
+            .filter { ProviderCapability.CHECKIN in it.capabilities }
+            .flatMap { provider ->
+                pool.statuses(provider.id)
+                    .filter { it.usable }
+                    .filter { supportsAction(provider.id, it.uid, ACTION_CHECKIN) }
+                    .map { BatchTarget(provider.id, it.uid) }
+            }
+
+    /**
+     * 新账号加入后检查它当天的签到与任务状态。
+     *
+     * 与 [claimDesktopLoginRewardSoon] 同一纪律：**异步执行、失败只记日志**，
+     * 绝不因为「自动检查」失败而让登录本身报错。
+     *
+     * 做三件事：
+     * 1. **签到**：直接打一次（上游的签到接口是幂等的，它自己会说「今日已签到」）；
+     * 2. **任务**：只**读**一遍，有没做完的就提示用户 —— 不自动做；
+     * 3. **自动做任务**：只有设置里那个开关打开、且供应商支持时才做，默认关。
+     *
+     * 第 2/3 步分开是刻意的：自动做任务要模拟真实对话埋点，风控等级比签到高一个量级
+     * （见 docs/08「成长任务的风控」），所以默认只提示。
+     */
+    private fun checkNewAccountDailyStateSoon(providerId: String, uid: String) {
+        ioPool.execute {
+            val nickname = pool.displayNameOf(providerId, uid)
+            val provider = registry.get(providerId) ?: return@execute
+            val caps = provider.capabilities
+
+            if (ProviderCapability.CHECKIN in caps && supportsAction(providerId, uid, ACTION_CHECKIN)) {
+                runCatching { performAction(providerId, uid, ACTION_CHECKIN) }
+                    .onSuccess { result ->
+                        if (result.ok) log("登录后自动签到（$nickname）：${result.message}")
+                        else logWarn("登录后自动签到未成功（$nickname）：${result.message}")
+                    }
+                    .onFailure { logWarn("登录后自动签到异常（$nickname）：${it.message}") }
+            }
+
+            if (ProviderCapability.TASKS !in caps) return@execute
+            val view = runCatching { taskList(providerId, uid) }.getOrNull() ?: return@execute
+            // locked 的做不了，completed 的不用做
+            val pending = view.tasks.count { !it.completed && !it.locked }
+            if (pending <= 0) return@execute
+
+            val canAutoComplete = autoCheckinSettings.autoCompleteTasksOnLogin &&
+                ProviderCapability.TASK_AUTO_COMPLETE in caps
+            if (canAutoComplete) {
+                runCatching { performAction(providerId, uid, ACTION_COMPLETE_TASKS) }
+                    .onSuccess { log("登录后自动完成任务（$nickname）：${it.message}") }
+                    .onFailure { logWarn("登录后自动完成任务异常（$nickname）：${it.message}") }
+            } else {
+                log("登录后检查任务（$nickname）：还有 $pending 个未完成，已提示用户")
+                noticeEvents.emit(
+                    NoticeKind.INFO,
+                    "$nickname 还有 $pending 个任务没做，可去「任务中心」一键处理",
+                    "tasks-pending|$providerId|$uid",
+                )
+            }
         }
     }
 
@@ -2542,6 +2747,14 @@ class GatewayEngine(
         private const val REGIONAL_FETCH_WAIT_MS = 16_000L
 
         const val CUSTOM_PREFIX = "custom:"
+
+        /**
+         * 当天自动签到的去重日期（本地日期字符串）。
+         *
+         * 存在设置域而不是账号池域：它是「这台设备今天跑过没」，
+         * 与具体某个账号的状态无关。
+         */
+        private const val AUTO_CHECKIN_LAST_DAY_KEY = "auto/checkin_last_day"
 
         /** 自动补刷额度的同账号最小间隔：对话连发时不打爆上游积分接口。 */
         private const val AUTO_CREDIT_REFRESH_MIN_INTERVAL_MS = 10_000L

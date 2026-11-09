@@ -34,6 +34,7 @@ import io.synapse.core.gateway.GatewayEngine
 import io.synapse.core.failover.withCandidateToggled
 import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.gateway.LoginOutcome
+import io.synapse.core.gateway.AutoCheckinSettings
 import io.synapse.core.gateway.ModelCatalogChanges
 import io.synapse.core.gateway.ModelExposureSettings
 import io.synapse.core.gateway.ModelsCatalog
@@ -352,6 +353,8 @@ data class AppUiState(
     val modelExposure: io.synapse.core.gateway.ModelExposureSettings = io.synapse.core.gateway.ModelExposureSettings(),
     /** 故障转移与并发配置。 */
     val failover: io.synapse.core.failover.ModelFailoverSettings = io.synapse.core.failover.ModelFailoverSettings(),
+    /** 自动签到偏好（两个触发开关默认都关）。 */
+    val autoCheckin: AutoCheckinSettings = AutoCheckinSettings(),
     /** 出网取证记录列表。 */
     val evidences: List<io.synapse.core.security.OutboundEvidence> = emptyList(),
     val busy: String = "",
@@ -400,6 +403,7 @@ private class Snapshot(
     val evidences: List<io.synapse.core.security.OutboundEvidence>,
     val modelExposure: io.synapse.core.gateway.ModelExposureSettings,
     val failover: io.synapse.core.failover.ModelFailoverSettings,
+    val autoCheckin: AutoCheckinSettings,
     val overlayKeepAlive: Boolean,
     val liveNotification: Boolean,
 )
@@ -557,6 +561,7 @@ class AppViewModel(
                     evidences = engine.sanitizer.evidenceList(),
                     modelExposure = engine.modelExposureSettings(),
                     failover = engine.failoverSettings(),
+                    autoCheckin = engine.autoCheckinSettings(),
                     overlayKeepAlive = io.synapse.app.data.KeepAlivePrefs.overlayEnabled(engine.store()),
                     liveNotification = io.synapse.app.data.KeepAlivePrefs.liveNotificationEnabled(engine.store()),
                 )
@@ -592,6 +597,10 @@ class AppViewModel(
                 evidences = snapshot.evidences,
                 modelExposure = snapshot.modelExposure,
                 failover = snapshot.failover,
+                // ⚠️ 少一行就是「界面永远看不到这次改动」：copy() 有默认值，漏字段编译不报错，
+                // 表现是「开关点了没反应、时间改不了」（引擎其实已经写进去了）。
+                // 新增 AppUiState 字段时必须同时改四处：AppUiState、Snapshot、Snapshot(调用)、这里。
+                autoCheckin = snapshot.autoCheckin,
                 overlayKeepAlive = snapshot.overlayKeepAlive,
                 liveNotification = snapshot.liveNotification,
             )
@@ -860,6 +869,54 @@ class AppViewModel(
     fun updateFailoverSettings(updated: io.synapse.core.failover.ModelFailoverSettings) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { engine.updateFailoverSettings(updated) }
+            refresh()
+        }
+    }
+
+    /**
+     * 整块替换自动签到偏好。
+     *
+     * ⚠️ 界面**不要**用这个：它要求调用方自己基于最新值构造。界面里 `state.autoCheckin`
+     * 是上一次 refresh 的快照，连续快速切换两个开关时，第二次会拿着旧快照把第一次的改动
+     * 覆盖掉（真机上实测过：先开「启动时」再开「定时」，前者被回滚成关）。
+     * 界面请用下面的单字段方法。
+     */
+    fun updateAutoCheckinSettings(updated: AutoCheckinSettings) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { engine.updateAutoCheckinSettings(updated) }
+            refresh()
+        }
+    }
+
+    fun setAutoCheckinOnLaunch(enabled: Boolean) =
+        mutateAutoCheckin { it.copy(onLaunchEnabled = enabled) }
+
+    fun setAutoCheckinScheduled(enabled: Boolean) =
+        mutateAutoCheckin { it.copy(scheduledEnabled = enabled) }
+
+    /** 修改定时时刻与抖动窗口（一起改，避免两次写入各改一半）。 */
+    fun setAutoCheckinSchedule(hour: Int, minute: Int, jitterMinutes: Int) =
+        mutateAutoCheckin {
+            it.copy(
+                scheduledMinuteOfDay = hour.coerceIn(0, 23) * 60 + minute.coerceIn(0, 59),
+                jitterMinutes = jitterMinutes.coerceIn(0, AutoCheckinSettings.MAX_JITTER_MINUTES),
+            )
+        }
+
+    fun setAutoCheckinAutoTasks(enabled: Boolean) =
+        mutateAutoCheckin { it.copy(autoCompleteTasksOnLogin = enabled) }
+
+    /**
+     * 合并式更新：**在写入那一刻**从引擎读当前值再做变换。
+     *
+     * 这样无论界面 state 是否已经刷新，都不会用旧快照覆盖别人的改动 ——
+     * 单字段开关之间的竞态从根上消失。
+     */
+    private fun mutateAutoCheckin(transform: (AutoCheckinSettings) -> AutoCheckinSettings) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                engine.updateAutoCheckinSettings(transform(engine.autoCheckinSettings()))
+            }
             refresh()
         }
     }
@@ -2176,6 +2233,13 @@ class AppViewModel(
      * 单纯切前台不会误刷。
      */
     fun onAppForeground() {
+        // 当天第一次打开 App：跑一次自动签到。
+        // 开关关着时引擎直接返回 false；「今天已经跑过」也由引擎统一判断，
+        // 所以这里可以放心每次 onResume 都调（实际执行在 IO 线程，不卡主线程）。
+        viewModelScope.launch {
+            val ran = withContext(Dispatchers.IO) { engine.maybeRunAutoCheckinOnLaunch() }
+            if (ran) refresh()
+        }
         val pending = pendingVerification ?: return
         pendingVerification = null
         refreshCredits(pending.first, pending.second)
