@@ -73,12 +73,9 @@ class SmartRoutingTest {
         assertEquals("gemini-2.5-flash", engine.resolveRoute("谷歌/gemini-2.5-flash")?.model)
         assertEquals("antigravity", engine.resolveRoute("谷歌/claude-sonnet-4-6")?.providerId)
 
-        // 英文前缀不再被识别为供应商前缀（只认中文）
-        val english = engine.resolveRoute("google/gemini-2.5-flash")
-        assertTrue(
-            english == null || english.model != "gemini-2.5-flash" || english.providerId != "antigravity",
-            "英文前缀不应再被解析：$english",
-        )
+        // 英文别名同样可用（需求：中文为准，也可以用英文）
+        assertEquals("antigravity", engine.resolveRoute("google/gemini-2.5-flash")?.providerId)
+        assertEquals("gemini-2.5-flash", engine.resolveRoute("antigravity/gemini-2.5-flash")?.model)
     }
 
     @Test
@@ -182,7 +179,7 @@ class SmartRoutingTest {
     }
 
     @Test
-    fun `只认中文前缀`() {
+    fun `中英标签都认且英文可作别名`() {
         val engine = GatewayEngine(InMemoryKeyValueStore())
         engine.registry.register(DummyProvider("codebuddy"))
         engine.registry.register(DummyProvider("trae"))
@@ -230,14 +227,36 @@ class SmartRoutingTest {
             )
         }
 
-        // 英文前缀不再被当作供应商前缀：整串会按"无前缀"处理，
-        // 前缀部分不会被剥掉（避免出现「英文也偷偷能用」的两套写法）。
-        // 这里断言的是「没有被识别成 codebuddy 前缀」，即 model 保留完整串。
-        val english = engine.resolveRoute("codebuddy/glm-5.2")
-        assertTrue(
-            english == null || english.model != "glm-5.2" || english.providerId != "codebuddy",
-            "英文前缀不应再被解析为供应商前缀：$english",
-        )
+        // 英文前缀现在是**合法别名**（需求：中文为准，也可以用英文）。
+        // 区域型供应商的英文别名必须带区域：`codebuddy-cn` / `trae-global` 之类；
+        // 裸名 `codebuddy` / `trae` 仍拒绝（解析不出区域，等于替用户挑站）。
+        val englishCn = engine.resolveRoute("codebuddy-cn/glm-5.2")
+        assertEquals("codebuddy", englishCn?.providerId, "codebuddy-cn 应被识别")
+        assertEquals("glm-5.2", englishCn?.model)
+        assertEquals("cn", englishCn?.region, "英文区域后缀必须解析出区域")
+
+        val englishGlobal = engine.resolveRoute("trae-global/qwen-max")
+        assertEquals("trae", englishGlobal?.providerId, "trae-global 应被识别")
+        assertEquals("global", englishGlobal?.region)
+
+        // 非区域型供应商的英文别名不带区域
+        assertEquals("antigravity", engine.resolveRoute("antigravity/gemini-3.8")?.providerId)
+        assertEquals("antigravity", engine.resolveRoute("google/gemini-3.8")?.providerId)
+        assertEquals("loomy", engine.resolveRoute("iflytek/spark-4")?.providerId)
+        assertEquals("raccoon", engine.resolveRoute("sensetime/raccoon-chat")?.providerId)
+
+        // 大小写不敏感：客户端配置里最常见的差异
+        assertEquals("antigravity", engine.resolveRoute("AntiGravity/gemini-3.8")?.providerId)
+        assertEquals("codebuddy", engine.resolveRoute("CodeBuddy-CN/glm-5.2")?.providerId)
+
+        // 裸名仍拒绝：区域型供应商没有「默认站」，不猜
+        listOf("codebuddy/glm-5.2", "trae/qwen-max").forEach { bare ->
+            val r = engine.resolveRoute(bare)
+            assertTrue(
+                r == null || r.model != bare.substringAfter('/') || r.providerId != bare.substringBefore('/'),
+                "裸英文名不应被识别（解析不出区域）：$bare -> $r",
+            )
+        }
     }
 
 

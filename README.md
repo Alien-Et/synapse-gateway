@@ -16,7 +16,7 @@
 >
 > 本项目在其基础上重构了路由体系（标签路由：模型标签唯一绑定供应商）。感谢原作者的开源贡献。
 >
-> 改动代码前请先读 **[ARCHITECTURE.md](ARCHITECTURE.md)** 与 **[docs/](docs/README.md)**（按源码结构分类的 14 篇文档，末篇是总结）。
+> 改动代码前请先读 **[docs/](docs/README.md)**（按源码结构分类的 15 篇文档，末篇是总结）。**架构说明只有 docs 这一份**，不再维护第二份 ARCHITECTURE.md。
 
 ---
 
@@ -72,7 +72,10 @@
 | 供应商 | 接入方式 |
 |---|---|
 | 腾讯 / 字节 / 谷歌 / 商汤 | 网页登录，浏览器授权后自动回传凭证 |
+| ChatGPT | 浏览器 OAuth，回调到本机 1455 端口 |
+| Cline | 设备授权：浏览器打开授权页、输入授权码，网关自动取回凭证 |
 | 讯飞 | 「导入」粘贴 JSON 凭证 |
+| 灵犀 | 手机号 + 短信验证码（带滑块人机校验） |
 | 自定义 | 填 Base URL + API Key |
 
 ### 4. 配置客户端
@@ -141,18 +144,30 @@ curl http://127.0.0.1:8790/v1/models
 
 ### 标签表
 
-| 标签 | 供应商 | 区域 |
-|---|---|---|
-| `腾讯国内/` | 腾讯 | cn |
-| `腾讯国外/` | 腾讯 | global |
-| `字节国内/` | 字节 | cn |
-| `字节国外/` | 字节 | global |
-| `谷歌/` | 谷歌 | — |
-| `讯飞/` | 讯飞 | — |
-| `商汤/` | 商汤 | — |
-| `<自定义标签>/` | 自定义供应商 | — |
+| 标签（中文，正名） | 英文别名（同样可用） | 供应商 | 区域 |
+|---|---|---|---|
+| `腾讯国内/` | `codebuddy-cn/`、`workbuddy-cn/` | 腾讯 | cn |
+| `腾讯国外/` | `codebuddy-global/`、`workbuddy-global/` | 腾讯 | global |
+| `字节国内/` | `trae-cn/` | 字节 | cn |
+| `字节国外/` | `trae-global/` | 字节 | global |
+| `谷歌/` | `antigravity/`、`google/`、`gemini/` | 谷歌 | — |
+| `讯飞/` | `loomy/`、`iflytek/`、`spark/` | 讯飞 | — |
+| `商汤/` | `raccoon/`、`sensetime/` | 商汤 | — |
+| `灵犀/` | `mcloud/`、`lingxi/` | 灵犀 | — |
+| `ChatGPT/` | `chatgpt/`、`gpt/`、`openai/` | ChatGPT | — |
+| `Cline/` | `cline/` | Cline | — |
+| `<自定义标签>/` | — | 自定义供应商 | — |
 
-标签只认中文，不支持英文标签。腾讯、字节因为分国内外两个站点，标签必须带区域。
+**中文是正名，英文是别名，两种都能用。** 界面上、`/v1/models` 里只出中文 ——
+英文只作为**输入兼容**存在，所以不存在「同一家有两个官方名字」的困惑。
+
+英文别名**忽略大小写**（`ChatGPT` / `chatgpt` / `CHATGPT` 等价）。
+
+腾讯、字节因为分国内外两个站点，标签**必须带区域**：裸 `腾讯/`、`字节/`、`codebuddy/`、
+`trae/` 都解析不出区域，一律拒绝 —— 猜一个站等于替你做决定。
+
+Cline 的两个额度池（免费 / 订阅）挂在**同一个账号**上，不是区域，所以只有一个标签；
+池由模型 id 的前缀区分（见下文「内置供应商」）。
 
 ### 判定流程
 
@@ -303,9 +318,16 @@ resolveRoute(model)
 
 禁用成功后发横幅 + 常驻通知，只提醒一次；日志卡片上标红色「禁用」。
 
-### 中文标签的限制
+### 中文标签的限制（已内置英文别名）
 
-少数客户端会把 `model` 放进 HTTP 头（头只允许 ASCII），中文标签在这类客户端上会失败。解决办法：给那家建一个纯英文标签的自定义供应商，或换客户端。
+少数客户端会把 `model` 放进 HTTP 头（头只允许 ASCII），中文标签在这类客户端上会失败。
+**现在直接写英文别名即可**（见上面标签表第二列），不必再建一个纯英文标签的自定义供应商：
+
+```
+antigravity/gemini-3.8          →  谷歌/gemini-3.8
+codebuddy-cn/glm-5.2            →  腾讯国内/glm-5.2
+trae-global/qwen-max            →  字节国外/qwen-max
+```
 
 ---
 
@@ -318,14 +340,18 @@ resolveRoute(model)
 | `antigravity` | 谷歌 | `cloudcode-pa.googleapis.com` | Gemini 风格协议 |
 | `loomy` | 讯飞 | `xfinfr.com` | 鉴权失败返回 HTTP 200 + 业务码 |
 | `raccoon` | 商汤 | `xiaohuanxiong.com` | OpenAI 结构包在 `data` 里 |
+| `mcloud` | 灵犀 | 中国移动 AI 通道 | 滑块人机校验 |
+| `chatgpt` | ChatGPT | Codex 订阅后端 | Responses API，不是 Chat Completions |
+| `cline` | Cline | `api.cline.bot` | 免费池 / 订阅池共用一份凭证 |
 
 **各家的坑：**
 
 - **腾讯** — 强制流式；签到仅国内账号
 - **字节** — SOLO 私有通道；签到仅国内账号
-- **谷歌** — 凭证有铁律（不清空 access_token、不改写 refresh_token，见 ARCHITECTURE.md 第 5 节）；需人机验证时返回 403 `VALIDATION_REQUIRED`
+- **谷歌** — 凭证有铁律（不清空 access_token、不改写 refresh_token，见 [docs/08](docs/08.上游陷阱清单.md)）；需人机验证时返回 403 `VALIDATION_REQUIRED`
 - **讯飞** — 鉴权失败是 HTTP 200 + 业务码，不判业务码会把错误 JSON 当正常回复透传
 - **商汤** — 响应外层是 `{"status":..., "data":...}`；字段用标准名（不认 `max_new_tokens`）
+- **Cline** — 免费池靠 `X-CLIENT-TYPE: cline-sdk` 这道产品面校验（缺了 403、写成 `cline-cli` 会 500）；令牌带 `workos:` 前缀，去掉就 401；`cline-pass/` 要订阅，没订阅的账号会 403 `ENTITLEMENT_ERROR`
 
 ---
 
@@ -355,7 +381,7 @@ resolveRoute(model)
 |---|---|
 | 不能为空 | 空标签无法路由 |
 | 不能含斜杠或空白，≤ 32 字符 | 它本身就是 `标签/模型名` 的前半段 |
-| 不能与内置标签重名 | `腾讯国内`、`字节国外`、`谷歌` 等已被占用 |
+| 不能与内置标签重名 | `腾讯国内`、`字节国外`、`谷歌` 等已被占用（**英文别名也算占用**：`google`、`antigravity`、`trae-cn` 同样不能用） |
 | 不能与其它自定义供应商重名 | 一个标签只能绑定一家 |
 
 重名会被表单和核心层双重拦截 —— 否则标签会解析到内置供应商，配起来像是能通，实际必然失败。
@@ -709,7 +735,7 @@ base64 -w0 release.keystore > keystore.b64
 
 ## 贡献
 
-1. 改动前先读 [ARCHITECTURE.md](ARCHITECTURE.md)
+1. 改动前先读 [docs/](docs/README.md)（架构说明只有这一份）
 2. **新增供应商**三步：`core` 实现 `Provider` → `ProviderBootstrap` 登记 → `app` 实现并登记 `ProviderUi`，再在标签表加一条模型标签。账号池、换号重试、代理分流、日志、保活自动获得
 3. 保持 `:core:test` 全绿
 
