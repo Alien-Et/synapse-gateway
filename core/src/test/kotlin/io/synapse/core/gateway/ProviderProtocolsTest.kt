@@ -124,6 +124,73 @@ class ProviderProtocolsTest {
     }
 
     @Test
+    fun `Base URL 与协议路径重叠时不重复也不剥掉用户写的版本段`() {
+        assertEquals(
+            "https://x.com/v1/chat/completions",
+            ProviderProtocols.joinBaseAndPath("https://x.com/v1", "/v1/chat/completions"),
+        )
+        assertEquals(
+            "https://x.com/v1/chat/completions",
+            ProviderProtocols.joinBaseAndPath("https://x.com", "/v1/chat/completions"),
+        )
+        // 以前会剥掉 /v1 再贴 /chat/completions，中转站因此 404
+        assertEquals(
+            "https://relay.example/v1/chat/completions",
+            ProviderProtocols.joinBaseAndPath("https://relay.example/v1", "/chat/completions"),
+        )
+        assertEquals(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            ProviderProtocols.joinBaseAndPath(
+                "https://open.bigmodel.cn/api/paas/v4",
+                "/api/paas/v4/chat/completions",
+            ),
+        )
+        assertEquals(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            ProviderProtocols.joinBaseAndPath(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "/compatible-mode/v1/chat/completions",
+            ),
+        )
+        assertEquals(
+            "https://x.com/v1/chat/completions",
+            ProviderProtocols.joinBaseAndPath("https://x.com/v1/chat/completions", "/v1/chat/completions"),
+        )
+        assertEquals(
+            "https://x.com/v1/chat/completions",
+            ProviderProtocols.joinBaseAndPath("https://x.com/v1/models", "/v1/chat/completions"),
+        )
+        assertEquals(
+            "https://x.com/V1/chat/completions",
+            ProviderProtocols.joinBaseAndPath("https://x.com/V1/", "/v1/chat/completions"),
+        )
+    }
+
+    @Test
+    fun `接口不存在的 404 不当成没有这个模型`() {
+        val provider = io.synapse.core.provider.custom.CustomProvider(
+            io.synapse.core.gateway.CustomProviderConfig(
+                key = "site",
+                name = "site",
+                baseUrl = "https://relay.example/v1",
+                apiKeys = emptyList(),
+            ),
+        )
+        val endpoint = provider.classify(
+            404,
+            """{"error":{"message":"The requested endpoint was not found."}}""",
+        )
+        assertEquals(io.synapse.core.provider.ErrorKind.CLIENT, endpoint.kind)
+        assertTrue(endpoint.message.contains("接口"))
+
+        val model = provider.classify(
+            404,
+            """{"error":{"message":"The model `foo` does not exist"}}""",
+        )
+        assertEquals(io.synapse.core.provider.ErrorKind.NOT_FOUND, model.kind)
+    }
+
+    @Test
     fun `协议选择项 id 唯一`() {
         val ids = ProviderProtocols.choices().map { it.first }
         assertEquals(ids.size, ids.toSet().size, "下拉框里不能有重复 id")

@@ -159,6 +159,56 @@ object ProviderProtocols {
     fun of(id: String): ProviderProtocol =
         ALL.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: OPENAI
 
+    /**
+     * 把用户填的 Base URL 和协议路径拼成最终地址。
+     *
+     * 中转站和官方文档对 Base URL 的写法不统一，三种都要拼对，且**不能先把 `/v1` 剥掉**：
+     *
+     * - `https://x.com` + `/v1/chat/completions` → `https://x.com/v1/chat/completions`
+     * - `https://x.com/v1` + `/v1/chat/completions` → `https://x.com/v1/chat/completions`（重叠的 `/v1` 只留一次）
+     * - `https://x.com/v1` + `/chat/completions` → `https://x.com/v1/chat/completions`（用户写的版本段保留）
+     * - `https://open.bigmodel.cn/api/paas/v4` + `/api/paas/v4/chat/completions` → 不重复版本段
+     *
+     * 以前先 `removeSuffix("/v1")` 再贴协议路径：模型列表走的是不带协议的 `/v1/models`，能拉到；
+     * 对话却被拼到 `/chat/completions` 或 `/api/paas/v4/api/paas/v4/...`，上游回
+     * “The requested endpoint was not found”。模型 id 本身没问题，换到别的客户端就能用。
+     */
+    fun joinBaseAndPath(baseUrl: String, path: String): String {
+        var base = baseUrl.trim().trimEnd('/')
+        var normalized = path.trim()
+        if (normalized.isEmpty()) return base
+        if (!normalized.startsWith("/")) normalized = "/$normalized"
+        if (base.isEmpty()) return normalized
+        if (base.endsWith(normalized, ignoreCase = true)) return base
+        // 用户有时把完整端点粘进 Base URL（.../chat/completions、.../models）。先剥掉再按目标路径重拼。
+        val endpointTails = listOf(
+            "/chat/completions",
+            "/completions",
+            "/messages",
+            "/models",
+            ":streamGenerateContent",
+            ":generateContent",
+        )
+        for (tail in endpointTails) {
+            if (base.endsWith(tail, ignoreCase = true)) {
+                base = base.dropLast(tail.length).trimEnd('/')
+                break
+            }
+        }
+        if (base.endsWith(normalized, ignoreCase = true)) return base
+        val parts = normalized.trim('/').split('/').filter { it.isNotEmpty() }
+        var consumed = 0
+        for (k in parts.size downTo 1) {
+            val prefix = "/" + parts.take(k).joinToString("/")
+            if (base.endsWith(prefix, ignoreCase = true)) {
+                consumed = k
+                break
+            }
+        }
+        val rest = parts.drop(consumed)
+        return if (rest.isEmpty()) base else base + "/" + rest.joinToString("/")
+    }
+
     /** 给用户看的协议选项（id → 名字）。 */
     fun choices(): List<Pair<String, String>> = ALL.map { it.id to it.label }
 }

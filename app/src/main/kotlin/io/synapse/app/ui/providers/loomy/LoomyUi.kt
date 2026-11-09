@@ -201,11 +201,18 @@ object LoomyUi : ProviderUi {
                 Text("兑换码")
             }
 
-            OutlineActionButton("一键完成新手任务") {
-                actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
+            // 这家、这个账号的新手任务全部做完就整块收起；别的供应商、别的账号各看各的清单。
+            val taskView = actions.taskListOf(id, status.uid)
+            val tasksAllDone = taskView != null &&
+                taskView.error.isEmpty() &&
+                taskView.tasks.isNotEmpty() &&
+                taskView.tasks.all { it.completed }
+            if (!tasksAllDone) {
+                OutlineActionButton("一键完成新手任务") {
+                    actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
+                }
+                TaskListSection(status, actions)
             }
-
-            TaskListSection(status, actions)
         }
     }
 
@@ -252,14 +259,13 @@ object LoomyUi : ProviderUi {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             else -> {
-                val done = view.tasks.count { it.completed }
-                val earned = view.tasks.filter { it.completed }.sumOf { it.rewardCredit }
+                val pending = view.tasks.filter { !it.completed }
                 Text(
-                    text = "共 ${view.tasks.size} 个 · 已完成 $done 个 · 已得 $earned 积分",
+                    text = "还有 ${pending.size} 个未完成",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                view.tasks.forEach { task -> TaskRow(task, status.uid, actions) }
+                pending.forEach { task -> TaskRow(task, status.uid, actions) }
             }
         }
     }

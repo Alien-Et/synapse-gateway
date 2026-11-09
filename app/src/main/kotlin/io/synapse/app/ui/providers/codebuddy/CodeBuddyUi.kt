@@ -193,20 +193,28 @@ object CodeBuddyUi : ProviderUi {
                 }
                 // 国际版（workbuddy.ai）没有签到制度与成长中心，只给国内账号渲染这两个入口
                 if (actions.regionOf(id, status.uid) != CodeBuddyProvider.REGION_GLOBAL) {
+                    // 只看这个账号自己的任务。全部领完才收起任务区；签到跟任务无关，一直留着。
+                    val taskView = actions.taskListOf(id, status.uid)
+                    val tasksAllDone = taskView != null &&
+                        taskView.error.isEmpty() &&
+                        taskView.tasks.isNotEmpty() &&
+                        taskView.tasks.all { it.claimed }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ChoiceChip("签到", false) {
                             actions.onAction(id, status.uid, ACTION_CHECKIN, JsonObject())
                         }
-                        ChoiceChip("成长中心", false) {
-                            actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
-                        }
-                        // 「成长中心」只接单 + 领已达标奖励，进度得用户自己去官方客户端做；
-                        // 这个入口会按官方客户端行为把任务进度一起推进（上报埋点、对话类真发对话）。
-                        ChoiceChip("自动完成", false) {
-                            actions.onAction(id, status.uid, ACTION_COMPLETE_TASKS, JsonObject())
+                        if (!tasksAllDone) {
+                            ChoiceChip("成长中心", false) {
+                                actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
+                            }
+                            // 「成长中心」只接单 + 领已达标奖励，进度得用户自己去官方客户端做；
+                            // 这个入口会按官方客户端行为把任务进度一起推进（上报埋点、对话类真发对话）。
+                            ChoiceChip("自动完成", false) {
+                                actions.onAction(id, status.uid, ACTION_COMPLETE_TASKS, JsonObject())
+                            }
                         }
                     }
-                    TaskListSection(status, actions)
+                    if (!tasksAllDone) TaskListSection(status, actions)
                 }
             },
         )
@@ -264,13 +272,14 @@ object CodeBuddyUi : ProviderUi {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             else -> {
-                val done = view.tasks.count { it.completed }
+                // 已领取的不再占位置；可领取、进行中、未解锁都还要留着。
+                val pending = view.tasks.filter { !it.claimed }
                 Text(
-                    text = "共 ${view.tasks.size} 个任务 · 已完成 $done 个",
+                    text = "还有 ${pending.size} 个未完成",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                for (task in view.tasks) {
+                for (task in pending) {
                     TaskRow(task, status.uid, actions)
                 }
             }
