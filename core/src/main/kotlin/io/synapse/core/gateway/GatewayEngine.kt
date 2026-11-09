@@ -2284,10 +2284,10 @@ class GatewayEngine(
      * 例外：`custom:` 前缀是自定义供应商的存储键，必须原样保留（它本身不是品牌名）。
      */
     private fun normalizeProviderPrefix(prefix: String): String? {
-        // 只认品牌标签（腾讯国内 / 腾讯国外 / 字节国内 / 字节国外 / 谷歌 / 讯飞 / 商汤
-        // + 自定义供应商自己的标签）。
-        // ⚠️ 不能先查 registry.get()：它是按 provider id（英文）做的忽略大小写查找，
-        // 一旦放在前面，`codebuddy/glm-5.2` 就会被当成合法前缀，英文前缀等于"偷偷还能用"。
+        // 内置标签：中文正名 + 英文别名都认（见 [chineseRoutePrefix]）。
+        // ⚠️ 不能改成「先查 registry.get()」：那是按 provider id 做的忽略大小写查找，
+        // 会让 `codebuddy/glm-5.2`、`trae/qwen-max` 这类**不带区域**的裸名也变成合法前缀，
+        // 而它们解析不出区域，等于静默替用户挑了一个站。英文别名表只收带区域的写法。
         chineseRoutePrefix(prefix)?.let { return it }
         // 自定义供应商：标签就是用户起的那个名字，**不再加 `custom:` 前缀**。
         // 旧数据里的 `custom:<短名>` 写法仍然认，避免升级后老客户端的配置直接失效。
@@ -2335,7 +2335,8 @@ class GatewayEngine(
         if (key.length > 32) return "模型标签最多 32 个字符"
         if (!key.matches(Regex("^[^\\s/\\\\]+$"))) return "模型标签不能包含空白字符"
 
-        // 与内置供应商标签冲突
+        // 与内置供应商标签冲突（中英两种写法都算占用，否则用户建个叫 antigravity 的自定义供应商，
+        // 就会和内置的「谷歌」抢同一串前缀，路由结果取决于查表顺序 —— 那是不可接受的不确定）
         if (chineseRoutePrefix(key) != null) {
             return "「$key」是内置供应商的标签，不能占用。请在「供应商」页直接登录该供应商"
         }
@@ -2348,50 +2349,48 @@ class GatewayEngine(
     }
 
     /**
-     * 中文路由前缀 → 供应商 id。
+     * 内置标签表：**一张表，中文是正名，英文是别名**。
      *
-     * 区域型供应商（腾讯 / 字节）**只认带区域的写法**：上游模型列表里的标签本身就是
-     * 「腾讯国内 / 腾讯国外 / 字节国内 / 字节国外」，不存在「腾讯」「字节」这种裸品牌标签，
-     * 裸品牌前缀根本解析不出区域，属于无意义的路由，已删除。
+     * 这是唯一的权威表 —— 一个标签只对应一家供应商，不查、不猜、不回退。
+     * 新增内置供应商时必须在这里加一条（这是故意的：标签是契约，不能隐式生成）。
+     * 自定义供应商不走这里，它们走 [customLabelOwner]。
      *
-     * 小浣熊已全面改用「商汤」品牌名，`小浣熊` 别名一并删除，避免两套写法。
+     * ## 中英并存，但输出以中文为准
      *
-     * 中文不做 lowercase（本身就是无大小写语言），但允许前后空白。
+     * 输入方向两者都认（客户端写 `谷歌/x` 或 `antigravity/x` 都能路由），
+     * 输出方向（`/v1/models` 的 id、模型页显示的前缀）**只出中文**，见 [chineseRoutePrefixOf]。
+     * 这样界面与 API 只有一套"官方写法"，英文只作为兼容别名存在，不会出现两套并行的命名体系。
+     *
+     * ## 区域型供应商（腾讯 / 字节）的英文别名必须带区域
+     *
+     * 它们分国内站与国际站两个上游，`codebuddy` 或 `trae` 裸名解析不出区域 ——
+     * 跟中文的 `腾讯/`、`字节/` 一样属于无意义的路由，**不收录**。
+     * 只收 `codebuddy-cn` / `codebuddy-global` / `trae-cn` / `trae-global` 四种带区域写法。
+     *
+     * ## 匹配大小写
+     *
+     * 中文本身无大小写；英文别名一律**忽略大小写**匹配（`ChatGPT` / `chatgpt` / `CHATGPT` 等价），
+     * 这是客户端配置里最常见的写法差异，按大小写区分只会制造「同样一家公司两个标签」的困惑。
      */
     private fun chineseRoutePrefix(prefix: String): String? {
         val p = prefix.trim()
         if (p.isEmpty()) return null
-        // **内置标签表就是唯一的权威表**：一个标签只对应一家供应商，不查、不猜、不回退。
-        // 新增内置供应商时必须在这里加一条（这是故意的：标签是契约，不能隐式生成）。
-        // 自定义供应商不走这里，它们走 customLabelOwner()。
-        return when (p) {
-            "腾讯国内" -> "codebuddy"
-            "腾讯国外" -> "codebuddy"
-            "字节国内" -> "trae"
-            "字节国外" -> "trae"
-            "谷歌" -> "antigravity"
-            "讯飞" -> "loomy"
-            "商汤" -> "raccoon"
-            // 灵犀（中国移动的 AI 通道）。**只保留这一个标签**：
-            // 「移动云盘」「139云」这类旧名已按需求删除——它们指的是同一家，
-            // 多留几个别名只会让人在模型页看到一串重复的名字，不知道该写哪个。
-            "灵犀" -> "mcloud"
-            "ChatGPT" -> "chatgpt"
-            "GPT" -> "chatgpt"
-            else -> null
-        }
+        // 中文正名：逐字精确匹配（中文没有大小写，不做 lowercase 以免误伤）
+        CN_ROUTE_PREFIXES[p]?.let { return it }
+        // 英文别名：忽略大小写
+        return EN_ROUTE_PREFIXES[p.lowercase()]
     }
 
     /**
      * 中文区域前缀对应的区域标识（cn/global）。
      *
-     * 只处理中文写法的区域后缀；英文前缀（`trae-cn` 等）仍由 [regionPrefixOf] 判定。
-     * 非中文区域前缀返回 null。
+     * 中英两种写法都认（`腾讯国内` / `codebuddy-cn` 等价），与 [chineseRoutePrefix] 同一套语义。
+     * 非区域前缀返回 null。
      */
-    private fun chineseRegionPrefix(prefix: String): String? = when (prefix.trim()) {
-        "腾讯国内", "字节国内" -> "cn"
-        "腾讯国外", "字节国外" -> "global"
-        else -> null
+    private fun chineseRegionPrefix(prefix: String): String? {
+        val p = prefix.trim()
+        CN_REGION_PREFIXES[p]?.let { return it }
+        return EN_REGION_PREFIXES[p.lowercase()]
     }
 
     /**
@@ -2428,6 +2427,7 @@ class GatewayEngine(
             "raccoon" -> "商汤"
             "mcloud" -> "灵犀"
             "chatgpt" -> "ChatGPT"
+            "cline" -> "Cline"
             // 未知供应商沿用 id，不硬编中文
             else -> return if (region == null) providerId else "$providerId-$region"
         }
@@ -2476,6 +2476,15 @@ class GatewayEngine(
         onLog(text)
         logSink?.invoke(text)
     }
+
+    /**
+     * 记一条**用户可见的普通信息**到运行日志（App 层用）。
+     *
+     * 为什么不让 App 直接调 [log]：它是 `internal`，而把它改成 public 会让整个模块
+     * 都从任意位置写日志，日志来源就再也理不清了。这里开一个语义明确的窄口子：
+     * 「App 层有一件用户该知道的事，请记进运行日志」，仅此而已。
+     */
+    fun noteForUser(text: String) = log(text)
 
     internal fun logWarn(text: String) {
         requestLog.warn(text)
@@ -2560,6 +2569,81 @@ class GatewayEngine(
 
         /** 登录回调监听的存活上限。 */
         const val CALLBACK_TIMEOUT_MS = 5L * 60 * 1000
+
+        /**
+         * 内置标签表（中文正名）。
+         *
+         * 键是客户端写在 `标签/模型名` 里的标签，值是 provider id。
+         * 这张表与 [EN_ROUTE_PREFIXES] 合起来构成**唯一权威表**（见 [chineseRoutePrefix]）。
+         */
+        private val CN_ROUTE_PREFIXES = mapOf(
+            "腾讯国内" to "codebuddy",
+            "腾讯国外" to "codebuddy",
+            "字节国内" to "trae",
+            "字节国外" to "trae",
+            "谷歌" to "antigravity",
+            "讯飞" to "loomy",
+            "商汤" to "raccoon",
+            // 灵犀（中国移动的 AI 通道）。**只保留这一个标签**：
+            // 「移动云盘」「139云」这类旧名已按需求删除——它们指的是同一家，
+            // 多留几个别名只会让人在模型页看到一串重复的名字，不知道该写哪个。
+            "灵犀" to "mcloud",
+            "ChatGPT" to "chatgpt",
+            "GPT" to "chatgpt",
+            // Cline：免费池 / 订阅池挂在同一个账号上，池由模型 id 的前缀区分
+            // （`cline-free/...` / `cline-pass/...`），所以这里只有一个标签。
+            "Cline" to "cline",
+        )
+
+        /**
+         * 内置标签表（英文别名）。键必须是小写，匹配时对输入做 `lowercase()`。
+         *
+         * 英文只是**输入别名**：`/v1/models` 与模型页的前缀仍然只出中文，
+         * 所以不存在「同一家有两个官方名字」的问题。
+         *
+         * ⚠️ 区域型供应商（腾讯 / 字节）**不收裸名**：`codebuddy` / `trae` 解析不出区域，
+         * 与中文的 `腾讯/`、`字节/` 一样属于无意义路由。只收带区域的四种写法。
+         */
+        private val EN_ROUTE_PREFIXES = mapOf(
+            "codebuddy-cn" to "codebuddy",
+            "codebuddy-global" to "codebuddy",
+            "workbuddy-cn" to "codebuddy",
+            "workbuddy-global" to "codebuddy",
+            "trae-cn" to "trae",
+            "trae-global" to "trae",
+            "antigravity" to "antigravity",
+            "google" to "antigravity",
+            "gemini" to "antigravity",
+            "loomy" to "loomy",
+            "iflytek" to "loomy",
+            "spark" to "loomy",
+            "raccoon" to "raccoon",
+            "sensetime" to "raccoon",
+            "mcloud" to "mcloud",
+            "lingxi" to "mcloud",
+            "chatgpt" to "chatgpt",
+            "gpt" to "chatgpt",
+            "openai" to "chatgpt",
+            "cline" to "cline",
+        )
+
+        /** 中文区域后缀 → 区域标识。 */
+        private val CN_REGION_PREFIXES = mapOf(
+            "腾讯国内" to "cn",
+            "字节国内" to "cn",
+            "腾讯国外" to "global",
+            "字节国外" to "global",
+        )
+
+        /** 英文区域后缀 → 区域标识（键小写，匹配时 lowercase）。 */
+        private val EN_REGION_PREFIXES = mapOf(
+            "codebuddy-cn" to "cn",
+            "workbuddy-cn" to "cn",
+            "trae-cn" to "cn",
+            "codebuddy-global" to "global",
+            "workbuddy-global" to "global",
+            "trae-global" to "global",
+        )
     }
 }
 

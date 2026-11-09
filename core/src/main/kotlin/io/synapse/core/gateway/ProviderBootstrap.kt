@@ -3,6 +3,7 @@ package io.synapse.core.gateway
 import io.synapse.core.provider.ProviderRegistry
 import io.synapse.core.provider.antigravity.AntigravityProvider
 import io.synapse.core.provider.chatgpt.ChatGPTProvider
+import io.synapse.core.provider.cline.ClineProvider
 import io.synapse.core.provider.codebuddy.CodeBuddyProvider
 import io.synapse.core.provider.loomy.LoomyProvider
 import io.synapse.core.provider.mcloud.MCloudProvider
@@ -77,6 +78,13 @@ internal fun registerBuiltinProviders(engine: GatewayEngine) {
 
     registry.register(
         MCloudProvider(
+            hooks = engine.hooks,
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        ClineProvider(
             hooks = engine.hooks,
             nowMillis = { engine.now() },
         ),

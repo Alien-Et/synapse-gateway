@@ -170,6 +170,34 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     )
                 }
             }
+
+            // 本轮刷新带来的目录变更（新增 / 移除）：只在一轮刷完之后出现，下次刷新被新结果覆盖。
+            // 用户最需要知道的是「我配的模型怎么不见了」，所以移除要单独点出来。
+            if (!state.modelsLoading && !state.modelCatalogChanges.isEmpty) {
+                SectionCard(enterIndex = 0, modifier = Modifier.padding(top = 14.dp)) {
+                    val changes = state.modelCatalogChanges
+                    Text(
+                        text = "云端目录有变化",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    changes.added.forEach { (providerId, ids) ->
+                        Text(
+                            text = "新增 ${ids.size} 个：" + ids.joinToString("、") { it.substringAfter('/') },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    changes.removed.forEach { (providerId, ids) ->
+                        Text(
+                            text = "移除 ${ids.size} 个（上游已下架）：" +
+                                ids.joinToString("、") { it.substringAfter('/') },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
         }
 
         LazyColumn(

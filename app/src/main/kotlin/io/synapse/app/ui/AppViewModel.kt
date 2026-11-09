@@ -34,6 +34,7 @@ import io.synapse.core.gateway.GatewayEngine
 import io.synapse.core.failover.withCandidateToggled
 import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.gateway.LoginOutcome
+import io.synapse.core.gateway.ModelCatalogChanges
 import io.synapse.core.gateway.ModelExposureSettings
 import io.synapse.core.gateway.ModelsCatalog
 import io.synapse.core.gateway.ProviderInfo
@@ -304,6 +305,14 @@ data class AppUiState(
     val modelsError: String = "",
     /** 模型目录是否正在流式加载（各供应商就绪即增量写入 [models]）。 */
     val modelsLoading: Boolean = false,
+    /**
+     * 上一轮刷新的目录变更摘要（本轮无变更时为空）。
+     *
+     * 刷新模型时上游会增删模型（下架、新上架、限免活动结束…），但界面只看到列表变了，
+     * 不知道**变了什么**。这里把「新增 / 移除」按供应商聚合，模型页据此提示一次。
+     * 只在**真的拉到该供应商目录**时才算——拉取失败不能把「暂时取不到」当成「已下架」。
+     */
+    val modelCatalogChanges: ModelCatalogChanges = ModelCatalogChanges(),
     /** 进行中这轮加载里每个供应商的状态，键为 providerId；加载结束后保留终态供回看。 */
     val modelLoadStates: Map<String, ModelLoadState> = emptyMap(),
     /** 模型测速状态，键为 `model.fullId`。 */
@@ -658,6 +667,16 @@ class AppViewModel(
                 )
             }
             if (gen != modelsGeneration) return@launch
+            // 变更对比要在**覆盖 models 之前**做：上一轮目录就是此刻 state 里的 models。
+            // 只有「本轮真的拉到了目录」的供应商参与比较（拉取失败 ≠ 已下架，见 ModelCatalogChanges）。
+            val previous = _state.value.models
+            val refreshed = participants.toSet() - catalog.failures.keys
+            val changes = ModelCatalogChanges.of(
+                previous = previous,
+                current = catalog.models,
+                refreshedProviders = refreshed,
+                firstLoad = previous.isEmpty(),
+            )
             // 全部完成后用最终聚合覆盖：失败供应商的旧条目随之清除（与整体刷新语义一致）
             val providerError = catalog.failures.entries.joinToString("；") { "${it.key}：${it.value}" }
             _state.value = _state.value.copy(
@@ -665,7 +684,10 @@ class AppViewModel(
                 modelsLoading = false,
                 modelsError = listOf(error, providerError).filter { it.isNotEmpty() }.joinToString("；"),
                 busy = if (quiet) _state.value.busy else "",
+                modelCatalogChanges = changes,
             )
+            // 变更摘要同时进运行日志：模型页的提示是一闪而过的，日志能回看「哪天少了什么」
+            changes.summary().takeIf { it.isNotEmpty() }?.let { engine.noteForUser(it) }
             // 清名单要读写加密存储（同步落盘），放到 IO 线程，避免主线程卡帧
             pruneStaleExposure(catalog.models)
         }
