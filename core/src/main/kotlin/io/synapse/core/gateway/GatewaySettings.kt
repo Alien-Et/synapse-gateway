@@ -204,6 +204,14 @@ data class CustomProviderConfig(
     val baseUrl: String,
     val apiKeys: List<String>,
     val protocol: String = PROTOCOL_OPENAI,
+    /**
+     * 是否总是向上游要流式（客户端要非流式时也发 stream:true，由网关本地聚合）。
+     *
+     * null = 跟随所选协议的默认值（见 [ProviderProtocol.forceStreaming]）。
+     * 单独留一个可空字段而不是直接抄进 protocol：用户可能在「OpenAI 兼容」上
+     * 也想强制流式（某些中转站只吃流式），而协议本身的默认值不能被他改。
+     */
+    val forceStreaming: Boolean? = null,
     /** 手填或从 `/v1/models` 拉取的模型名列表。 */
     val models: List<String> = emptyList(),
     val enabled: Boolean = true,
@@ -236,6 +244,7 @@ data class CustomProviderConfig(
         addProperty("baseUrl", baseUrl)
         add("apiKeys", JsonArray().apply { apiKeys.forEach { add(it) } })
         addProperty("protocol", protocol)
+        forceStreaming?.let { addProperty("forceStreaming", it) }
         add("models", JsonArray().apply { models.forEach { add(it) } })
         addProperty("enabled", enabled)
         add("headers", JsonArray().apply { headers.forEach { add(it.toJson()) } })
@@ -265,6 +274,7 @@ data class CustomProviderConfig(
                 baseUrl = baseUrl,
                 apiKeys = keys,
                 protocol = obj.get("protocol")?.asString.orEmpty().ifEmpty { PROTOCOL_OPENAI },
+                forceStreaming = obj.get("forceStreaming")?.takeIf { it.isJsonPrimitive }?.asBoolean,
                 models = models,
                 enabled = obj.get("enabled")?.asBoolean ?: true,
                 headers = obj.arrayOrNull("headers")

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Spacer
@@ -19,8 +20,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -39,28 +42,98 @@ import io.synapse.app.ui.providers.ProviderUiActions
 import io.synapse.core.pool.AccountStatus
 
 /**
- * 账号标题列：上层为昵称（昵称为空时回退到 UID），下层为账号状态文案（可用 / 已停用 / 凭证失效）。
+ * 账号标题列：上层为账号名（自定义名 > 上游昵称 > UID），下层为账号状态文案（可用 / 已停用 / 凭证失效）。
+ *
+ * [onRename] 非空时账号名可点，点了弹改名框；自定义供应商的账号名由它自己的表单管，不传这个。
  */
 @Composable
 fun AccountTitleColumn(
     account: AccountStatus,
     modifier: Modifier = Modifier,
+    onRename: (() -> Unit)? = null,
 ) {
     Column(modifier = modifier) {
         // 账号名 + 会员胶囊标签同一行：标签紧跟名字右侧
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = account.nickname.ifEmpty { account.uid },
+                text = account.displayName,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
+                modifier = if (onRename == null) {
+                    Modifier
+                } else {
+                    Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable(onClick = onRename)
+                        .padding(horizontal = 2.dp, vertical = 1.dp)
+                },
             )
             if (account.memberLevel.isNotEmpty()) {
                 Spacer(Modifier.width(6.dp))
                 MemberLevelBadge(account.memberLevel)
             }
+            if (onRename != null) {
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    imageVector = Icons.Filled.Edit,
+                    contentDescription = "改账号名",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable(onClick = onRename)
+                        .padding(2.dp)
+                        .size(14.dp),
+                )
+            }
         }
         Text(
             text = accountStatusText(account),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * 账号改名弹窗。
+ *
+ * 输入框默认填**自定义名本身**（没起过就是空），不是当前显示名：
+ * 预填上游昵称的话，用户点开直接保存就会把它存成「自定义名 = 上游昵称」，
+ * 之后上游改了昵称这边也不会再跟着变。留空 = 跟随上游，这条写在副标题里。
+ */
+@Composable
+fun AccountRenameDialog(
+    account: AccountStatus,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by remember(account.uid) { mutableStateOf(account.customName) }
+    AppDialog(
+        title = "改账号名",
+        subtitle = "留空 = 跟随上游账号昵称（${account.nickname.ifEmpty { account.uid }}）",
+        onDismiss = onDismiss,
+        buttons = {
+            AppDialogButton("取消", onDismiss)
+            AppDialogButton(
+                text = "保存",
+                onClick = {
+                    onConfirm(name.trim())
+                    onDismiss()
+                },
+                emphasis = true,
+            )
+        },
+    ) {
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it.take(24) },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("这个账号叫什么") },
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "名字只存在本机，不会发到上游；重新登录、刷新凭证都不会把它改掉。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -109,6 +182,7 @@ private fun memberBadgeColors(level: String): Pair<Color, Color> = when {
 fun AccountTitleRow(
     account: AccountStatus,
     modifier: Modifier = Modifier,
+    onRename: (() -> Unit)? = null,
     trailing: @Composable () -> Unit,
 ) {
     Row(
@@ -118,6 +192,7 @@ fun AccountTitleRow(
         AccountTitleColumn(
             account = account,
             modifier = Modifier.weight(1f),
+            onRename = onRename,
         )
         trailing()
     }
@@ -225,13 +300,14 @@ fun AccountDeleteChipRow(
 }
 
 /**
- * 统一账号卡片外壳：
- * 头部标题行（昵称 + 状态 + [trailing] 开关）+ [extra] 供应商专属信息区 + [footer] 删除行。
+ * 统一账号卡片外壳:
+ * 头部标题行(账号名 + 状态 + [trailing] 开关)+ [extra] 供应商专属信息区 + [footer] 删除行。
  *
  * - [ProviderDetailScreen]、[TraeUi]、[CodeBuddyUi] 的账号项均基于此外壳实现。
- * - [trailing] 默认为 [AccountEnableSwitch]，可传入展开图标等自定义内容；为 null 时使用默认开关。
- * - [extra] 对应各供应商自有的专属信息（额度行、detail 文案、签到/任务入口等）。
- * - [footer] 默认为 [AccountDeleteChipRow]；传 null 时隐藏；ProviderDetailScreen 可传自定义 LinkText 文本。
+ * - [trailing] 默认为 [AccountEnableSwitch],可传入展开图标等自定义内容;为 null 时使用默认开关。
+ * - [extra] 对应各供应商自有的专属信息(额度行、detail 文案、签到/任务入口等)。
+ * - [footer] 默认为 [AccountDeleteChipRow];传 null 时隐藏;ProviderDetailScreen 可传自定义 LinkText 文本。
+ * - [onRename] 非空时账号名可点改;自定义供应商的账号名由它自己的表单管,不传。
  */
 @Composable
 fun AccountCardShell(
@@ -239,6 +315,7 @@ fun AccountCardShell(
     providerId: String,
     actions: ProviderUiActions,
     modifier: Modifier = Modifier,
+    onRename: (() -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
     extra: @Composable () -> Unit = {},
     footer: (@Composable () -> Unit)? = {
@@ -251,6 +328,7 @@ fun AccountCardShell(
     ) {
         AccountTitleRow(
             account = account,
+            onRename = onRename,
             trailing = trailing ?: {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     AccountPriorityArrows(

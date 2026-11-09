@@ -33,7 +33,32 @@ data class ProviderProtocol(
     val extraPaths: List<String> = emptyList(),
     /** 给用户看的一句说明（编辑页下拉框的副标题）。 */
     val hint: String,
+    /**
+     * 请求体形状：Chat Completions 还是 Responses。
+     *
+     * OpenAI 官方新推的是 `/v1/responses`（`input` + `include` + `store`），
+     * 与 `/v1/chat/completions`（`messages`）不兼容。中转站现在两种都在提供，
+     * 让用户在协议里选一种，比在代码里猜「这个站支持哪个」靠谱。
+     */
+    val requestShape: RequestShape = RequestShape.CHAT,
+    /**
+     * 默认是否要求流式。
+     *
+     * 有些上游（Codex 后端、部分中转站）**只接受 `stream: true`**，发非流式直接 400。
+     * 这一项决定「客户端要非流式时怎么发」：true = 上游按流式请求、网关本地聚合成
+     * 非流式响应；false = 原样按客户端要求发。
+     */
+    val forceStreaming: Boolean = false,
 )
+
+/** 上游请求体的形状。 */
+enum class RequestShape {
+    /** `messages` 结构（`/chat/completions`）。 */
+    CHAT,
+
+    /** `input` 结构（`/responses`）。 */
+    RESPONSES,
+}
 
 /** 鉴权方式：决定 API Key 怎么放进请求里。 */
 enum class ProtocolAuth {
@@ -143,8 +168,32 @@ object ProviderProtocols {
         hint = "Kimi 系列，OpenAI 兼容",
     )
 
+    /**
+     * OpenAI **Responses** 协议（`/v1/responses`）。
+     *
+     * 与上面那些 Chat Completions 协议的区别在请求体形状：`input` 数组而不是
+     * `messages`，且要带 `store`/`include`。响应是 SSE 事件流（`response.output_text.delta`
+     * 等），由 [io.synapse.core.provider.chatgpt.OpenAiResponses.SseTranslator]
+     * 翻译回客户端认识的 `chat.completion.chunk`。
+     *
+     * 上游只支持流式，所以 [forceStreaming] 为 true：客户端要非流式时，
+     * 网关按流式请求、本地聚合成普通 JSON 返回。
+     */
+    val OPENAI_RESPONSES = ProviderProtocol(
+        id = "openai-responses",
+        label = "OpenAI Responses",
+        chatPath = "/v1/responses",
+        modelsPath = "/v1/models",
+        auth = ProtocolAuth.BEARER,
+        defaultBaseUrl = "https://api.openai.com/v1",
+        hint = "OpenAI 新版 /responses 端点；上游只吃流式，网关会自动聚合非流式请求",
+        requestShape = RequestShape.RESPONSES,
+        forceStreaming = true,
+    )
+
     val ALL: List<ProviderProtocol> = listOf(
         OPENAI,
+        OPENAI_RESPONSES,
         ANTHROPIC,
         GEMINI,
         ZHIPU,

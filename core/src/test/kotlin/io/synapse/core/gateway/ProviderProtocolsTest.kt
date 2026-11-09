@@ -293,6 +293,85 @@ class ProviderProtocolsTest {
     }
 
     @Test
+    fun `带 image 词根的模型被识别为生图`() {
+        // agnes-image-2.0-flash 这类「品牌-用途」命名，之前漏判 → 测试打到 chat/completions → 400
+        for (id in listOf(
+            "agnes-image-2.0-flash", "agnes-image-2.5-flash", "some-brand-image-1",
+        )) {
+            assertTrue(
+                io.synapse.core.provider.ProviderModel(id, id).isImageGeneration,
+                "$id 应该被识别为生图模型",
+            )
+        }
+    }
+
+    @Test
+    fun `识图模型不会被 image 兜底词根误判成生图`() {
+        // vision/vl/vlm/understand 这些走的是对话端点，误判会让正常对话测试被跳过
+        for (id in listOf(
+            "xxx-image-understanding", "qwen-vl-image", "vlm-image-caption",
+        )) {
+            assertFalse(
+                io.synapse.core.provider.ProviderModel(id, id).isImageGeneration,
+                "$id 是识图模型，不该当成生图",
+            )
+        }
+    }
+
+    @Test
+    fun `生视频模型单独识别`() {
+        for (id in listOf("veo-3", "sora-2", "kling-v2", "seedance-1", "hailuo-video")) {
+            val model = io.synapse.core.provider.ProviderModel(id, id)
+            assertTrue(model.isVideoGeneration, "$id 应该被识别为生视频模型")
+            assertTrue(model.isMediaGeneration, "生视频也算媒体生成，不能走对话端点")
+        }
+        assertFalse(io.synapse.core.provider.ProviderModel("gpt-4o", "gpt-4o").isVideoGeneration)
+    }
+
+    @Test
+    fun `上游能力字段能直接声明视频`() {
+        val model = io.synapse.core.provider.ProviderModel(
+            id = "brand-x", name = "X",
+            extra = mapOf("ability" to "文生视频"),
+        )
+        assertTrue(model.isVideoGeneration)
+    }
+
+    @Test
+    fun `模型按类型分到各自的端点`() {
+        fun kind(id: String) = io.synapse.core.provider.ProviderModel(id, id).endpointKind
+        // 之前只分「生图 / 对话」，向量、重排、语音全被当成对话 → 测试一律 400
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.CHAT, kind("gpt-4o"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.IMAGE, kind("agnes-image-2.0-flash"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.VIDEO, kind("veo-3"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.EMBEDDING, kind("text-embedding-3-large"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.EMBEDDING, kind("bge-m3"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.RERANK, kind("bge-reranker-v2"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.TRANSCRIPTION, kind("whisper-1"))
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.SPEECH, kind("tts-1"))
+    }
+
+    @Test
+    fun `上游声明端点类型时优先采信`() {
+        val model = io.synapse.core.provider.ProviderModel(
+            id = "brand-x", name = "X",
+            extra = mapOf("endpoint" to "EMBEDDING"),
+        )
+        assertEquals(io.synapse.core.provider.ModelEndpointKind.EMBEDDING, model.endpointKind)
+    }
+
+    @Test
+    fun `Responses 协议带 input 形状且默认强制流式`() {
+        val p = ProviderProtocols.OPENAI_RESPONSES
+        assertEquals(RequestShape.RESPONSES, p.requestShape)
+        assertEquals("/v1/responses", p.chatPath)
+        assertTrue(p.forceStreaming, "上游只吃流式，默认就得强制")
+        // 普通 OpenAI 兼容不受影响
+        assertEquals(RequestShape.CHAT, ProviderProtocols.OPENAI.requestShape)
+        assertFalse(ProviderProtocols.OPENAI.forceStreaming)
+    }
+
+    @Test
     fun `识图能力走 supportsImageInput`() {
         val model = io.synapse.core.provider.ProviderModel(
             id = "qwen-vl", name = "VL",

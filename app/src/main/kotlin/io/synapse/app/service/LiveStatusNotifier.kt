@@ -187,7 +187,7 @@ object LiveStatusNotifier {
         val primary = list.first()
         val model = primary.clientModel.ifBlank { UNKNOWN_MODEL }
         val title = if (list.size == 1) "正在处理 $model" else "${list.size} 个请求进行中"
-        val account = primary.nickname.ifBlank { primary.uid }.ifBlank { "未知账号" }
+        val account = primary.displayName.ifBlank { primary.uid }.ifBlank { "未知账号" }
         val text = "${providerLabel(primary.providerId)} · $account"
 
         val open = PendingIntent.getActivity(

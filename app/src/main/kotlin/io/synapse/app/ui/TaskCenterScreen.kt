@@ -192,7 +192,7 @@ fun TaskCenterScreen(
                 for (account in shown) {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
-                            text = account.nickname.ifEmpty { account.uid },
+                            text = account.displayName,
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
                         )

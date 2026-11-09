@@ -54,8 +54,12 @@ class CustomProvider(
             protocol().extraPaths
 
     /** 本供应商采用的协议（决定端点路径与鉴权头）。 */
-    private fun protocol(): io.synapse.core.gateway.ProviderProtocol =
-        io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
+    private fun protocol(): io.synapse.core.gateway.ProviderProtocol {
+        val base = io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
+        // 用户在本供应商上显式改过「总是流式」时以他的为准，否则跟随协议默认
+        val forced = config.forceStreaming ?: return base
+        return if (base.forceStreaming == forced) base else base.copy(forceStreaming = forced)
+    }
 
     override fun listModels(account: ProviderAccount?): ProviderModelCatalogView =
         ProviderModelCatalogView(
@@ -88,11 +92,27 @@ class CustomProvider(
             )
         }
         val key = parseKey(account) ?: return FailedChatCall(401, "凭证无法解析")
-        val streaming = isStreaming(openAiBody)
+        val proto = protocol()
+        val clientWantsStream = isStreaming(openAiBody)
         val model = requestedModel(openAiBody)
 
+        // Responses 协议：请求体要整形成 `input`，响应是它自己的一套 SSE 事件流，
+        // 必须翻译回客户端认识的 chat.completion.chunk。
+        if (proto.requestShape == io.synapse.core.gateway.RequestShape.RESPONSES) {
+            return openResponsesChat(config, key, openAiBody, model, clientWantsStream)
+        }
+
+        // 上游只吃流式（如 Codex 后端）时，客户端要非流式也得先按流式请求，
+        // 拿到事件流后在本地聚合成普通 JSON —— 否则上游直接 400。
+        val upstreamStream = clientWantsStream || proto.forceStreaming
+        val body = if (upstreamStream && !clientWantsStream) {
+            withStreamFlag(openAiBody, true)
+        } else {
+            openAiBody
+        }
+
         val conn = try {
-            openConnection(chatUrl(config, model), key, openAiBody, "POST", config.headers, protocol())
+            openConnection(chatUrl(config, model), key, body, "POST", config.headers, proto)
         } catch (e: Exception) {
             return FailedChatCall(0, NetworkErrorText.describe(e))
         }
@@ -103,15 +123,15 @@ class CustomProvider(
             return FailedChatCall(0, NetworkErrorText.describe(e))
         }
         if (status !in 200..299) {
-            val body = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
+            val errBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
             conn.disconnect()
-            return FailedChatCall(status, body)
+            return FailedChatCall(status, errBody)
         }
 
         val contentType = conn.contentType.orEmpty()
         val stream = conn.inputStream
         if (contentType.contains("event-stream", ignoreCase = true)) {
-            if (streaming) {
+            if (clientWantsStream) {
                 return StreamingChatCall(status, stream) { conn.disconnect() }
             }
             val aggregated = try {
@@ -140,10 +160,78 @@ class CustomProvider(
             )
         }
         // 客户端要流式但上游只回了普通 JSON：包成 SSE，严格客户端才能解析出内容
-        if (streaming) {
+        if (clientWantsStream) {
             return StreamingChatCall(status, OpenAiSseAggregator.completionAsSse(text).byteInputStream(Charsets.UTF_8))
         }
         return AggregatedChatCall(status, text)
+    }
+
+    /**
+     * Responses 协议的对话。
+     *
+     * 上游只发 SSE 事件（`response.output_text.delta` 等），这里用
+     * [io.synapse.core.provider.chatgpt.OpenAiResponses.SseTranslator] 逐行翻译成
+     * `chat.completion.chunk`：客户端无论是流式还是非流式，看到的都是 OpenAI Chat 形状。
+     *
+     * 与非 Responses 协议一样，`stream` 由**客户端**决定；上游那侧始终是流式。
+     */
+    private fun openResponsesChat(
+        config: io.synapse.core.gateway.CustomProviderConfig,
+        key: String,
+        openAiBody: String,
+        model: String,
+        clientWantsStream: Boolean,
+    ): ChatCall {
+        val proto = protocol()
+        val payload = try {
+            io.synapse.core.provider.chatgpt.OpenAiResponses.toResponsesRequest(openAiBody, model)
+        } catch (e: Exception) {
+            return FailedChatCall(400, """{"error":{"message":"请求体转换失败：${e.message}"}}""")
+        }
+
+        val conn = try {
+            openConnection(chatUrl(config, model), key, payload, "POST", config.headers, proto)
+        } catch (e: Exception) {
+            return FailedChatCall(0, NetworkErrorText.describe(e))
+        }
+        val status = try {
+            conn.responseCode
+        } catch (e: Exception) {
+            conn.disconnect()
+            return FailedChatCall(0, NetworkErrorText.describe(e))
+        }
+        if (status !in 200..299) {
+            val errBody = runCatching { HttpSupport.readLimited(conn.errorStream) }.getOrDefault("")
+            conn.disconnect()
+            return FailedChatCall(status, errBody)
+        }
+
+        val translator = io.synapse.core.provider.chatgpt.OpenAiResponses.SseTranslator(
+            io.synapse.core.util.newCompletionId(),
+            model,
+        )
+        val translated = io.synapse.core.provider.LineTransformStream(
+            source = conn.inputStream,
+            transform = { line -> translator.translate(line) },
+            onFinish = { translator.onFinish() },
+        )
+        return if (clientWantsStream) {
+            StreamingChatCall(status, translated) { conn.disconnect() }
+        } else {
+            // 上游只会流式：非流式请求在本地聚合
+            try {
+                AggregatedChatCall(status, OpenAiSseAggregator.aggregate(translated, model))
+            } finally {
+                conn.disconnect()
+            }
+        }
+    }
+
+    /** 把请求体里的 `stream` 改成指定值（其余字段原样保留）。 */
+    private fun withStreamFlag(body: String, stream: Boolean): String {
+        val obj = runCatching { JsonParser.parseString(body).asJsonObject }.getOrNull() ?: return body
+        obj.addProperty("stream", stream)
+        return obj.toString()
     }
 
     /** 上游 200 但没给出任何内容：保持可检测的失败，不能报成「成功的空回复」。 */

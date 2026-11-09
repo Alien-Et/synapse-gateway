@@ -332,7 +332,7 @@ class GatewayEngine(
         },
         onAccountUpdated = { account ->
             pool.saveAccount(account)
-            log("账号凭证已自动持久化更新（${account.providerId}/${account.nickname.ifEmpty { account.uid }}）")
+            log("账号凭证已自动持久化更新（${account.providerId}/${pool.displayNameOf(account.providerId, account.uid)}）")
             onAccountsChanged?.invoke()
         },
         onLog = { log(it) },
@@ -808,25 +808,25 @@ class GatewayEngine(
             // 额度刷新本身不保鲜：动作/对话成功后都会紧接着刷一次额度，这里再保鲜会让同一次动作多打一轮刷新端点，
             // 而「刷新额度」按钮所在的页面随后会走 creditPacks/pointsBills（它们会保鲜）。
             provider.creditInfo(account)
-                ?: return CreditRefreshResult(providerId, uid, account.nickname, 0, false, "该供应商不支持额度刷新")
+                ?: return CreditRefreshResult(providerId, uid, pool.displayNameOf(providerId, uid), 0, false, "该供应商不支持额度刷新")
         } catch (e: Exception) {
             // 与「provider 自己报 known=false」保持一致：刷新失败不能把旧值继续当最新值展示
-            logWarn("额度刷新异常（$providerId/${account.nickname.ifEmpty { uid }}）：${e.message}")
+            logWarn("额度刷新异常（$providerId/${pool.displayNameOf(providerId, uid)}）：${e.message}")
             val reason = e.message ?: "刷新额度失败"
             pool.updateCredits(providerId, uid, 0, false, reason)
-            return CreditRefreshResult(providerId, uid, account.nickname, 0, false, reason)
+            return CreditRefreshResult(providerId, uid, pool.displayNameOf(providerId, uid), 0, false, reason)
         }
         pool.updateCredits(
             providerId, uid, info.balance, info.known, info.detail, info.actionHint, info.actionUrl,
             memberLevel = info.memberLevel,
         )
         if (info.known) {
-            log("额度刷新 $providerId/${account.nickname.ifEmpty { uid }}：${info.balance}（${info.detail}）")
+            log("额度刷新 $providerId/${pool.displayNameOf(providerId, uid)}：${info.balance}（${info.detail}）")
         } else {
-            logWarn("额度刷新失败（$providerId/${account.nickname.ifEmpty { uid }}）：${info.detail}")
+            logWarn("额度刷新失败（$providerId/${pool.displayNameOf(providerId, uid)}）：${info.detail}")
         }
         return CreditRefreshResult(
-            providerId, uid, account.nickname, info.balance, info.known,
+            providerId, uid, pool.displayNameOf(providerId, uid), info.balance, info.known,
             // 失败时优先给可操作指引：技术描述（含状态码/上游原文）对普通用户没用，
             // 他们需要的是「接下来做什么」。两者都放，指引在前、细节在后。
             when {
@@ -903,6 +903,8 @@ class GatewayEngine(
                     account = account,
                     enabled = status?.enabled ?: true,
                     priority = status?.priority ?: 0,
+                    // 用户起的名字要跟着走：换台设备导入回来不该退回一串 uid
+                    customName = status?.customName.orEmpty(),
                 )
             }
         // 带上「与导出账号相关」的自定义供应商，以及**全选导出时**所有已配置的
@@ -998,6 +1000,8 @@ class GatewayEngine(
                             name = declared.name,
                             baseUrl = declared.baseUrl,
                             protocol = declared.protocol,
+                            // 流式行为按文件恢复：上游只吃流式的站点，导回来不该又变回非流式
+                            forceStreaming = declared.forceStreaming,
                             models = declared.models,
                             enabled = declared.enabled,
                         )
@@ -1112,6 +1116,8 @@ class GatewayEngine(
             reason = if (snapshot.enabled) "" else "手动停用",
         )
         pool.setPriority(account.providerId, account.uid, snapshot.priority)
+        // 自定义名同理：只恢复用户起的名字，不碰凭证里的上游昵称
+        pool.setCustomName(account.providerId, account.uid, snapshot.customName)
     }
 
     /** 解析导出内容（只读、不落池），供导入前预览与勾选。 */
@@ -1227,7 +1233,7 @@ class GatewayEngine(
             onDone = { done, index ->
                 if (onProgress != null) {
                     val target = ordered[index]
-                    val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                    val nickname = pool.displayNameOf(target.providerId, target.uid)
                     onProgress(
                         BatchProgress(
                             done, ordered.size, target.providerId, target.uid, nickname, BatchStage.ACTION,
@@ -1238,7 +1244,7 @@ class GatewayEngine(
             onStart = { done, index ->
                 if (onProgress != null) {
                     val target = ordered[index]
-                    val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                    val nickname = pool.displayNameOf(target.providerId, target.uid)
                     // done 传当前已完成数（而不是 index）：并发下 index 乱序，用它会让进度条倒退
                     onProgress(
                         BatchProgress(
@@ -1251,7 +1257,7 @@ class GatewayEngine(
         ) { target ->
             // 单个账号抛异常也不能拖垮整批：就地转成失败结果。
             val outcome = runCatching { performActionRaw(target.providerId, target.uid, action, payload) }
-            val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+            val nickname = pool.displayNameOf(target.providerId, target.uid)
             outcome.fold(
                 { result ->
                     // 「该供应商不支持」不是执行失败，而是选目标时就应该排掉的情况：
@@ -1334,7 +1340,7 @@ class GatewayEngine(
         onDone = { done, index ->
             if (onProgress != null) {
                 val target = targets[index]
-                val nickname = pool.account(target.providerId, target.uid)?.nickname ?: ""
+                val nickname = pool.displayNameOf(target.providerId, target.uid)
                 onProgress(
                     BatchProgress(done, targets.size, target.providerId, target.uid, nickname, BatchStage.REFRESH),
                 )
@@ -1419,7 +1425,7 @@ class GatewayEngine(
                 val ticket = provider.beginWebLogin(callbackUrl, loginRegion)
                 startCallbackServer(port, path) { url ->
                     val outcome = completeWebLogin(providerId, url)
-                    resultPage(outcome.ok, outcome.nickname.ifEmpty { outcome.uid }, outcome.error)
+                    resultPage(outcome.ok, pool.displayNameOf(providerId, outcome.uid), outcome.error)
                 }
                 BrowserLoginTicket(ticket.loginUrl, "", loginRegion)
             }
@@ -1429,7 +1435,7 @@ class GatewayEngine(
                 // loopback 供应商（如 ChatGPT 的 1455）永远收不到回调。
                 startCallbackServer(provider.callbackPort, provider.callbackPath) { url ->
                     val outcome = completeOAuth(providerId, url)
-                    resultPage(outcome.ok, outcome.nickname.ifEmpty { outcome.uid }, outcome.error)
+                    resultPage(outcome.ok, pool.displayNameOf(providerId, outcome.uid), outcome.error)
                 }
                 BrowserLoginTicket(provider.buildAuthUrl())
             }
@@ -1654,10 +1660,28 @@ class GatewayEngine(
         return adopt(providerId, ProviderAccount(providerId, uid, nickname, secret), "添加")
     }
 
+    /**
+     * 设置账号的自定义显示名（空串 = 恢复跟随上游昵称）。
+     *
+     * 与 [addAccount] 的区别：这里**不碰凭证**，只改账号状态里的 customName。
+     * 昵称属于上游账号资料，重新登录/刷新凭证时会被上游重新下发覆盖；
+     * 用户自己起的名字必须存在另一处，否则一次刷新就白改了。
+     */
+    fun setAccountCustomName(providerId: String, uid: String, name: String): Boolean {
+        if (registry.get(providerId) == null) return false
+        val ok = pool.setCustomName(providerId, uid, name)
+        if (ok) {
+            val display = pool.displayNameOf(providerId, uid)
+            log(if (name.isBlank()) "账号名已恢复为上游昵称：$display（$providerId）" else "账号名已改为：$display（$providerId）")
+            onAccountsChanged?.invoke()
+        }
+        return ok
+    }
+
     private fun adopt(providerId: String, account: ProviderAccount, verb: String): LoginOutcome {
         pool.upsert(account)
         refreshCredits(providerId, account.uid)
-        log("$verb 成功：${account.nickname.ifEmpty { account.uid }}（$providerId）")
+        log("$verb 成功：${pool.displayNameOf(account.providerId, account.uid)}（$providerId）")
         onAccountsChanged?.invoke()
         claimDesktopLoginRewardSoon(providerId, account.uid)
         return LoginOutcome(LoginState.SUCCESS, account.uid, account.nickname)
@@ -1673,7 +1697,7 @@ class GatewayEngine(
     private fun claimDesktopLoginRewardSoon(providerId: String, uid: String) {
         if (providerId != io.synapse.core.provider.raccoon.RaccoonProvider.ID) return
         ioExecutor().execute {
-            val nickname = pool.account(providerId, uid)?.nickname ?: uid
+            val nickname = pool.displayNameOf(providerId, uid)
             runCatching { performAction(providerId, uid, ACTION_CHECKIN) }
                 .onSuccess { result ->
                     if (result.ok) {
@@ -2121,50 +2145,52 @@ class GatewayEngine(
         val account = pickAccount(providerId, region = region)
             ?: return ProbeResult(-1L, "没有可用账号")
         val resolvedModel = provider.resolveModel(modelId)
-        // 生图模型不认 chat/completions：拿文本消息去探它必然被上游拒
-        // （「模型测试」在生图模型上报错就是这么来的）。
-        //
-        // C4：先按模型 id 判断（零成本）。绝大多数生图模型的名字里就带
-        // seedream / qwen-image / flux 这些词根，不需要为此全量拉一次模型目录。
-        // 只有「名字看不出来」时才查目录补一次，避免每次测试都白打上游。
-        val looksLikeImage = runCatching {
-            io.synapse.core.provider.ProviderModel(modelId, modelId).isImageGeneration
-        }.getOrDefault(false)
-        val isImageModel = if (looksLikeImage) true else runCatching {
-            provider.listModels(account).models
-                .firstOrNull { it.id == modelId || it.id == resolvedModel }
-                ?.isImageGeneration
-        }.getOrNull() ?: false
 
-        // 不指定 max_tokens：上游对 max_output_tokens 有下限（传 1 会被模型提供方
-        // 以 11133 integer_below_min_value 拒绝），而探测只需要建连与首字节时间。
-        val probeBody = if (isImageModel) {
-            JsonObject().apply {
-                addProperty("model", resolvedModel)
-                addProperty("prompt", "ping")
-                addProperty("n", 1)
-                addProperty("size", "1024x1024")
-            }.toString()
-        } else {
-            JsonObject().apply {
-                addProperty("model", resolvedModel)
-                addProperty("stream", false)
-                add("messages", com.google.gson.JsonArray().apply {
-                    add(JsonObject().apply {
-                        addProperty("role", "user")
-                        addProperty("content", "ping")
-                    })
-                })
-            }.toString()
-        }
+        // 端点由模型自己决定，不写死：生图/生视频/向量/重排/语音都不认 chat/completions，
+        // 拿对话请求去探必然被上游拒（「messages 不能为空」「invalid_request」），
+        // 看着像模型挂了，其实是打错了地方。
+        //
+        // 先按 id 判断（零成本）：绝大多数模型名字里就带 seedream / embed / rerank 这些词根。
+        // 名字看不出来时才查一次目录——目录里有上游给的能力字段，比名字准。
+        val kind = detectEndpointKind(provider, account, modelId, resolvedModel)
 
         val start = System.currentTimeMillis()
         val call = try {
-            provider.openChat(account, probeBody)
+            when (kind) {
+                io.synapse.core.provider.ModelEndpointKind.CHAT ->
+                    provider.openChat(account, chatProbeBody(resolvedModel))
+
+                io.synapse.core.provider.ModelEndpointKind.IMAGE ->
+                    provider.passthrough(account, "POST", "/v1/images/generations", jsonProbe(resolvedModel, "prompt"))
+
+                io.synapse.core.provider.ModelEndpointKind.VIDEO ->
+                    provider.passthrough(account, "POST", "/v1/videos/generations", jsonProbe(resolvedModel, "prompt"))
+
+                io.synapse.core.provider.ModelEndpointKind.EMBEDDING ->
+                    provider.passthrough(account, "POST", "/v1/embeddings", embeddingProbeBody(resolvedModel))
+
+                io.synapse.core.provider.ModelEndpointKind.RERANK ->
+                    provider.passthrough(account, "POST", "/v1/rerank", rerankProbeBody(resolvedModel))
+
+                // 语音转写要 multipart（音频文件），探针没法构造出「合法但极轻」的请求：
+                // 发个空 multipart 上游会回 400，那与「模型不可用」是两回事。
+                // 直接告诉用户这条测不了，别给一个假的失败。
+                io.synapse.core.provider.ModelEndpointKind.TRANSCRIPTION ->
+                    return ProbeResult(-1L, "语音转写需要上传音频，无法用轻量探针测试")
+
+                io.synapse.core.provider.ModelEndpointKind.SPEECH ->
+                    provider.passthrough(account, "POST", "/v1/audio/speech", speechProbeBody(resolvedModel))
+            }
         } catch (e: Exception) {
             val msg = e.message ?: "连接失败"
             logWarn("探测 $providerId/$resolvedModel 失败：$msg")
             return ProbeResult(-1L, msg)
+        }
+
+        // passthrough 返回 null = 这家没声明这个端点（不是网络失败）。
+        // 如实说清楚，别让用户以为模型挂了。
+        if (call == null) {
+            return ProbeResult(-1L, "该供应商不支持「${kind.label}」端点，无法测试这个模型")
         }
 
         try {
@@ -2178,6 +2204,74 @@ class GatewayEngine(
             call.close()
         }
     }
+
+    /**
+     * 判断模型该走哪条端点。
+     *
+     * 先按 id 猜（零成本），猜不出来再查一次目录（目录里有上游给的能力字段，
+     * 比名字准）。查目录失败不能当成「是对话模型」——那会把生图模型又打回
+     * chat/completions，所以失败时退回 id 的判断结果。
+     */
+    private fun detectEndpointKind(
+        provider: Provider,
+        account: ProviderAccount,
+        modelId: String,
+        resolvedModel: String,
+    ): io.synapse.core.provider.ModelEndpointKind {
+        val byId = runCatching {
+            io.synapse.core.provider.ProviderModel(modelId, modelId).endpointKind
+        }.getOrDefault(io.synapse.core.provider.ModelEndpointKind.CHAT)
+        if (byId != io.synapse.core.provider.ModelEndpointKind.CHAT) return byId
+
+        return runCatching {
+            provider.listModels(account).models
+                .firstOrNull { it.id == modelId || it.id == resolvedModel }
+                ?.endpointKind
+        }.getOrNull() ?: byId
+    }
+
+    /**
+     * 对话探针：不指定 max_tokens。
+     *
+     * 上游对 max_output_tokens 有下限（传 1 会被以 11133 integer_below_min_value 拒绝），
+     * 而探测只需要建连与首字节时间。
+     */
+    private fun chatProbeBody(model: String): String = JsonObject().apply {
+        addProperty("model", model)
+        addProperty("stream", false)
+        add("messages", com.google.gson.JsonArray().apply {
+            add(JsonObject().apply {
+                addProperty("role", "user")
+                addProperty("content", "ping")
+            })
+        })
+    }.toString()
+
+    /** 生图 / 生视频探针：只带最小必需项，不关心生成结果。 */
+    private fun jsonProbe(model: String, promptKey: String): String = JsonObject().apply {
+        addProperty("model", model)
+        addProperty(promptKey, "ping")
+    }.toString()
+
+    /** 向量探针：一句话足够看出端点通不通。 */
+    private fun embeddingProbeBody(model: String): String = JsonObject().apply {
+        addProperty("model", model)
+        add("input", com.google.gson.JsonArray().apply { add("ping") })
+    }.toString()
+
+    /** 重排探针：一条 query + 一条文档。 */
+    private fun rerankProbeBody(model: String): String = JsonObject().apply {
+        addProperty("model", model)
+        addProperty("query", "ping")
+        add("documents", com.google.gson.JsonArray().apply { add("ping") })
+    }.toString()
+
+    /** 语音合成探针：只要几个字，返回音频就说明端点通。 */
+    private fun speechProbeBody(model: String): String = JsonObject().apply {
+        addProperty("model", model)
+        addProperty("input", "ping")
+        addProperty("voice", "alloy")
+    }.toString()
 
     /**
      * 路由前缀解析：**只认中文前缀**。

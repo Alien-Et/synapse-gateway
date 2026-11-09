@@ -147,11 +147,14 @@ private fun AccountRow(
     actions: ProviderUiActions,
     index: Int,
 ) {
+    // 账号可改名:名字只存本机状态,不写凭证(见 AccountPool.setCustomName)
+    var renaming by remember(account.uid) { mutableStateOf(false) }
     AccountCardShell(
         account = account,
         providerId = account.providerId,
         actions = actions,
         modifier = Modifier.fillMaxWidth().staggeredAppear(index),
+        onRename = { renaming = true },
         extra = { ui.AccountExtra(account, actions) },
         footer = {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -168,6 +171,13 @@ private fun AccountRow(
             }
         },
     )
+    if (renaming) {
+        AccountRenameDialog(
+            account = account,
+            onDismiss = { renaming = false },
+            onConfirm = { actions.onRenameAccount(account.providerId, account.uid, it) },
+        )
+    }
 }
 
 @Composable

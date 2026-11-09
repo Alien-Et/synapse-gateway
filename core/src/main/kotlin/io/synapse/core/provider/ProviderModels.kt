@@ -11,11 +11,11 @@ data class ProviderModel(
     /**
      * 这个模型是不是**生成图片**的（而不是对话）。
      *
-     * 为什么要单独判：生图模型（`seedream`、`qwen-image`、`gpt-image` 等）不认
-     * `chat/completions`，拿文本消息去探它必然被上游拒——「模型测试」在生图模型上报错
-     * 就是这么来的。探测与转发都得按这个分流。
+     * 为什么要单独判：生图模型（`seedream`、`qwen-image`、`gpt-image`、`agnes-image` 等）
+     * 不认 `chat/completions`，拿文本消息去探它必然被上游拒——「模型测试」在生图模型上报
+     * 400（`messages 不能为空` / `invalid_request`）就是这么来的。探测与转发都得按这个分流。
      *
-     * 判定依据**优先用上游给的字段**（各家口径不同，见下），名称只是最后的兜底：
+     * 判定依据**优先用上游给的字段**（各家口径不同，见下），名称只是兜底：
      * - 腾讯/字节：`extra["tags"]` 或 `extra["category"]` 含 image
      * - 灵犀：`extra["ability"]` 里带「图片/生图/绘图」
      * - 通用：模型 id 里出现 image / seedream / dall-e / flux 等已知词根
@@ -28,7 +28,66 @@ data class ProviderModel(
             if (markers.any { value.contains(it) }) return true
         }
         val id = id.lowercase()
+        // 识图模型的名字里也可能带 image（如 xxx-image-understanding），先排掉这一类：
+        // 它们走的是对话端点，误判成生图会让正常的对话测试被跳过。
+        if (VISION_ID_HINTS.any { id.contains(it) }) return false
         return IMAGE_ID_HINTS.any { id.contains(it) }
+    }
+
+    /**
+     * 这个模型是不是**生成视频**的。
+     *
+     * 与生图同理：视频模型也不认 `chat/completions`，测试必须打视频端点。
+     */
+    val isVideoGeneration: Boolean get() {
+        val markers = listOf("video", "视频", "文生视频")
+        for (key in listOf("tags", "category", "ability", "modality", "type", "output")) {
+            val value = extra[key]?.lowercase().orEmpty()
+            if (value.isEmpty()) continue
+            if (markers.any { value.contains(it) }) return true
+        }
+        val id = id.lowercase()
+        return VIDEO_ID_HINTS.any { id.contains(it) }
+    }
+
+    /** 这个模型是不是「不认对话端点」的那类（生图 / 生视频）。 */
+    val isMediaGeneration: Boolean get() = isImageGeneration || isVideoGeneration
+
+    /**
+     * 这个模型该打哪个端点。
+     *
+     * 模型测试要按它分流：拿对话请求去打 embedding / rerank / 语音模型，上游一律回
+     * 400（`messages 不能为空`、`invalid_request`），看起来像「模型挂了」，其实是
+     * 打错了地方。判定顺序是先看上游给的能力字段，再看 id 词根。
+     */
+    val endpointKind: ModelEndpointKind get() {
+        val declared = extra["endpoint"]?.trim()?.lowercase().orEmpty()
+        if (declared.isNotEmpty()) {
+            ModelEndpointKind.byId(declared)?.let { return it }
+        }
+        // 上游显式声明了「能力」时优先信它：各家口径不同，但都是"能力"语义
+        val ability = listOf("ability", "tags", "category", "type", "output", "modality")
+            .joinToString(" ") { extra[it].orEmpty() }
+            .lowercase()
+        when {
+            ability.contains("rerank") || ability.contains("重排") -> return ModelEndpointKind.RERANK
+            ability.contains("embed") || ability.contains("向量") -> return ModelEndpointKind.EMBEDDING
+            ability.contains("transcri") || ability.contains("转写") -> return ModelEndpointKind.TRANSCRIPTION
+            ability.contains("speech") || ability.contains("语音合成") -> return ModelEndpointKind.SPEECH
+        }
+        if (isVideoGeneration) return ModelEndpointKind.VIDEO
+        if (isImageGeneration) return ModelEndpointKind.IMAGE
+
+        val id = id.lowercase()
+        // 重排必须排在向量前面：`bge-reranker-v2` 同时命中 `bge-`（向量词根）与
+        // `rerank`，按 embedding 先判就会把重排模型打去 /v1/embeddings。
+        return when {
+            RERANK_ID_HINTS.any { id.contains(it) } -> ModelEndpointKind.RERANK
+            EMBEDDING_ID_HINTS.any { id.contains(it) } -> ModelEndpointKind.EMBEDDING
+            TRANSCRIPTION_ID_HINTS.any { id.contains(it) } -> ModelEndpointKind.TRANSCRIPTION
+            SPEECH_ID_HINTS.any { id.contains(it) } -> ModelEndpointKind.SPEECH
+            else -> ModelEndpointKind.CHAT
+        }
     }
 
     /** 这个模型是否支持图片输入（识图/多模态）。 */
@@ -49,7 +108,66 @@ data class ProviderModel(
             "seedream", "dall-e", "dalle", "gpt-image", "imagen",
             "flux", "stable-diffusion", "sdxl", "qwen-image", "kolors",
             "text2image", "t2i", "cogview", "hunyuan-image", "wanx",
+            // 兜底词根：`agnes-image-2.0`、`xxx-image-1` 这类「品牌-用途」命名很常见。
+            // 识图模型由 VISION_ID_HINTS 先排掉，不会被这条误伤。
+            "image",
         )
+
+        /** 识图（能看图、但仍走对话端点）的 id 词根，用来把「image 兜底词根」的误判挡回去。 */
+        private val VISION_ID_HINTS = listOf(
+            "vision", "-vl", "vl-", "vlm", "understand", "caption", "ocr", "image-to-text",
+        )
+
+        /** 生视频模型的 id 词根。 */
+        private val VIDEO_ID_HINTS = listOf(
+            "video", "veo-", "sora", "kling", "seedance", "hailuo", "runway", "pika",
+        )
+
+        /** 向量模型的 id 词根。 */
+        private val EMBEDDING_ID_HINTS = listOf(
+            "embed", "embedding", "bge-", "text-embedding", "gte-", "m3e",
+        )
+
+        /** 重排模型的 id 词根。 */
+        private val RERANK_ID_HINTS = listOf("rerank", "re-rank", "reranker")
+
+        /** 语音转写模型的 id 词根。 */
+        private val TRANSCRIPTION_ID_HINTS = listOf(
+            "whisper", "transcribe", "transcription", "asr",
+        )
+
+        /** 语音合成模型的 id 词根。 */
+        private val SPEECH_ID_HINTS = listOf("tts", "text-to-speech", "speech-", "cosyvoice")
+    }
+}
+
+/**
+ * 一个模型该走哪个端点。
+ *
+ * 与 [ProviderModel.endpointKind] 配套：模型测试、能力探测都按它分流，
+ * 不要再用「不是对话就都当生图」这种二分法——embedding / rerank / 语音
+ * 打错端点同样会回 400。
+ */
+enum class ModelEndpointKind(
+    /** 给用户看的端点名。 */
+    val label: String,
+    /** OpenAI 风格的路径（相对 baseUrl）。 */
+    val path: String,
+) {
+    CHAT("对话", "/v1/chat/completions"),
+    IMAGE("图片生成", "/v1/images/generations"),
+    VIDEO("视频生成", "/v1/videos/generations"),
+    EMBEDDING("文本向量", "/v1/embeddings"),
+    RERANK("重排", "/v1/rerank"),
+    TRANSCRIPTION("语音转文字", "/v1/audio/transcriptions"),
+    SPEECH("语音合成", "/v1/audio/speech"),
+    ;
+
+    companion object {
+        /** 按 id/名字查（上游若直接声明了端点类型，用它）。 */
+        fun byId(raw: String): ModelEndpointKind? = entries.firstOrNull {
+            it.name.equals(raw, ignoreCase = true) || it.path.endsWith("/$raw", ignoreCase = true)
+        }
     }
 }
 
