@@ -92,7 +92,7 @@ class CustomProvider(
         val model = requestedModel(openAiBody)
 
         val conn = try {
-            openConnection(chatUrl(config), key, openAiBody, "POST", config.headers, protocol())
+            openConnection(chatUrl(config, model), key, openAiBody, "POST", config.headers, protocol())
         } catch (e: Exception) {
             return FailedChatCall(0, NetworkErrorText.describe(e))
         }
@@ -227,6 +227,14 @@ class CustomProvider(
 
     override fun classify(status: Int, body: String): UpstreamError {
         val message = extractMessage(body).ifEmpty { "上游 HTTP $status" + bodySnippet(body) }
+        // 「endpoint / url / route 不存在」是地址拼错，不是模型 id 错。
+        // 模型在别的客户端能用、这里 404，几乎都是这一类；再标成 NOT_FOUND 会被网关说成「上游没有这个模型」。
+        if (status == 404 && looksLikeMissingEndpoint(message)) {
+            return UpstreamError(
+                ErrorKind.CLIENT,
+                "上游没有这个接口，多半是 Base URL 和协议对不上：$message",
+            )
+        }
         val kind = when {
             status == 401 || status == 403 -> ErrorKind.SESSION_DEAD
             status == 402 -> ErrorKind.QUOTA
@@ -469,6 +477,16 @@ class CustomProvider(
         return ""
     }
 
+    /** 404 文案在说「路径/端点不存在」，而不是「没有这个模型」。 */
+    private fun looksLikeMissingEndpoint(message: String): Boolean {
+        val lower = message.lowercase()
+        return lower.contains("endpoint") ||
+            lower.contains("invalid url") ||
+            lower.contains("no route") ||
+            message.contains("接口不存在") ||
+            message.contains("路径不存在")
+    }
+
     companion object {
         const val KEY_PREFIX = "key-"
 
@@ -477,12 +495,12 @@ class CustomProvider(
          *
          * 不依赖已保存的配置：新建供应商时用户还没保存，也要能先拉一次看看有哪些模型。
          */
-        fun fetchModels(baseUrl: String, apiKey: String): List<String> {
+        fun fetchModels(baseUrl: String, apiKey: String, protocol: String = "openai"): List<String> {
             if (baseUrl.isBlank()) return emptyList()
-            // 静态入口拿不到协议（新建页还没保存），按 OpenAI 兼容路径探测；
-            // 保存后 ViewModel 会用带协议的实例方法再拉一次。
+            // 拉模型和发对话必须用同一套协议路径，否则目录能拉到、对话却 404。
             val probeConfig = io.synapse.core.gateway.CustomProviderConfig(
                 key = "probe", name = "probe", baseUrl = baseUrl, apiKeys = emptyList(),
+                protocol = protocol,
             )
             val conn = try {
                 openConnection(modelsUrl(probeConfig), apiKey, null, "GET", emptyList())
@@ -543,7 +561,17 @@ class CustomProvider(
                 headers.keys.filter { it.equals(name, ignoreCase = true) }.forEach { headers.remove(it) }
                 headers[name] = h.value
             }
-            return HttpSupport.open(url, method, headers, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
+            val finalUrl = if (
+                proto.auth == io.synapse.core.gateway.ProtocolAuth.QUERY_KEY &&
+                key.isNotEmpty() &&
+                !url.contains("key=")
+            ) {
+                val encoded = java.net.URLEncoder.encode(key, Charsets.UTF_8.name())
+                url + (if (url.contains("?")) "&" else "?") + "key=$encoded"
+            } else {
+                url
+            }
+            return HttpSupport.open(finalUrl, method, headers, body, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
         }
 
         /**
@@ -556,43 +584,28 @@ class CustomProvider(
          *
          * 已经带完整端点路径时直接用它(用户可能把 baseUrl 填成了完整地址)。
          */
-        private fun passthroughUrl(baseUrl: String, path: String): String {
-            val base = baseUrl.trim().trimEnd('/')
-            val normalizedPath = path.trim().let { if (it.startsWith("/")) it else "/$it" }
-            // baseUrl 已经是完整端点(含该 path):直接用,别再拼一次
-            if (base.endsWith(normalizedPath, ignoreCase = true)) return base
-            // 去掉 base 尾部的 /v1,统一由 path 决定版本段
-            val root = base.removeSuffix("/v1").removeSuffix("/v1beta")
-            return root + normalizedPath
-        }
+        private fun passthroughUrl(baseUrl: String, path: String): String =
+            io.synapse.core.gateway.ProviderProtocols.joinBaseAndPath(baseUrl, path)
 
         /**
-         * 按协议拼对话地址。
-         *
-         * 用户填的 baseUrl 通常已经含版本段（`https://api.deepseek.com` 或 `.../v1`），
-         * 协议里的 chatPath 也含版本段，直接拼会变成 `/v1/v1/chat/completions`。
-         * 这里统一：把 baseUrl 尾部的版本段去掉，再用协议的完整路径补回来。
+         * 按协议拼对话地址。Gemini 的路径里有 `{model}`，必须换成这次请求的模型 id，
+         * 留着字面量上游会直接 404。
          */
-        private fun chatUrl(config: io.synapse.core.gateway.CustomProviderConfig): String {
+        private fun chatUrl(config: io.synapse.core.gateway.CustomProviderConfig, model: String): String {
             val proto = io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
-            val base = config.baseUrl.trim().trimEnd('/')
-            // 用户已经填了完整端点：直接用，不再拼
-            if (base.endsWith(proto.chatPath, ignoreCase = true)) return base
-            val root = base
-                .removeSuffix("/v1").removeSuffix("/v1beta")
-                .removeSuffix("/chat/completions").removeSuffix("/messages")
-            return root + proto.chatPath
+            var path = proto.chatPath
+            if (path.contains("{model}")) {
+                val safe = model.trim().ifEmpty { "gemini-2.0-flash" }
+                val encoded = java.net.URLEncoder.encode(safe, Charsets.UTF_8.name()).replace("+", "%20")
+                path = path.replace("{model}", encoded)
+            }
+            return io.synapse.core.gateway.ProviderProtocols.joinBaseAndPath(config.baseUrl, path)
         }
 
         private fun modelsUrl(config: io.synapse.core.gateway.CustomProviderConfig): String {
             val proto = io.synapse.core.gateway.ProviderProtocols.of(config.protocol)
-            val base = config.baseUrl.trim().trimEnd('/')
-            val path = proto.modelsPath
-            if (path.isEmpty()) return "$base/models" // 该协议没列目录接口，仍试一次标准路径
-            if (base.endsWith(path, ignoreCase = true)) return base
-            val root = base.removeSuffix("/v1").removeSuffix("/v1beta")
-                .removeSuffix("/chat/completions").removeSuffix("/messages")
-            return root + path
+            val path = proto.modelsPath.ifEmpty { "/models" }
+            return io.synapse.core.gateway.ProviderProtocols.joinBaseAndPath(config.baseUrl, path)
         }
 
         /** 自定义供应商的账号 uid 由 key 派生（只用于区分账号，不泄露完整 key）。 */

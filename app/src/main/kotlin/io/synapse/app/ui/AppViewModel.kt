@@ -1139,11 +1139,16 @@ class AppViewModel(
     }
 
     /** 用当前填写的地址与 Key 拉取模型列表（新建供应商时还没保存也能用）。 */
-    fun fetchCustomModels(baseUrl: String, apiKey: String, onResult: (List<String>, String) -> Unit) {
+    fun fetchCustomModels(
+        baseUrl: String,
+        apiKey: String,
+        protocol: String = "openai",
+        onResult: (List<String>, String) -> Unit,
+    ) {
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = "正在拉取模型")
             val result = withContext(Dispatchers.IO) {
-                runCatching { CustomProvider.fetchModels(baseUrl, apiKey) }
+                runCatching { CustomProvider.fetchModels(baseUrl, apiKey, protocol) }
             }
             _state.value = _state.value.copy(busy = "")
             result.fold(
@@ -1498,7 +1503,7 @@ class AppViewModel(
         val config = customConfig(providerId) ?: throw IllegalStateException("供应商配置不存在")
         val effectiveKey = effectiveKeyFor(providerId, apiKey)
         if (effectiveKey.isEmpty()) throw IllegalStateException("还没有可用的 API Key")
-        val models = CustomProvider.fetchModels(config.baseUrl, effectiveKey)
+        val models = CustomProvider.fetchModels(config.baseUrl, effectiveKey, config.protocol)
         if (models.isEmpty()) throw IllegalStateException("上游没有返回模型")
         return models
     }
@@ -1524,7 +1529,7 @@ class AppViewModel(
             onResult(emptyList(), "先添加一个 API Key，再获取模型")
             return
         }
-        fetchCustomModels(config.baseUrl, effectiveKey) { models, error ->
+        fetchCustomModels(config.baseUrl, effectiveKey, config.protocol) { models, error ->
             if (error.isNotEmpty() || models.isEmpty()) {
                 onResult(models, error.ifEmpty { "没有拉到模型" })
             } else {
@@ -1864,6 +1869,9 @@ class AppViewModel(
     fun performAction(providerId: String, uid: String, action: String, payload: JsonObject = JsonObject()) = action {
         val result: ProviderActionResult = engine.performAction(providerId, uid, action, payload)
         if (!result.ok) throw IllegalStateException(result.message)
+        // 任务做完要马上重拉这一家、这一个账号的清单，界面才能把已完成的收起来。
+        // 键是 providerId/uid，不会碰到别的供应商。
+        if (action.contains("task", ignoreCase = true)) loadTaskList(providerId, uid)
         result.message.ifEmpty { "操作完成" }
     }
 
