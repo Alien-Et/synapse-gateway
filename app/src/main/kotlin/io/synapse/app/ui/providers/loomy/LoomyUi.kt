@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package io.synapse.app.ui.providers.loomy
 
 import androidx.compose.foundation.clickable
@@ -12,6 +14,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon as MaterialIcon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -136,19 +141,92 @@ object LoomyUi : ProviderUi {
                     }
                 }
             }
+            if (accounts.isNotEmpty()) {
+                RedeemSection(accounts, actions)
+            }
         }
     }
 
+    /**
+     * 账号卡片里的专属信息区：只放该账号自己的东西（额度说明、新手任务）。
+     *
+     * 「兑换邀请码 / 兑换码」**不在这里**：它们是按账号提交的写操作，但输入内容是
+     * 一次性的码，多账号时每个卡片各摆一套输入框纯属重复（同一个码只会兑到一个号上）。
+     * 那两块已上移到 [LoginEntry] 的共享兑换卡片，用下拉栏选账号。
+     */
     @Composable
     override fun AccountExtra(status: AccountStatus, actions: ProviderUiActions) {
-        var invite by remember(status.uid) { mutableStateOf("") }
-        var code by remember(status.uid) { mutableStateOf("") }
-
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (status.detail.isNotEmpty()) {
                 Text(
                     text = status.detail,
                     style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            // 这家、这个账号的新手任务全部做完就整块收起；别的供应商、别的账号各看各的清单。
+            val taskView = actions.taskListOf(id, status.uid)
+            val tasksAllDone = taskView != null &&
+                taskView.error.isEmpty() &&
+                taskView.tasks.isNotEmpty() &&
+                taskView.tasks.all { it.completed }
+            if (!tasksAllDone) {
+                OutlineActionButton("一键完成新手任务") {
+                    actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
+                }
+                TaskListSection(status, actions)
+            }
+        }
+    }
+
+    /**
+     * 共享兑换卡片：一份表单 + 一个账号下拉栏。
+     *
+     * 多账号时不再让每个账号卡片各摆一套输入框——同一个兑换码只可能兑到某一个号上，
+     * 复制 N 份既占地方又容易看错行。这里默认选中第一个账号，想兑到哪个号就切哪个。
+     */
+    @Composable
+    private fun RedeemSection(accounts: List<AccountStatus>, actions: ProviderUiActions) {
+        var selectedUid by rememberSaveable(accounts.map { it.uid }) {
+            mutableStateOf(accounts.firstOrNull()?.uid.orEmpty())
+        }
+        // 账号被删/列表变化后，选中的 uid 可能已经不存在：回落到第一个
+        val target = accounts.firstOrNull { it.uid == selectedUid } ?: accounts.firstOrNull()
+        if (target == null) return
+
+        var expanded by remember { mutableStateOf(false) }
+        var invite by remember { mutableStateOf("") }
+        var code by remember { mutableStateOf("") }
+
+        SectionCard {
+            SectionLabel("兑换")
+            if (accounts.size > 1) {
+                ExposedDropdownMenuBox(
+                    expanded = expanded,
+                    onExpandedChange = { expanded = it },
+                ) {
+                    OutlinedTextField(
+                        value = target.displayName,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("兑换到哪个账号") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                    )
+                    ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                        accounts.forEach { account ->
+                            DropdownMenuItem(
+                                text = { Text(account.displayName) },
+                                onClick = { selectedUid = account.uid; expanded = false },
+                            )
+                        }
+                    }
+                }
+            } else {
+                Text(
+                    text = "账号：${target.displayName}",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -165,7 +243,7 @@ object LoomyUi : ProviderUi {
                     val value = invite.trim()
                     actions.onAction(
                         id,
-                        status.uid,
+                        target.uid,
                         LoomyProvider.ACTION_REDEEM_INVITE,
                         JsonObject().apply { addProperty("inviteCode", value) },
                     )
@@ -189,7 +267,7 @@ object LoomyUi : ProviderUi {
                     val value = code.trim()
                     actions.onAction(
                         id,
-                        status.uid,
+                        target.uid,
                         LoomyProvider.ACTION_REDEEM_CODE,
                         JsonObject().apply { addProperty("code", value) },
                     )
@@ -199,19 +277,6 @@ object LoomyUi : ProviderUi {
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("兑换码")
-            }
-
-            // 这家、这个账号的新手任务全部做完就整块收起；别的供应商、别的账号各看各的清单。
-            val taskView = actions.taskListOf(id, status.uid)
-            val tasksAllDone = taskView != null &&
-                taskView.error.isEmpty() &&
-                taskView.tasks.isNotEmpty() &&
-                taskView.tasks.all { it.completed }
-            if (!tasksAllDone) {
-                OutlineActionButton("一键完成新手任务") {
-                    actions.onAction(id, status.uid, ACTION_TASKS, JsonObject())
-                }
-                TaskListSection(status, actions)
             }
         }
     }

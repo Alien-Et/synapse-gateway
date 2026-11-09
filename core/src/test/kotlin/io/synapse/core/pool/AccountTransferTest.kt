@@ -101,9 +101,37 @@ class AccountTransferTest {
 
     @Test
     fun `解析出全部条目都不可用时报错而不是静默成功`() {
-        val json = """{"format":"aigw-accounts","version":3,"exportedAt":0,"accounts":[{"providerId":"trae","uid":"a"}]}"""
+        val json = """{"format":"aigw-accounts","version":4,"exportedAt":0,"accounts":[{"providerId":"trae","uid":"a"}]}"""
         val e = assertFailsWith<IllegalArgumentException> { AccountTransfer.decode(json) }
         assertTrue(e.message!!.contains("没有可用的账号"), e.message!!)
+    }
+
+    @Test
+    fun `账号的自定义显示名会一起往返`() {
+        val source = listOf(
+            AccountSnapshot(account("a"), customName = "主力号"),
+            AccountSnapshot(account("b")),
+        )
+        val envelope = AccountTransfer.decode(AccountTransfer.encode(source, exportedAt = 0L))
+        assertEquals(source, envelope.accounts)
+        assertEquals("主力号", envelope.accounts[0].customName)
+        assertEquals("", envelope.accounts[1].customName, "没起名的账号不该凭空多出一个名字")
+    }
+
+    @Test
+    fun `v3 文件仍可导入,自定义名按未设置处理`() {
+        // v3 只缺 customName,而缺失的含义是确定的（跟随上游昵称），
+        // 所以放行它，用户手上的旧备份不会因为一次升级全部作废。
+        val json = """
+            {"format":"aigw-accounts","version":3,"exportedAt":1,"accounts":[
+              {"providerId":"trae","uid":"u1","nickname":"甲","secret":"{}","enabled":true,"priority":2}
+            ]}
+        """.trimIndent()
+        val envelope = AccountTransfer.decode(json)
+        assertEquals(1, envelope.accounts.size)
+        assertEquals(3, envelope.version)
+        assertEquals(2, envelope.accounts[0].priority, "v3 的其它状态字段照常恢复")
+        assertEquals("", envelope.accounts[0].customName)
     }
 
     @Test
@@ -150,8 +178,8 @@ class AccountTransferTest {
 
     @Test
     fun `老版本导出文件缺少新字段时回退到默认值`() {
-        // v3 里没有 method/body/preset 的旧文件仍能导入
-        val legacy = """{"format":"aigw-accounts","version":3,"exportedAt":1,
+        // v4 里没有 method/body/preset 的旧文件仍能导入
+        val legacy = """{"format":"aigw-accounts","version":4,"exportedAt":1,
             "accounts":[{"providerId":"trae","uid":"u1","nickname":"n","secret":"{}","enabled":true,"priority":0}],
             "providers":[{"key":"old","name":"old","baseUrl":"https://x/v1",
             "protocol":"openai","enabled":true,"models":[],"balanceQuery":

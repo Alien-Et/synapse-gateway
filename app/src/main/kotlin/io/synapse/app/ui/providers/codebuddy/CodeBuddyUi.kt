@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.padding
 import com.google.gson.JsonObject
 import io.synapse.app.ui.AccountCardShell
+import io.synapse.app.ui.AccountRenameDialog
 import io.synapse.app.ui.ChoiceChip
 import io.synapse.app.ui.OutlineActionButton
 import io.synapse.app.ui.PagedAccountList
@@ -171,10 +172,12 @@ object CodeBuddyUi : ProviderUi {
 
     @Composable
     private fun AccountBlock(status: AccountStatus, actions: ProviderUiActions) {
+        var renaming by remember(status.uid) { mutableStateOf(false) }
         AccountCardShell(
             account = status,
             providerId = id,
             actions = actions,
+            onRename = { renaming = true },
             extra = {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("额度", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
@@ -218,6 +221,13 @@ object CodeBuddyUi : ProviderUi {
                 }
             },
         )
+        if (renaming) {
+            AccountRenameDialog(
+                account = status,
+                onDismiss = { renaming = false },
+                onConfirm = { actions.onRenameAccount(id, status.uid, it) },
+            )
+        }
     }
 
     /**

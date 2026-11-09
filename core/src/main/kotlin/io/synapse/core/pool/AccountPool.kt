@@ -38,6 +38,13 @@ data class AccountStatus(
     /** 使用优先级：数值越大越先用；同级仍按余额。默认 0。 */
     val priority: Int = 0,
     /**
+     * 用户给这个账号起的名字；空串表示没起过。
+     *
+     * 与 [nickname] 分开存：昵称来自上游账号资料，重新登录/刷新凭证时会被上游覆盖，
+     * 用户起的名字不该跟着变。三者优先级见 [displayName]。
+     */
+    val customName: String = "",
+    /**
      * 会员身份名（如「白银会员」），**由服务器下发**（`/m4c/openapi/userIdentity` 的 typeName）。
      *
      * 界面在账号名右侧显示为彩色胶囊标签；空串表示不是会员或查询不到，不显示标签。
@@ -52,6 +59,15 @@ data class AccountStatus(
     val raised: Boolean = false,
 ) {
     val usable: Boolean get() = !disabled && enabled
+
+    /**
+     * 界面上该显示的账号名：自定义名 > 上游昵称 > uid。
+     *
+     * 所有展示（账号卡片、日志、通知、导入导出清单）都该用它，不要各自再拼一次——
+     * 以前各处写 `nickname.ifEmpty { uid }`，加了自定义名后每处都要改，
+     * 漏一处就是「有的地方显示新名字、有的地方还是老昵称」。
+     */
+    val displayName: String get() = customName.ifEmpty { nickname }.ifEmpty { uid }
 }
 
 /** 账号池摘要（可整体或按 provider 统计）。 */
@@ -77,6 +93,9 @@ private class Entry(var account: ProviderAccount) {
     var enabled: Boolean = true
     var reason: String = ""
     var priority: Int = 0
+
+    /** 用户自定义的显示名;空串表示跟随上游昵称。 */
+    var customName: String = ""
 
     fun healthy(): Boolean = !disabled && enabled
 }
@@ -492,6 +511,28 @@ class AccountPool(
     }
 
     /** 直接设置账号优先级（数值越大越先用）。 */
+    /**
+     * 设置账号的自定义显示名;传空串表示恢复「跟随上游昵称」。
+     *
+     * **不写进凭证**:昵称属于上游账号资料,重新登录会被覆盖;
+     * 自定义名单独存在状态文件里,刷新凭证不会动它。
+     */
+    fun setCustomName(providerId: String, uid: String, name: String): Boolean {
+        val trimmed = name.trim()
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            entry.customName = trimmed
+            true
+        }
+        if (found) persistState(providerId, uid)
+        return found
+    }
+
+    /** 账号的显示名(自定义名 > 上游昵称 > uid);账号不存在时回退到 uid。 */
+    fun displayNameOf(providerId: String, uid: String): String = lock.read {
+        entries[keyOf(providerId, uid)]?.let { statusOf(it).displayName } ?: uid
+    }
+
     fun setPriority(providerId: String, uid: String, priority: Int): Boolean {
         val found = lock.write {
             val entry = entries[keyOf(providerId, uid)] ?: return@write false
@@ -518,6 +559,7 @@ class AccountPool(
         enabled = entry.enabled,
         priority = entry.priority,
         memberLevel = entry.memberLevel,
+        customName = entry.customName,
     )
 
     private fun keyOf(providerId: String, uid: String) = "$providerId/$uid"
@@ -557,6 +599,8 @@ class AccountPool(
         addProperty("enabled", entry.enabled)
         addProperty("reason", entry.reason)
         addProperty("priority", entry.priority)
+        // 只有起过名才写:没起名的账号状态文件保持原样,不必为默认值多存一个键
+        if (entry.customName.isNotEmpty()) addProperty("customName", entry.customName)
     }
 
     private fun load() {
@@ -574,6 +618,7 @@ class AccountPool(
                 entry.enabled = state.get("enabled")?.asBoolean ?: true
                 entry.reason = state.get("reason")?.asString.orEmpty()
                 entry.priority = state.get("priority")?.asInt ?: 0
+                entry.customName = state.get("customName")?.asString.orEmpty()
             }
             entries[keyOf(account.providerId, account.uid)] = entry
         }

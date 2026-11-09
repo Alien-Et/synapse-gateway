@@ -24,6 +24,13 @@ data class AccountSnapshot(
     val enabled: Boolean = true,
     /** 使用优先级（列表里 ↑/↓ 调过的顺序）。 */
     val priority: Int = 0,
+    /**
+     * 用户给这个账号起的显示名；空串表示跟随上游昵称。
+     *
+     * 必须导出：这是用户手动起的名字，换台设备后不该退回一串 uid。
+     * 它与凭证里的 nickname 是两回事——后者来自上游，重新登录会被覆盖。
+     */
+    val customName: String = "",
 )
 
 /** 解析出来的一份账号导出内容。 */
@@ -63,11 +70,22 @@ object AccountTransfer {
      * v2：账号 + 自定义供应商定义（providers）。
      * v3：再带上**可迁移的状态**——账号的手动启用开关与优先级、供应商的 protocol。
      *     导入按快照恢复，导出什么状态就还原什么状态。
+     * v4：账号再带上**用户自定义的显示名**（customName）。
      *
-     * **只认这一个版本**：导入是「把快照原样恢复」，老格式缺字段的状态混进来
-     * 只会让恢复结果模棱两可。遇到老文件直接报错让用户重新导出一份，比猜着读更安全。
+     * ## 为什么只放行 v3 与 v4
+     *
+     * 导入是「把快照原样恢复」，缺字段只能靠猜默认值补——猜出来的东西跟你导出时
+     * 不是同一份，这种「看起来成功了但其实不一样」比直接报错难查得多。所以 v1/v2
+     * 一律拒绝（它们缺启用开关与优先级，补默认值会悄悄改掉用户的策略）。
+     *
+     * v3 是唯一的例外：它只缺 [AccountSnapshot.customName]，而这个字段缺失的含义
+     * 完全确定——「没起过自定义名，跟随上游昵称」，不存在第二种解释。放行它，
+     * 用户手上的 v3 备份就不会因为一次升级全部作废。
      */
-    const val VERSION = 3
+    const val VERSION = 4
+
+    /** 还能读的旧版本（见 [VERSION] 的说明）。 */
+    private val READABLE_VERSIONS = setOf(3, VERSION)
 
     fun encode(
         accounts: List<AccountSnapshot>,
@@ -85,6 +103,8 @@ object AccountTransfer {
                 // 池里的可迁移状态：导入要原样恢复，不然「停用的号自己启用」
                 addProperty("enabled", snapshot.enabled)
                 addProperty("priority", snapshot.priority)
+                // 只有起过名才写：没起名的账号保持文件精简，导入时按空串处理
+                if (snapshot.customName.isNotEmpty()) addProperty("customName", snapshot.customName)
             })
         }
         // 自定义供应商定义：只存「怎么连 + 什么状态」，不存账号凭证（凭证在 accounts 里）
@@ -95,6 +115,8 @@ object AccountTransfer {
                 addProperty("name", p.name)
                 addProperty("baseUrl", p.baseUrl)
                 addProperty("protocol", p.protocol)
+                // 流式行为也要跟着走：换台设备导入后，上游只吃流式的站点不该又变回非流式
+                p.forceStreaming?.let { addProperty("forceStreaming", it) }
                 addProperty("enabled", p.enabled)
                 add("models", JsonArray().apply { p.models.forEach { add(it) } })
                 // 请求头与余额配置一起带走：换机导入后能直接用，不用再手抄一遍
@@ -132,9 +154,9 @@ object AccountTransfer {
         // 导入的语义是「把快照原样恢复」，老格式里那些没被记录的状态（启用开关、
         // 优先级、protocol）只能靠猜默认值补——恢复出来的东西跟你导出时并不是一份，
         // 这种"看起来成功了但其实不一样"比直接报错难查得多。老文件请重新导出一份。
-        if (version != VERSION) {
+        if (version !in READABLE_VERSIONS) {
             throw IllegalArgumentException(
-                "文件是 v$version 格式，当前只支持 v$VERSION——" +
+                "文件是 v$version 格式，当前只支持 v${READABLE_VERSIONS.sorted().joinToString("/")}——" +
                     "请用本应用重新导出一份（老格式缺状态字段，无法完整恢复）",
             )
         }
@@ -160,6 +182,7 @@ object AccountTransfer {
                     // v1/v2 文件没有这两项：默认「启用 + 无优先级」，与账号池的默认值一致
                     enabled = item.get("enabled")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true,
                     priority = item.intOrNull("priority") ?: 0,
+                    customName = item.stringOrNull("customName").orEmpty(),
                 ),
             )
         }
@@ -180,6 +203,7 @@ object AccountTransfer {
                     baseUrl = item.stringOrNull("baseUrl").orEmpty(),
                     apiKeys = emptyList(),
                     protocol = item.stringOrNull("protocol").orEmpty().ifEmpty { CustomProviderConfig.PROTOCOL_OPENAI },
+                    forceStreaming = item.get("forceStreaming")?.takeIf { it.isJsonPrimitive }?.asBoolean,
                     models = item.get("models")?.takeIf { it.isJsonArray }
                         ?.asJsonArray?.mapNotNull { m -> runCatching { m.asString }.getOrNull() }
                         .orEmpty(),

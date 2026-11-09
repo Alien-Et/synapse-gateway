@@ -119,7 +119,7 @@ fun ProviderCreditsScreen(
             val packs = state.creditPacks["$providerId/${account.uid}"].orEmpty()
             val bills = state.pointsBills["$providerId/${account.uid}"]
             SectionCard(enterIndex = 2) {
-                SectionLabel(account.nickname.ifEmpty { account.uid })
+                SectionLabel(account.displayName)
                 Text(
                     text = "余额 ${if (account.creditsKnown) account.credits.toString() else "—"} · ${accountStatusText(account)}",
                     style = MaterialTheme.typography.bodySmall,

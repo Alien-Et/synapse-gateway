@@ -5,6 +5,9 @@ package io.synapse.app.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -16,6 +19,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -23,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.synapse.core.gateway.CustomProviderConfig
@@ -68,6 +73,13 @@ fun CustomProviderScreen(
 
     // 上游协议：决定对话/模型端点路径与鉴权头。默认 OpenAI 兼容（兼容老配置）。
     var protocol by remember { mutableStateOf(existing?.protocol.orEmpty().ifEmpty { "openai" }) }
+    // 总是向上游要流式：老配置没有这个字段，默认跟随协议自身的默认值
+    var forceStreaming by remember {
+        mutableStateOf(
+            existing?.forceStreaming
+                ?: io.synapse.core.gateway.ProviderProtocols.of(protocol).forceStreaming,
+        )
+    }
     // 余额查询：选一个预设就自动补全路径/字段，也可以完全自定义。
     var balancePreset by remember { mutableStateOf(existing?.balanceQuery?.preset.orEmpty()) }
     var balancePath by remember { mutableStateOf(existing?.balanceQuery?.path.orEmpty()) }
@@ -91,6 +103,10 @@ fun CustomProviderScreen(
     // 编辑态从 state 实时读（模型列表由后台拉取后写回配置，这里要跟着变）。
     // 只 collect 一次：Compose 里 ?.value 链式写法既难读又容易触发类型推断错误。
     val uiState = viewModel?.state?.collectAsStateWithLifecycle()?.value
+    // 已有账号数要读**账号池**，不能读 config.apiKeys：
+    // 后者是「待同步的 Key」载体，保存成功后就清空了，读它永远显示 0，
+    // 与下面「API Key（N 个）」卡片自相矛盾。
+    val savedAccountCount = existing?.let { viewModel?.customAccountsWithKeys(it.providerId)?.size } ?: 0
     val liveConfig = uiState?.customProviders?.firstOrNull { it.key == existing?.key }
     val models = liveConfig?.models ?: existing?.models.orEmpty()
     val fetchingModels = existing?.providerId.orEmpty() in (uiState?.customFetchingModels.orEmpty())
@@ -162,7 +178,14 @@ fun CustomProviderScreen(
                     choices.forEach { (id, label) ->
                         DropdownMenuItem(
                             text = { Text(label) },
-                            onClick = { protocol = id; expanded = false },
+                            onClick = {
+                                protocol = id
+                                // 换协议时把「总是流式」跟到新协议的默认值，
+                                // 否则从 Responses 切回 OpenAI 会带着「强制流式」不放
+                                forceStreaming =
+                                    io.synapse.core.gateway.ProviderProtocols.of(id).forceStreaming
+                                expanded = false
+                            },
                         )
                     }
                 }
@@ -180,6 +203,53 @@ fun CustomProviderScreen(
                         io.synapse.core.gateway.ProtocolAuth.QUERY_KEY -> "?key="
                     },
                 style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // 请求体形状：Chat Completions（messages）还是 Responses（input）。
+            // 选错的话上游会回 400，所以把它显式写出来，用户不用去猜。
+            Text(
+                text = when (current.requestShape) {
+                    io.synapse.core.gateway.RequestShape.CHAT -> "请求体：messages（Chat Completions）"
+                    io.synapse.core.gateway.RequestShape.RESPONSES -> "请求体：input（Responses）"
+                } + if (current.forceStreaming) "　· 上游只吃流式，非流式请求由网关聚合" else "",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        // ---------------- 流式行为 ----------------
+        SectionCard {
+            // 协议对象在这里重新取一次：上面那张卡片的 `current` 出了作用域就不可见，
+            // 直接引用会编译失败（也是提醒：这里读的是最新选中的协议，不是旧快照）。
+            val current = io.synapse.core.gateway.ProviderProtocols.of(protocol)
+            SectionLabel("流式")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("总是向上游要流式", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "作用：客户端要非流式时，仍按 stream:true 请求上游，由网关在本地聚合成普通 JSON。" +
+                            "有些中转站和 Codex 类后端只接受流式，关着会直接 400。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = forceStreaming,
+                    onCheckedChange = { forceStreaming = it },
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = if (forceStreaming) {
+                    "已开启：上游一律按流式请求" + if (current.forceStreaming) "（该协议默认如此，可关）" else ""
+                } else {
+                    "已关闭：客户端要什么就发什么（推荐，除非上游只吃流式）"
+                },
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -272,7 +342,7 @@ fun CustomProviderScreen(
                     Text(
                         when {
                             parsedKeys.isEmpty() && isNew -> "一行一个，可填多个"
-                            parsedKeys.isEmpty() -> "留空 = 保留现有 ${existing?.apiKeys?.size ?: 0} 个账号"
+                            parsedKeys.isEmpty() -> "留空 = 保留现有 $savedAccountCount 个账号"
                             parsedKeys.size == 1 -> "将添加 1 个账号：${maskKey(parsedKeys.first())}"
                             else -> "将添加 ${parsedKeys.size} 个账号"
                         },
@@ -439,41 +509,84 @@ fun CustomProviderScreen(
             }
         }
 
-        // ---------------- 已有账号（编辑态，与旧详情页一致） ----------------
+        // ---------------- 已有账号 + 统一查看 Key（编辑态） ----------------
+        //
+        // 这一块在**已保存的供应商**里才出现（新建时还没有账号可看）。
+        // 之前只显示 uid 与开关：配了多个 Key 之后根本认不出哪个是哪个，
+        // 想核对/复制某一个还得去翻存储。现在把明文 Key 摊开，并支持整组复制。
         if (viewModel != null && existing != null) {
+            val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+            val rows = viewModel.customAccountsWithKeys(existing.providerId)
+            // 默认全部遮住：截屏/录屏时不会顺带把 Key 泄出去，要看再点
+            var revealed by remember(existing.key) { mutableStateOf(emptySet<String>()) }
+
             SectionCard {
-                SectionLabel("已创建的账号")
-                val accounts = viewModel.customAccountRows(existing.providerId)
-                if (accounts.isEmpty()) {
+                SectionLabel("API Key（${rows.size} 个）")
+                if (rows.isEmpty()) {
                     Text(
                         "还没有账号。在上面 API Key 处填一个即可添加。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
-                    for ((uid, enabled) in accounts) {
-                        androidx.compose.foundation.layout.Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                        ) {
+                    Text(
+                        text = "点「显示」看完整 Key，点 Key 本身可复制；多个 Key 时一个 Key 对应一个账号，网关按余额与失败情况轮换。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    for (row in rows) {
+                        val shown = row.uid in revealed
+                        val text = if (shown) row.apiKey.ifEmpty { "（读不到 Key）" } else maskKey(row.apiKey)
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable {
+                                            if (row.apiKey.isNotEmpty()) {
+                                                clipboard.setText(androidx.compose.ui.text.AnnotatedString(row.apiKey))
+                                                viewModel.notice("Key 已复制")
+                                            }
+                                        },
+                                )
+                                Text(
+                                    text = if (shown) "隐藏" else "显示",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clickable {
+                                            revealed = if (shown) revealed - row.uid else revealed + row.uid
+                                        }
+                                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                                )
+                                androidx.compose.material3.Switch(
+                                    checked = row.enabled,
+                                    onCheckedChange = { on ->
+                                        viewModel.setAccountEnabled(existing.providerId, row.uid, on)
+                                    },
+                                )
+                            }
                             Text(
-                                text = uid,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                            )
-                            Text(
-                                text = if (enabled) "启用中" else "已停用",
+                                text = "${row.displayName} · 当前" + if (row.enabled) "启用中" else "已停用",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (enabled) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            androidx.compose.material3.Switch(
-                                checked = enabled,
-                                onCheckedChange = { on ->
-                                    viewModel.setAccountEnabled(existing.providerId, uid, on)
-                                },
-                            )
+                        }
+                    }
+
+                    // 整组复制：换机器/贴到别处时不用一个个点
+                    OutlineActionButton("复制全部 Key（一行一个）") {
+                        val all = rows.mapNotNull { it.apiKey.takeIf { key -> key.isNotEmpty() } }
+                        if (all.isEmpty()) {
+                            viewModel.notice("没有可复制的 Key")
+                        } else {
+                            clipboard.setText(androidx.compose.ui.text.AnnotatedString(all.joinToString("\n")))
+                            viewModel.notice("已复制 ${all.size} 个 Key")
                         }
                     }
                 }
@@ -522,6 +635,8 @@ fun CustomProviderScreen(
                             // 启用状态不在这一页管理（账号级的开关在详情页），保持原值
                             enabled = existing?.enabled ?: true,
                             protocol = protocol,
+                            // 流式行为：用户在本页显式改过就按他的；没改过则跟随协议默认
+                            forceStreaming = forceStreaming,
                             // ★ 必须把已有的自定义请求头带回去：这一页重建了整个
                             // CustomProviderConfig，漏掉 headers 会让用户在详情页
                             // 配好的头一点保存就全丢（界面与引擎当场不同步）。

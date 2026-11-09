@@ -16,6 +16,8 @@ data class ActiveRequest(
     val providerId: String,
     val uid: String,
     val nickname: String,
+    /** 界面显示名（自定义名 > 上游昵称 > uid）；展示一律用它，别自己再拼。 */
+    val displayName: String = nickname,
     val startedAtMillis: Long,
     val phase: Phase,
 ) {
@@ -48,7 +50,13 @@ class ActiveRequests(private val nowMillis: () -> Long = System::currentTimeMill
     private val seq = AtomicLong(0)
 
     /** 登记一次请求开始，返回它的 id（后续 [update]/[finish] 用它）。 */
-    fun begin(clientModel: String, providerId: String, uid: String, nickname: String): String {
+    fun begin(
+        clientModel: String,
+        providerId: String,
+        uid: String,
+        nickname: String,
+        displayName: String = nickname,
+    ): String {
         val id = "req-${seq.incrementAndGet()}"
         entries[id] = ActiveRequest(
             id = id,
@@ -56,6 +64,7 @@ class ActiveRequests(private val nowMillis: () -> Long = System::currentTimeMill
             providerId = providerId,
             uid = uid,
             nickname = nickname,
+            displayName = displayName,
             startedAtMillis = nowMillis(),
             phase = ActiveRequest.Phase.CONNECTING,
         )

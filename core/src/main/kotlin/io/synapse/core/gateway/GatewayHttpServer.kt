@@ -721,12 +721,12 @@ class GatewayHttpServer(
                     breakerAccountOverride = alt
                     log(
                         "供应商 [$providerId] 熔断隔离中（剩余 ${breakerRemainingMs / 1000}s），" +
-                            "同家还有可用账号 ${alt.nickname.ifEmpty { alt.uid }}，换号继续",
+                            "同家还有可用账号 ${engine.pool.displayNameOf(alt.providerId, alt.uid)}，换号继续",
                     )
                     emitFailoverToast(
                         NoticeKind.CIRCUIT_FAILOVER,
                         "「${routeLabelOf(providerId, currentRoute.region)}」熔断中，" +
-                            "已自动换到同家的 ${alt.nickname.ifEmpty { alt.uid }} 继续",
+                            "已自动换到同家的 ${engine.pool.displayNameOf(alt.providerId, alt.uid)} 继续",
                         "circuit|$providerId|${alt.uid}",
                     )
                     routeErrors.add("$providerId(熔断中，已换同家其它账号继续)")
@@ -914,7 +914,7 @@ class GatewayHttpServer(
                                 "全局=${failoverCfg.concurrency.maxGlobal}，等待 ${waitedSecs}s 超时）"
                             log(
                                 "并发闸门拒入场（${currentRoute.providerId}/" +
-                                    "${fallback.nickname.ifEmpty { fallback.uid }}）：$providerLastError",
+                                    "${engine.pool.displayNameOf(fallback.providerId, fallback.uid)}）：$providerLastError",
                             )
                             // 不记进 failureKinds：本地闸门满不是上游限流，混进去会让对客错误码
                             // 变成 rate_limit_exceeded「上游限流」，属于归因造假
@@ -953,8 +953,8 @@ class GatewayHttpServer(
                 }
                 tried += picked.uid
                 lastAccountUid = picked.uid
-                lastAccountNickname = picked.nickname
-                attemptedAccountNames += picked.nickname.ifEmpty { picked.uid }
+                lastAccountNickname = engine.pool.displayNameOf(picked.providerId, picked.uid)
+                attemptedAccountNames += engine.pool.displayNameOf(picked.providerId, picked.uid)
                 if (regionAwareProvider != null) {
                     finalAccountRegion = regionAwareProvider.regionOf(picked) ?: routeRegion
                 }
@@ -974,7 +974,7 @@ class GatewayHttpServer(
                 }
 
                 if (engine.verboseLogging()) {
-                    log("第 $attempt 次选号（$providerId）：${picked.nickname.ifEmpty { picked.uid }}，发送模型 $resolvedModel")
+                    log("第 $attempt 次选号（$providerId）：${engine.pool.displayNameOf(picked.providerId, picked.uid)}，发送模型 $resolvedModel")
                     engine.logVerbose("转发内容", sanitized)
                 }
 
@@ -1019,6 +1019,7 @@ class GatewayHttpServer(
                     currentRoute.providerId,
                     account.uid,
                     account.nickname,
+                    engine.pool.displayNameOf(currentRoute.providerId, account.uid),
                 )
                 activeRequestId = activeId
 
@@ -1070,12 +1071,12 @@ class GatewayHttpServer(
                         log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${failure.message}")
                         emitFailoverToast(
                             NoticeKind.ACCOUNT_DISABLED,
-                            "账号 ${account.nickname.ifEmpty { account.uid }} 登录已失效，已自动停用并改用其它账号",
+                            "账号 ${engine.pool.displayNameOf(account.providerId, account.uid)} 登录已失效，已自动停用并改用其它账号",
                             "account-disabled|${currentRoute.providerId}|${account.uid}",
                         )
                         // 凭证失效是账号级问题，不代表供应商故障，不计入熔断
                         providerLastError = failure.message
-                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
+                        accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${failure.message}"
                         failureKinds.add(ErrorKind.SESSION_DEAD)
                         finishActiveRequest()
                         gateHandle.release()
@@ -1105,11 +1106,11 @@ class GatewayHttpServer(
                             .pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover) != null
                         if (hasUntried) {
                             log(
-                                "模型级限流（${currentRoute.providerId}/${account.nickname.ifEmpty { account.uid }}），" +
+                                "模型级限流（${currentRoute.providerId}/${engine.pool.displayNameOf(account.providerId, account.uid)}），" +
                                     "已冷却该号并换同家其它账号重试：${failure.message}",
                             )
                             providerLastError = failure.message
-                            accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
+                            accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${failure.message}"
                             lastHttpStatus = call.status
                             failureKinds.add(ErrorKind.MODEL_LIMIT)
                             finishActiveRequest()
@@ -1124,14 +1125,14 @@ class GatewayHttpServer(
                         engine.quotaAlerts.emit(
                             QuotaAlert(
                                 provider.displayName,
-                                account.nickname.ifEmpty { account.uid },
+                                engine.pool.displayNameOf(account.providerId, account.uid),
                                 requestedModel,
                                 "同供应商所有账号都被上游限流，约 ${waitSec}s 后自动恢复。${failure.message}",
                             ),
                             QuotaAlert.Level.MODEL_UNAVAILABLE,
                         )
                         providerLastError = failure.message
-                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
+                        accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${failure.message}"
                         lastHttpStatus = call.status
                         failureKinds.add(ErrorKind.MODEL_LIMIT)
                         finishActiveRequest()
@@ -1145,7 +1146,7 @@ class GatewayHttpServer(
                     }
                     pMetrics.record(false, elapsed, failure.kind.name)
                     providerLastError = failure.message
-                    accountErrors += "${account.nickname.ifEmpty { account.uid }}：${failure.message}"
+                    accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${failure.message}"
                     failureKinds.add(failure.kind)
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", call.errorBody)
                     finishActiveRequest()
@@ -1164,7 +1165,7 @@ class GatewayHttpServer(
                     }
                     pMetrics.record(false, elapsed, "network_status_0")
                     providerLastError = err
-                    accountErrors += "${account.nickname.ifEmpty { account.uid }}：$err"
+                    accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：$err"
                     failureKinds.add(ErrorKind.NETWORK)
                     if (engine.verboseLogging()) engine.logVerbose("返回原文", err)
                     finishActiveRequest()
@@ -1210,7 +1211,7 @@ class GatewayHttpServer(
                             log("凭证失效，已禁用账号（${currentRoute.providerId}/${account.nickname}）：${error.message}")
                         }
                         providerLastError = error.message
-                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
+                        accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${error.message}"
                         failureKinds.add(error.kind)
                         // 不可恢复错误：直接退出当前供应商重试，迅速切换下一家候选
                         finishActiveRequest()
@@ -1229,11 +1230,11 @@ class GatewayHttpServer(
                             .pickAccount(currentRoute.providerId, tried, currentRoute.region, model = resolvedModel, allowCrossRegion = failoverCfg.crossRegionFailover) != null
                         if (hasUntried) {
                             log(
-                                "模型级限流（${currentRoute.providerId}/${account.nickname.ifEmpty { account.uid }}），" +
+                                "模型级限流（${currentRoute.providerId}/${engine.pool.displayNameOf(account.providerId, account.uid)}），" +
                                     "已冷却该号并换同家其它账号重试：${error.message}",
                             )
                             providerLastError = error.message
-                            accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
+                            accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${error.message}"
                             lastHttpStatus = call.status
                             failureKinds.add(error.kind)
                             finishActiveRequest()
@@ -1251,14 +1252,14 @@ class GatewayHttpServer(
                         engine.quotaAlerts.emit(
                             QuotaAlert(
                                 provider.displayName,
-                                account.nickname.ifEmpty { account.uid },
+                                engine.pool.displayNameOf(account.providerId, account.uid),
                                 requestedModel,
                                 "同供应商所有账号都被上游限流，约 ${waitSec}s 后自动恢复。${error.message}",
                             ),
                             QuotaAlert.Level.MODEL_UNAVAILABLE,
                         )
                         providerLastError = error.message
-                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
+                        accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${error.message}"
                         lastHttpStatus = call.status
                         failureKinds.add(error.kind)
                         finishActiveRequest()
@@ -1277,7 +1278,7 @@ class GatewayHttpServer(
                             "quota|$providerId|$resolvedModel",
                         )
                         val providerName = provider.displayName
-                        val accountName = account.nickname.ifEmpty { account.uid }
+                        val accountName = engine.pool.displayNameOf(account.providerId, account.uid)
 
                         // 这个号确实空了：立刻把本地记录改成 0，后续选号就不会再白试它。
                         // （池里的额度本来只是旧快照，这次上游亲口说空了，是最权威的一次更新）
@@ -1310,7 +1311,7 @@ class GatewayHttpServer(
                         )
                         // 不计熔断：额度不足是账号级问题，换号后同家仍可正常服务
                         providerLastError = error.message
-                        accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
+                        accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${error.message}"
                         lastHttpStatus = call.status
                         failureKinds.add(error.kind)
                         finishActiveRequest()
@@ -1327,7 +1328,7 @@ class GatewayHttpServer(
                     }
                     pMetrics.record(false, elapsed, "http_${call.status}")
                     providerLastError = error.message
-                    accountErrors += "${account.nickname.ifEmpty { account.uid }}：${error.message}"
+                    accountErrors += "${engine.pool.displayNameOf(account.providerId, account.uid)}：${error.message}"
                     lastHttpStatus = call.status
                     failureKinds.add(error.kind)
                     finishActiveRequest()
@@ -1558,7 +1559,7 @@ class GatewayHttpServer(
                     recordCall(
                         id, providerId, model, uid, nickname, true,
                         CallStatus.FAILED, httpStatus, null, 0L, "连接在响应开始前中断", "", requestBody, startedAt,
-                    finalAccount = nickname.ifEmpty { uid },
+                    finalAccount = engine.pool.displayNameOf(providerId, uid).ifEmpty { nickname.ifEmpty { uid } },
                     attemptedAccounts = attemptedAccounts,
                     didFailover = attemptedAccounts.size > 1,
                     routeRegion = routeRegion,
@@ -1571,7 +1572,7 @@ class GatewayHttpServer(
                         result.failure, result.response, requestBody, startedAt, result.raw,
                         // 流式成功也要带上换号轨迹：否则界面永远显示「路由」，
                         // 明明中途换过号也看不出来。
-                        finalAccount = nickname.ifEmpty { uid },
+                        finalAccount = engine.pool.displayNameOf(providerId, uid).ifEmpty { nickname.ifEmpty { uid } },
                         attemptedAccounts = attemptedAccounts,
                         didFailover = attemptedAccounts.size > 1,
                         routeRegion = routeRegion,
@@ -1752,7 +1753,7 @@ class GatewayHttpServer(
         recordCall(
             newCompletionId(), providerId, model, uid, nickname, false,
             CallStatus.SUCCESS, httpStatus, usage, pointsConsumedOf(payload ?: JsonObject(), usage), "", content, requestBody, startedAt, normalized,
-            finalAccount = nickname.ifEmpty { uid },
+            finalAccount = engine.pool.displayNameOf(providerId, uid).ifEmpty { nickname.ifEmpty { uid } },
             attemptedAccounts = attemptedAccounts,
             routeRegion = routeRegion,
             finalAccountRegion = finalAccountRegion,

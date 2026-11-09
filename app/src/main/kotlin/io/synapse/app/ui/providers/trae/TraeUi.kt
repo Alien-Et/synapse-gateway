@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.google.gson.JsonObject
 import io.synapse.app.ui.AccountCardShell
+import io.synapse.app.ui.AccountRenameDialog
 import io.synapse.app.ui.ChoiceChip
 import io.synapse.app.ui.OutlineActionButton
 import io.synapse.app.ui.PagedAccountList
@@ -166,12 +167,21 @@ object TraeUi : ProviderUi {
 
     @Composable
     private fun AccountBlock(status: AccountStatus, actions: ProviderUiActions) {
+        var renaming by remember(status.uid) { mutableStateOf(false) }
         AccountCardShell(
             account = status,
             providerId = id,
             actions = actions,
+            onRename = { renaming = true },
             extra = { AccountExtra(status, actions) },
         )
+        if (renaming) {
+            AccountRenameDialog(
+                account = status,
+                onDismiss = { renaming = false },
+                onConfirm = { actions.onRenameAccount(id, status.uid, it) },
+            )
+        }
     }
 
     @Composable

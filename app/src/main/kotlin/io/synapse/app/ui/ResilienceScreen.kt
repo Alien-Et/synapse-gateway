@@ -27,6 +27,7 @@ import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.pool.AccountStatus
 import io.synapse.core.failover.CircuitBreakerConfig
 import io.synapse.core.failover.ConcurrencyConfig
+import io.synapse.core.failover.ModelBanTracker
 import io.synapse.core.failover.ModelCooldownConfig
 import io.synapse.core.failover.RetryConfig
 
@@ -72,6 +73,14 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
         ModelCooldownComponent(
             config = failover.modelCooldown,
             onOpenEdit = { editTarget = ResilienceEditTarget.ModelCooldown },
+        )
+        Spacer(Modifier.height(4.dp))
+        // 模型禁用：冷却解封后当天仍连续失败 N 次 → 该模型禁用 H 小时。
+        // 两个参数都能改，但默认值保持「3 次 / 24 小时」——用户没动过时行为与从前一致。
+        ModelBanComponent(
+            threshold = failover.modelBanThreshold,
+            hours = failover.modelBanHours,
+            onOpenEdit = { editTarget = ResilienceEditTarget.ModelBan },
         )
         Spacer(Modifier.height(4.dp))
         CrossRegionComponent(
@@ -171,11 +180,25 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
                     editTarget = null
                 },
             )
+            ResilienceEditTarget.ModelBan -> ModelBanEditDialog(
+                threshold = state.failover.modelBanThreshold,
+                hours = state.failover.modelBanHours,
+                onDismiss = { editTarget = null },
+                onConfirm = { nextThreshold, nextHours ->
+                    viewModel.updateFailoverSettings(
+                        state.failover.copy(
+                            modelBanThreshold = nextThreshold,
+                            modelBanHours = nextHours,
+                        ),
+                    )
+                    editTarget = null
+                },
+            )
         }
     }
 }
 
-private enum class ResilienceEditTarget { Concurrency, Retry, CircuitBreaker, ModelCooldown }
+private enum class ResilienceEditTarget { Concurrency, Retry, CircuitBreaker, ModelCooldown, ModelBan }
 
 @Composable
 private fun ConcurrencyComponent(config: ConcurrencyConfig, onOpenEdit: () -> Unit) {
@@ -261,6 +284,44 @@ private fun ModelCooldownComponent(config: ModelCooldownConfig, onOpenEdit: () -
  *
  * 这个开关会直接改变「请求发往哪家」的语义，所以默认关闭，且开启后必须配置候选模型。
  */
+/**
+ * 模型禁用（「连续失败 N 次就停用这个模型 H 小时」）。
+ *
+ * 与上面的「模型级冷却」是两套东西：冷却是撞一次限流就歇 10 分钟、只影响单个账号；
+ * 这里是冷却解封后**当天仍连续失败**达到阈值，就把这个模型整家停用一段时间，
+ * 期间直接跳过、走故障转移。阈值和时长都在这里改。
+ */
+@Composable
+private fun ModelBanComponent(
+    threshold: Int,
+    hours: Int,
+    onOpenEdit: () -> Unit,
+) {
+    SectionLabel("模型禁用")
+    SectionCard(enterIndex = 5) {
+        ParamRow("连续失败阈值", "$threshold 次")
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        ParamRow("禁用时长", formatBanDuration(hours))
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "冷却解封后当天同一个模型再连续失败到这个次数，就把该模型禁用上面这段时间；" +
+                "期间不再路由到它，请求直接走故障转移。禁用会落盘，重启 App 依然有效。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(4.dp))
+        OutlineActionButton("修改禁用参数") { onOpenEdit() }
+    }
+}
+
+/** 禁用时长文案：整天的按天显示（720 小时写成「30 天」比「720 小时」好读）。 */
+private fun formatBanDuration(hours: Int): String = when {
+    hours <= 0 -> "不启用"
+    hours % 24 == 0 -> "${hours / 24} 天（$hours 小时）"
+    hours < 24 -> "$hours 小时"
+    else -> "$hours 小时（${hours / 24} 天 $hours 小时）"
+}
+
 @Composable
 private fun CrossProviderComponent(
     config: io.synapse.core.failover.CrossProviderFailoverConfig,
@@ -617,6 +678,68 @@ private fun ModelCooldownEditDialog(
                 }
     }
 }
+
+/**
+ * 模型禁用的参数弹窗。
+ *
+ * 时长用「小时」而不是秒：这一档动辄 24 小时，按秒填要写 86400，容易多按一个零。
+ * 输入超范围时按上下限夹住（与设置层同一个 clamp），不静默丢弃用户的输入。
+ */
+@Composable
+private fun ModelBanEditDialog(
+    threshold: Int,
+    hours: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int, Int) -> Unit,
+) {
+    var thresholdText by remember { mutableStateOf(threshold.toString()) }
+    var hoursText by remember { mutableStateOf(hours.toString()) }
+
+    AppDialog(
+        title = "修改模型禁用",
+        subtitle = "默认 3 次 / 24 小时",
+        onDismiss = onDismiss,
+        buttons = {
+            AppDialogButton("取消", onDismiss)
+            AppDialogButton(
+                text = "保存",
+                onClick = {
+                    val nextThreshold = ModelBanTracker.clampThreshold(
+                        thresholdText.toIntOrNull() ?: threshold,
+                    )
+                    val nextHours = clampModelBanHours(hoursText.toIntOrNull() ?: hours)
+                    onConfirm(nextThreshold, nextHours)
+                },
+                emphasis = true,
+            )
+        },
+    ) {
+        NumberField(
+            label = "连续失败阈值（${ModelBanTracker.MIN_THRESHOLD}-${ModelBanTracker.MAX_THRESHOLD} 次）",
+            value = thresholdText,
+            maxLen = 2,
+        ) { thresholdText = it }
+        Spacer(Modifier.height(8.dp))
+        NumberField(
+            label = "禁用时长（${MIN_MODEL_BAN_HOURS}-${MAX_MODEL_BAN_HOURS} 小时）",
+            value = hoursText,
+            maxLen = 4,
+        ) { hoursText = it }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "阈值 1 表示只要解封后当天再失败一次就禁用；时长按小时填，720 = 30 天。" +
+                "禁用期间该模型不再被路由，客户端继续点名它会直接走故障转移。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** 禁用时长上下限（小时）：与 [ModelBanTracker] 的毫秒上下限一致。 */
+private const val MIN_MODEL_BAN_HOURS = 1
+private const val MAX_MODEL_BAN_HOURS = 30 * 24
+
+private fun clampModelBanHours(hours: Int): Int = hours.coerceIn(MIN_MODEL_BAN_HOURS, MAX_MODEL_BAN_HOURS)
 
 @Composable
 private fun NumberField(

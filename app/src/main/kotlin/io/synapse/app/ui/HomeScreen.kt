@@ -450,8 +450,10 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
                     .map { acc ->
                         TopologyAccountNode(
                             uid = acc.uid,
-                            label = acc.nickname.ifEmpty {
-                                if (acc.uid.length > 8) acc.uid.take(6) + "…" else acc.uid
+                            label = acc.customName.ifEmpty {
+                                acc.nickname.ifEmpty {
+                                    if (acc.uid.length > 8) acc.uid.take(6) + "…" else acc.uid
+                                }
                             },
                             usable = acc.usable,
                             dead = acc.disabled,
@@ -2406,7 +2408,7 @@ private fun AntigravityQuotaSection(state: AppUiState, viewModel: AppViewModel, 
             val packs = state.creditPacks["antigravity/${account.uid}"].orEmpty()
             if (accounts.size > 1) {
                 Text(
-                    text = account.nickname.ifEmpty { account.uid },
+                    text = account.displayName,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold,
                 )

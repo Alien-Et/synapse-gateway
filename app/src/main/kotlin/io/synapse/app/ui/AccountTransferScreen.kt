@@ -39,11 +39,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** 勾选树里的一行账号；导出（AccountStatus）与导入（ProviderAccount）共用。 */
-private data class SelectableAccount(val providerId: String, val uid: String, val nickname: String) {
+private data class SelectableAccount(
+    val providerId: String,
+    val uid: String,
+    val nickname: String,
+    val displayName: String,
+) {
     val key: String get() = "$providerId/$uid"
 }
 
-private fun ProviderAccount.toSelectable() = SelectableAccount(providerId, uid, nickname)
+private fun ProviderAccount.toSelectable() = SelectableAccount(providerId, uid, nickname, nickname.ifEmpty { uid })
 
 /**
  * 账号导入导出。
@@ -95,7 +100,7 @@ fun AccountTransferScreen(
 
     val exportGroups = state.providers
         .map { info ->
-            info.id to state.accountsOf(info.id).map { SelectableAccount(it.providerId, it.uid, it.nickname) }
+            info.id to state.accountsOf(info.id).map { SelectableAccount(it.providerId, it.uid, it.nickname, it.displayName) }
         }
         .filter { it.second.isNotEmpty() }
     val exportCount = if (exportAll) exportGroups.sumOf { it.second.size } else exportSelection.size
@@ -536,7 +541,7 @@ private fun AccountTree(
                     modifier = Modifier.size(22.dp),
                 )
                 Text(
-                    text = account.nickname.ifEmpty { account.uid },
+                    text = account.displayName,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }

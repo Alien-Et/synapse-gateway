@@ -72,6 +72,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+/**
+ * 自定义供应商的一个账号 + 它的明文 Key。
+ *
+ * [apiKey] 是本机凭证，只给界面「统一查看/复制」用，不进日志、不落调用记录。
+ */
+data class CustomAccountKeyRow(
+    val uid: String,
+    val displayName: String,
+    val apiKey: String,
+    val enabled: Boolean,
+)
+
 /** 验证码重发间隔（秒）：上游有频率限制，连点只会被拒。 */
 private const val SMS_RESEND_INTERVAL_MS = 60_000L
 
@@ -1123,7 +1135,7 @@ class AppViewModel(
                 when (poll) {
                     is DeviceAuthPoll.Pending -> delay(3_000)
                     is DeviceAuthPoll.Success -> {
-                        _state.value = _state.value.copy(busy = "", notice = "登录成功：${poll.account.nickname.ifEmpty { poll.account.uid }}")
+                        _state.value = _state.value.copy(busy = "", notice = "登录成功：${engine.pool.displayNameOf(poll.account.providerId, poll.account.uid)}")
                         refresh()
                         return@launch
                     }
@@ -1256,7 +1268,7 @@ class AppViewModel(
             val outcome = withContext(Dispatchers.IO) {
                 engine.completeSmsLogin(providerId, phone, code, msgid, ccode.ifBlank { "86" })
             }
-            _state.value = _state.value.copy(busy = "", notice = noticeOf(outcome))
+            _state.value = _state.value.copy(busy = "", notice = noticeOf(providerId, outcome))
             onResult(if (outcome.ok) "" else outcome.error)
             refresh()
         }
@@ -1267,7 +1279,7 @@ class AppViewModel(
         viewModelScope.launch {
             _state.value = _state.value.copy(busy = "正在导入")
             val outcome = withContext(Dispatchers.IO) { engine.importAccountJson(providerId, raw) }
-            _state.value = _state.value.copy(busy = "", notice = noticeOf(outcome))
+            _state.value = _state.value.copy(busy = "", notice = noticeOf(providerId, outcome))
             refresh()
         }
     }
@@ -1299,8 +1311,9 @@ class AppViewModel(
     fun renameAccount(providerId: String, uid: String, nickname: String) = action {
         val account = engine.account(providerId, uid) ?: throw IllegalStateException("账号不存在")
         val name = nickname.trim()
-        if (name.isEmpty()) throw IllegalStateException("名称不能为空")
-        engine.addAccount(providerId, uid, name, account.secret)
+        // 空串 = 恢复跟随上游昵称。只写账号状态里的自定义名，**不动凭证**：
+        // 昵称属于上游资料，改凭证会让「刷新凭证」把它又盖回去。
+        engine.setAccountCustomName(providerId, uid, name)
         "名称已更新"
     }
 
@@ -1327,6 +1340,23 @@ class AppViewModel(
     /** 自定义供应商的账号行：(uid, 是否启用)。供编辑页展示。 */
     fun customAccountRows(providerId: String): List<Pair<String, Boolean>> =
         engine.accounts(providerId).map { it.uid to it.usable }
+
+    /**
+     * 自定义供应商的账号清单：显示名 + uid + 明文 Key + 启用状态。
+     *
+     * Key 从账号 secret 里读回来（`{"apiKey":"sk-..."}`），用于「统一查看」——
+     * 用户配了多个 Key 后，界面只显示 uid 摘要，想核对/复制某一个必须能看到明文。
+     * 这是本地私有目录里的凭证，只有本人操作界面时才会读，不做任何网络上传。
+     */
+    fun customAccountsWithKeys(providerId: String): List<CustomAccountKeyRow> =
+        engine.accounts(providerId).map { status ->
+            CustomAccountKeyRow(
+                uid = status.uid,
+                displayName = status.displayName,
+                apiKey = accountApiKey(providerId, status.uid),
+                enabled = status.usable,
+            )
+        }
 
     /** 取自定义供应商的完整配置（详情页直接当编辑页用）。 */
     fun customConfig(providerId: String): CustomProviderConfig? {
@@ -1541,8 +1571,8 @@ class AppViewModel(
         }
     }
 
-    private fun noticeOf(outcome: LoginOutcome): String =
-        if (outcome.ok) "登录成功：${outcome.nickname.ifEmpty { outcome.uid }}" else "失败：${outcome.error}"
+    private fun noticeOf(providerId: String, outcome: LoginOutcome): String =
+        if (outcome.ok) "登录成功：${engine.pool.displayNameOf(providerId, outcome.uid)}" else "失败：${outcome.error}"
 
     // ------------------------------------------------------------------ 账号
 
@@ -1667,7 +1697,7 @@ class AppViewModel(
     private fun summarizeCredits(results: List<CreditRefreshResult>, suffix: String): String {
         val failed = results.filter { it.error.isNotEmpty() }
         if (failed.isEmpty()) return "额度已刷新$suffix"
-        val head = failed.take(3).joinToString("；") { "${it.nickname.ifEmpty { it.uid }}：${it.error}" }
+        val head = failed.take(3).joinToString("；") { "${engine.pool.displayNameOf(it.providerId, it.uid)}：${it.error}" }
         val rest = if (failed.size > 3) "…等 ${failed.size} 个" else ""
         return "额度刷新完成：成功 ${results.size - failed.size} 个，失败 ${failed.size} 个（$head$rest）"
     }
@@ -1695,7 +1725,7 @@ class AppViewModel(
         busyText = "批量任务",
         successNotice = { results ->
             results.filter { it.message.isNotEmpty() }
-                .joinToString("；") { "${it.nickname.ifEmpty { it.uid }}：${it.message}" }
+                .joinToString("；") { "${engine.pool.displayNameOf(it.providerId, it.uid)}：${it.message}" }
                 .ifEmpty { "任务完成（${results.size} 个账号）" }
         },
     ) { onProgress ->
@@ -1717,7 +1747,7 @@ class AppViewModel(
         busyText = "自动完成任务",
         successNotice = { results ->
             results.filter { it.message.isNotEmpty() }
-                .joinToString("；") { "${it.nickname.ifEmpty { it.uid }}：${it.message}" }
+                .joinToString("；") { "${engine.pool.displayNameOf(it.providerId, it.uid)}：${it.message}" }
                 .ifEmpty { "任务已处理（${results.size} 个账号）" }
         },
     ) { onProgress ->
@@ -1791,8 +1821,8 @@ class AppViewModel(
                         succeeded = results.count { it.ok },
                         failed = failed.size,
                         // 失败排前面：那是用户最需要看的内容；成功项跟在后面补充细节。
-                        items = failed.map { BatchItem(it.nickname.ifEmpty { it.uid }, it.message, ok = false) } +
-                            succeededItems.map { BatchItem(it.nickname.ifEmpty { it.uid }, it.message, ok = true) },
+                        items = failed.map { BatchItem(engine.pool.displayNameOf(it.providerId, it.uid), it.message, ok = false) } +
+                            succeededItems.map { BatchItem(engine.pool.displayNameOf(it.providerId, it.uid), it.message, ok = true) },
                     ) to results
                 }
             }
@@ -1829,7 +1859,7 @@ class AppViewModel(
         while (true) {
             val prev = _state.value
             val previous = prev.batchProgress
-            val name = progress.nickname.ifEmpty { progress.uid }
+            val name = engine.pool.displayNameOf(progress.providerId, progress.uid)
             val next = if (previous == null) {
                 BatchProgressUi(
                     progress.done, progress.total, name, stage = progress.stage, started = progress.started,
