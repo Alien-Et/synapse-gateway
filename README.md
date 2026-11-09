@@ -31,6 +31,7 @@
 - 无标签、标签失效、供应商未登录 —— 一律报错，不猜不兜底
 - 失败只在同一家内换号重试，绝不跨供应商转移
 - **国内外互通**（默认开启）：国内号都用不了时，自动顺延到国外号，反之亦然
+- **标签支持英文别名**：中文是正名，`antigravity/`、`codebuddy-cn/`、`trae-global/` 等英文写法同样可用（见下文标签表）
 - 调用记录标明这次走的是「路由」还是「故障转移」
 
 **账号**
@@ -44,6 +45,7 @@
 - 倍率、限时折扣、限免截止时间 —— 全部来自上游实时下发
 - 谷歌模型级剩余额度与重置时刻
 - 模型开放名单：只暴露勾选的模型
+- **目录变更提示**：刷新时对比上一轮，报出云端新增 / 下架了哪些模型，并写进运行日志
 
 **其他**
 - 用量趋势、调用记录、运行日志、存储占用自动清理
@@ -71,11 +73,11 @@
 
 | 供应商 | 接入方式 |
 |---|---|
-| 腾讯 / 字节 / 谷歌 / 商汤 | 网页登录，浏览器授权后自动回传凭证 |
-| ChatGPT | 浏览器 OAuth，回调到本机 1455 端口 |
+| 腾讯 | 设备授权：浏览器打开授权页确认，网关轮询取回凭证 |
+| 字节 / 商汤 | 网页登录，浏览器授权后自动回传凭证 |
+| 谷歌 / ChatGPT | 浏览器 OAuth，回调到本机端口（谷歌 51121 / ChatGPT 1455） |
 | Cline | 设备授权：浏览器打开授权页、输入授权码，网关自动取回凭证 |
-| 讯飞 | 「导入」粘贴 JSON 凭证 |
-| 灵犀 | 手机号 + 短信验证码（带滑块人机校验） |
+| 讯飞 / 灵犀 | 手机号 + 短信验证码（讯飞要填国家码；灵犀带滑块人机校验） |
 | 自定义 | 填 Base URL + API Key |
 
 ### 4. 配置客户端
@@ -340,7 +342,7 @@ trae-global/qwen-max            →  字节国外/qwen-max
 | `antigravity` | 谷歌 | `cloudcode-pa.googleapis.com` | Gemini 风格协议 |
 | `loomy` | 讯飞 | `xfinfr.com` | 鉴权失败返回 HTTP 200 + 业务码 |
 | `raccoon` | 商汤 | `xiaohuanxiong.com` | OpenAI 结构包在 `data` 里 |
-| `mcloud` | 灵犀 | 中国移动 AI 通道 | 滑块人机校验 |
+| `mcloud` | 灵犀 | `ai.yun.139.com` / `orches.yun.139.com` | 请求体加密；短信登录带滑块人机校验 |
 | `chatgpt` | ChatGPT | Codex 订阅后端 | Responses API，不是 Chat Completions |
 | `cline` | Cline | `api.cline.bot` | 免费池 / 订阅池共用一份凭证 |
 
@@ -563,6 +565,19 @@ user@example.com
 覆盖超时、连接被拒、网络不可达、DNS 解析失败、TLS 握手失败、连接中断六类。
 已经是中文可读文案的异常（如「登录状态已失效」）直接原样显示，不再套一层壳。
 
+### 上游错误也带中文语义
+
+有些失败不是网络问题，而是上游用英文如实告诉你账号状态（余额不足、没订阅这个模型）。
+这类由各 Provider 的 `classify` 补一句中文结论，**中文在前、上游原文在后**：
+
+```
+Cline 账户余额不足（已欠费或额度用完），当前余额 -0.002877 credit；
+充值地址 https://app.cline.bot/credits
+｜上游原文：Insufficient balance. Your Cline Credits balance is $-0.00
+```
+
+原文必须保留 —— 排查时它是唯一能搜的线索。上游文案本身已是中文时不再套壳。
+
 ### 提示统一走系统接口
 
 短句用系统 Toast，长句用系统对话框（跟随系统深浅色），不用底部 Snackbar —— 后者会压在内容底部盖住按钮。
@@ -605,12 +620,18 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（转换全封在 Pro
 
 | 子包 | 供应商 | 文件数 |
 |---|---|---|
-| `trae/` | 字节 | 16 |
-| `codebuddy/` | 腾讯 | 2 |
+| `trae/` | 字节 | 15 |
+| `loomy/` | 讯飞 | 14 |
+| `mcloud/` | 灵犀 | 12 |
+| `chatgpt/` | ChatGPT | 5 |
+| `codebuddy/` | 腾讯 | 3 |
+| `cline/` | Cline | 3 |
 | `antigravity/` | 谷歌 | 2 |
-| `loomy/` | 讯飞 | 13 |
 | `raccoon/` | 商汤 | 1 |
 | `custom/` | 自定义 | 1 |
+
+`provider/` 顶层还有 13 个公共文件：`Provider` 接口、`RoutedModel` / `ProviderModel` 数据模型、
+端点目录、`ChatCall`、SSE 逐行转换工具、错误分类等。
 
 每个 Provider 实现 `Provider` 接口：`listModels()` / `resolveModel()` / `openChat()` / `creditInfo()` / `performAction()` / `refreshAccount()`。
 
@@ -621,15 +642,22 @@ Provider 实现       上游私有协议 ⇄ OpenAI 协议（转换全封在 Pro
 账号凭证与状态按**账号独立存储**：
 
 ```
-account/<供应商>/<账号>            # 凭证
-pool/state/<供应商>/<账号>.json    # 状态（额度 / 启用 / 禁用原因）
-settings/...                      # 网关、代理、安全、供应商设置
-logs/calls/<id>                   # 调用记录
-logs/requests.json                # 运行日志（环形缓冲）
-usage/...                         # 用量统计
+account/<供应商>/<账号>              # 凭证
+pool/state/<供应商>/<账号>.json      # 状态（额度 / 启用 / 禁用原因）
+settings/gateway.json              # 网关设置
+settings/provider/<id>.json        # 供应商设置
+settings/proxy.json                # 代理设置
+settings/custom.json               # 自定义供应商配置
+settings/model_exposure.json       # 模型开放名单
+logs/calls/<id>                    # 调用记录
+logs/requests.json                 # 运行日志（环形缓冲）
+usage/...                          # 用量统计
 ```
 
 一个账号一个状态文件，改单个账号只重写它自己的键。
+
+调用记录里**超出摘要的完整原文不在加密存储里**，而是溢出到应用缓存目录
+（单字段 ≤512K 字符、总量 ≤64MB）；缓存被系统回收或记录被清理后，详情页回落展示摘要。
 
 ### 账号导入导出
 
@@ -669,8 +697,10 @@ Android 端凭证经 Android Keystore 加密后存入应用私有目录；命令
 版本号由标签决定，**不需要先改文件**：
 
 ```sh
-git tag -a v3.0.1 -m "v3.0.1"
-git push origin v3.0.1
+# 标签按**仓库已有序列**递增，打之前先查一遍：
+#   git ls-remote --tags origin
+git tag -a v3.0.9 -m "v3.0.9"
+git push origin v3.0.9
 ```
 
 工作流自动完成：
@@ -728,6 +758,7 @@ base64 -w0 release.keystore > keystore.b64
 | `models` | 列出模型 |
 | `usage` | 用量统计 |
 | `logs` | 运行日志 |
+| `help` | 打印命令帮助（等价 `--help`） |
 
 数据存于 `--data` 目录（默认 `~/.aigw`，可用 `AIGW_DATA` 环境变量覆盖）。
 
