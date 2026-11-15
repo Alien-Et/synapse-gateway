@@ -2633,6 +2633,7 @@ class GatewayEngine(
             "mcloud" -> "灵犀"
             "chatgpt" -> "ChatGPT"
             "cline" -> "Cline"
+            "doubao" -> "豆包"
             // 未知供应商沿用 id，不硬编中文
             else -> return if (region == null) providerId else "$providerId-$region"
         }
@@ -2806,6 +2807,8 @@ class GatewayEngine(
             // Cline：免费池 / 订阅池挂在同一个账号上，池由模型 id 的前缀区分
             // （`cline-free/...` / `cline-pass/...`），所以这里只有一个标签。
             "Cline" to "cline",
+            // 豆包：无区域概念（store-region 只是存储节点），所以只有一个标签。
+            "豆包" to "doubao",
         )
 
         /**
@@ -2838,6 +2841,8 @@ class GatewayEngine(
             "gpt" to "chatgpt",
             "openai" to "chatgpt",
             "cline" to "cline",
+            "doubao" to "doubao",
+            "nova" to "doubao",
         )
 
         /** 中文区域后缀 → 区域标识。 */

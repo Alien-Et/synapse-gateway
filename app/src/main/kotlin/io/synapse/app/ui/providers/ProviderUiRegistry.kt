@@ -6,6 +6,7 @@ import io.synapse.app.ui.providers.chatgpt.ChatGPTUi
 import io.synapse.app.ui.providers.cline.ClineUi
 import io.synapse.app.ui.providers.codebuddy.CodeBuddyUi
 import io.synapse.app.ui.providers.custom.CustomUi
+import io.synapse.app.ui.providers.doubao.DoubaoUi
 import io.synapse.app.ui.providers.loomy.LoomyUi
 import io.synapse.app.ui.providers.mcloud.MCloudUi
 import io.synapse.app.ui.providers.raccoon.RaccoonUi
@@ -28,6 +29,7 @@ object ProviderUiRegistry {
         MCloudUi,
         ChatGPTUi,
         ClineUi,
+        DoubaoUi,
     ).associateBy { it.id }
 
     private val customCache = ConcurrentHashMap<String, ProviderUi>()

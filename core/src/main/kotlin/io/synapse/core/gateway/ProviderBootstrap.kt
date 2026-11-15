@@ -5,6 +5,7 @@ import io.synapse.core.provider.antigravity.AntigravityProvider
 import io.synapse.core.provider.chatgpt.ChatGPTProvider
 import io.synapse.core.provider.cline.ClineProvider
 import io.synapse.core.provider.codebuddy.CodeBuddyProvider
+import io.synapse.core.provider.doubao.DoubaoProvider
 import io.synapse.core.provider.loomy.LoomyProvider
 import io.synapse.core.provider.mcloud.MCloudProvider
 import io.synapse.core.provider.raccoon.RaccoonProvider
@@ -85,6 +86,22 @@ internal fun registerBuiltinProviders(engine: GatewayEngine) {
 
     registry.register(
         ClineProvider(
+            hooks = engine.hooks,
+            nowMillis = { engine.now() },
+        ),
+    )
+
+    registry.register(
+        DoubaoProvider(
+            // 线路（专家 / 极速）与固定窗口都是**用户偏好**，存 provider options，
+            // 不进凭证 —— 换线路不该触发重新登录（与 customName 同一条纪律）。
+            line = {
+                engine.providerSettings(DoubaoProvider.ID)
+                    .option("line", DoubaoProvider.LINE_FAST)
+            },
+            fixedWindow = {
+                engine.providerSettings(DoubaoProvider.ID).option("fixedWindow", "true") != "false"
+            },
             hooks = engine.hooks,
             nowMillis = { engine.now() },
         ),
