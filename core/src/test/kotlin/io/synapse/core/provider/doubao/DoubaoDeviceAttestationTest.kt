@@ -147,6 +147,15 @@ class DoubaoDeviceAttestationTest {
     // ------------------------------------------------------------------ 协议装配
 
     @Test
+    fun `public 前缀包的形状与上游一致`() {
+        // base64("pub." + 主体)：csr / client-cert 两个头都用这个形状
+        assertEquals(
+            java.util.Base64.getEncoder().encodeToString("pub.abc".toByteArray(Charsets.UTF_8)),
+            DoubaoDeviceAttestation.publicBlobHeader("abc"),
+        )
+    }
+
+    @Test
     fun `verify 请求头缺真值时省略而不是发空值`() {
         val client = DoubaoDeviceAttestation()
         val prepared = DoubaoDeviceAttestation.Prepared(
@@ -164,7 +173,11 @@ class DoubaoDeviceAttestationTest {
 
         val full = client.buildVerifyHeaders(prepared, reePublicKey = "REE", clientCert = "CC")
         assertEquals("REE", full[DoubaoDeviceAttestation.HEADER_REE_PUBLIC_KEY])
-        assertEquals("CC", full[DoubaoDeviceAttestation.HEADER_CLIENT_CERT])
+        // client-cert 要包成 `base64("pub." + 内容)`，与上游请求管线一致
+        assertEquals(
+            DoubaoDeviceAttestation.publicBlobHeader("CC"),
+            full[DoubaoDeviceAttestation.HEADER_CLIENT_CERT],
+        )
     }
 
     @Test
@@ -217,9 +230,9 @@ class DoubaoDeviceAttestationTest {
 
         val client = DoubaoDeviceAttestation(tee = tee)
         assertFalse(client.available())
-        assertNull(client.prepare("REE"))
+        assertNull(client.prepare())
         // 关键纪律：拿不到真值就返回空头，绝不发假 guard 头
-        assertTrue(client.asGuardHeaders(reePublicKey = { "REE" }).headers().isEmpty())
+        assertTrue(client.asGuardHeaders().headers().isEmpty())
     }
 
     // ------------------------------------------------------------------ 工具

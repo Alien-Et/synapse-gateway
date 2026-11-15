@@ -68,7 +68,16 @@ class DoubaoProvider(
     private val line: () -> String = { LINE_FAST },
     /** 是否固定在一个对话窗口。 */
     private val fixedWindow: () -> Boolean = { true },
-    private val authClient: DoubaoAuthClient = DoubaoAuthClient(),
+    /**
+     * 登录/发码客户端。
+     *
+     * `guardHeaders` 接的是设备证明链（TEE Key Attestation）——对应上游「启动期
+     * `loadTee()` 备密钥、请求期把产物作为头注入」的引用方式（见 [DoubaoDeviceAttestation]）。
+     * 拿不到真值（无 TEE / 证书链为空）时它返回空 map，发码行为与接线前完全一致。
+     */
+    private val authClient: DoubaoAuthClient = DoubaoAuthClient(
+        guardHeaders = DoubaoDeviceAttestation().asGuardHeaders(),
+    ),
     private val hooks: ProviderHooks = ProviderHooks(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) : Provider, io.synapse.core.provider.SmsLoginSupport {
