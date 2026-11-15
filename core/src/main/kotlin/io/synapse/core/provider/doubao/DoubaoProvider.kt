@@ -67,13 +67,14 @@ class DoubaoProvider(
     private val line: () -> String = { LINE_FAST },
     /** 是否固定在一个对话窗口。 */
     private val fixedWindow: () -> Boolean = { true },
+    private val authClient: DoubaoAuthClient = DoubaoAuthClient(),
     private val hooks: ProviderHooks = ProviderHooks(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
-) : Provider {
+) : Provider, io.synapse.core.provider.SmsLoginSupport {
 
     override val id: String = ID
     override val displayName: String = "豆包"
-    override val authKind: AuthKind = AuthKind.NONE
+    override val authKind: AuthKind = AuthKind.SMS_CODE
     override val capabilities: Set<ProviderCapability> = setOf(ProviderCapability.CREDIT_REFRESH)
 
     override fun hosts(): List<String> = listOf("doubao.com")
@@ -222,6 +223,71 @@ class DoubaoProvider(
             return FailedChatCall(200, "豆包返回空回复（上游 200 但没有任何内容）")
         }
         return AggregatedChatCall(200, aggregated)
+    }
+
+    // ------------------------------------------------------------------ 短信登录（SmsLoginSupport）
+
+    /** 多账号暂存：msgid（`sel:<sec_uid>`）→ 第二次登录需要的 ticket/key。 */
+    private val pendingMulti = java.util.concurrent.ConcurrentHashMap<String, DoubaoAuthClient.LoginOutcome.MultiAccount>()
+
+    override fun sendSmsCode(phone: String, ccode: String): String {
+        val result = authClient.sendSmsCode(phone, ccode)
+        // SmsLoginSupport 的 msgid 语义 = 登录时回传的中间凭证。
+        // 豆包的 encodedMobile 本身可以从 phone 重新算出，但传一遍更稳（与上游会话绑定）。
+        return result.encodedMobile
+    }
+
+    override fun loginBySmsCode(
+        phone: String,
+        code: String,
+        msgid: String,
+        ccode: String,
+    ): ProviderAccount {
+        val sel = msgid.startsWith(DoubaoAuthClient.SEL_PREFIX)
+        val outcome = if (sel) {
+            val pending = pendingMulti.remove(msgid)
+                ?: throw IllegalStateException("多账号会话已过期或不存在，请重新登录")
+            authClient.loginSelect(
+                phone = phone,
+                ccode = ccode,
+                msgid = msgid,
+                mobileTicket = pending.mobileTicket,
+                smsCodeKey = pending.smsCodeKey,
+            )
+        } else {
+            authClient.loginBySmsCode(phone, code, msgid, ccode)
+        }
+        return when (outcome) {
+            is DoubaoAuthClient.LoginOutcome.Success -> {
+                val credential = outcome.credential
+                val uid = credential.uid.ifEmpty {
+                    "doubao-" + credential.cookie.hashCode().toUInt().toString(16)
+                }
+                ProviderAccount(
+                    providerId = ID,
+                    uid = uid,
+                    nickname = "豆包",
+                    secret = credential.toSecret(),
+                )
+            }
+            is DoubaoAuthClient.LoginOutcome.MultiAccount -> {
+                // 多账号：把候选列表以「第一个账号的 sec_uid」作为 msgid 返回给 UI，
+                // 完整候选存在 pendingMulti 里。UI 端发现 MultiAccount 时应展示选择列表，
+                // 再以 `sel:<选中的 sec_uid>` 重新调 loginBySmsCode。
+                // 由于 SmsLoginSupport 接口只有「成功返回 ProviderAccount」一种形态，
+                // 这里把候选信息塞进异常消息传递（UI 端解析 `MULTI:` 前缀）。
+                val first = outcome.subAccounts.firstOrNull()
+                    ?: throw IllegalStateException("多账号响应里没有候选账号")
+                val selMsgid = DoubaoAuthClient.SEL_PREFIX + first.secUid
+                pendingMulti[selMsgid] = outcome
+                throw DoubaoMultiAccountException(
+                    accounts = outcome.subAccounts,
+                    mobileTicket = outcome.mobileTicket,
+                    smsCodeKey = outcome.smsCodeKey,
+                    hintMsgid = selMsgid,
+                )
+            }
+        }
     }
 
     // ------------------------------------------------------------------ 请求构造
