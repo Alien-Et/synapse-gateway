@@ -362,7 +362,7 @@ trae-global/qwen-max            →  字节国外/qwen-max
 - **讯飞** — 鉴权失败是 HTTP 200 + 业务码，不判业务码会把错误 JSON 当正常回复透传
 - **商汤** — 响应外层是 `{"status":..., "data":...}`；字段用标准名（不认 `max_new_tokens`）
 - **Cline** — 免费池靠 `X-CLIENT-TYPE: cline-sdk` 这道产品面校验（缺了 403、写成 `cline-cli` 会 500）；令牌带 `workos:` 前缀，去掉就 401；`cline-pass/` 要订阅，没订阅的账号会 403 `ENTITLEMENT_ERROR`
-- **豆包** — 手机号短信登录（`SmsLoginSupport`，`authKind=SMS_CODE`）；登录字段按 `mix_mode=1` 混淆（每字节 XOR 0x05）；`d_ticket` 判空须用 `extractCookie` 而非 `contains`；生视频是异步 push（非 SSE），判据 `video.status==3` 且 `vid` 非空；多账号走 `sel:<sec_uid>` 二次登录；**对话鉴权只在 Cookie 层**（实测全套票据头 / 仅 Cookie / Cookie+STUB 三种组合响应一字不差），`chatHeaders()` 不补多余头；账号/设备被频控时上游回 `HTTP 200 + STREAM_ERROR(710022002)`，网关转成 OpenAI 顶层 `error` 帧并归 `SOFT_RATE`，非流式走 `StreamFailureChatCall`，不会误报「空回复」或「凭证失效」（详见 [docs/08](docs/08.上游陷阱清单.md)）
+- **豆包** — 手机号短信登录（`SmsLoginSupport`，`authKind=SMS_CODE`）；登录字段按 `mix_mode=1` 混淆（每字节 XOR 0x05）；`d_ticket` 判空须用 `extractCookie` 而非 `contains`；生视频是异步 push（非 SSE），判据 `video.status==3` 且 `vid` 非空；多账号 `sel:<sec_uid>` 走 **code/msgid 双通道**判据（旧实现只判 msgid 会选号必失败）；发码**不带 csrf**、guard 动态票据留注入口（没真值不发假头）；**对话鉴权只在 Cookie 层**（实测全套票据头 / 仅 Cookie / Cookie+STUB 三种组合响应一字不差），`chatHeaders()` 不补多余头；账号/设备被频控时上游回 `HTTP 200 + STREAM_ERROR(710022002)`，网关转成 OpenAI 顶层 `error` 帧并归 `SOFT_RATE`，非流式走 `StreamFailureChatCall`，不会误报「空回复」或「凭证失效」（详见 [docs/08](docs/08.上游陷阱清单.md)）
 
 ---
 

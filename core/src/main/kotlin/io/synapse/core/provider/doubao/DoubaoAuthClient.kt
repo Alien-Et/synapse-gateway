@@ -4,9 +4,26 @@ import com.google.gson.JsonObject
 import io.synapse.core.util.NetworkErrorText
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.stringOrNull
-import java.net.HttpURLConnection
 import java.net.URLEncoder
-import java.util.UUID
+
+/**
+ * 设备票据提供者（发码设备注册链的可扩展接入口）。
+ *
+ * ## 为什么不直接把六件套硬编码进来
+ *
+ * 真机实测：`bd-ticket-guard-client-cert` / `-ree-public-key` / `-server-cert-sn`
+ * / `-static-sign` / `-static-ts-sign` / `-sec-ts` **每次登录由设备注册链动态下发**，
+ * 且 `static-sign` 是 TEE（硬件安全芯片）ECDSA 签名，纯服务端凭空复刻不出来。
+ * 写死一组过期值只会让 `Bd-Ticket-Guard-Result` 裁决位更差（实测 1103/1104/3）。
+ *
+ * 所以这里**默认返回空**：没有真值时宁可不带 guard 头，也不发假头骗自己。
+ * 真机注册链打通后，把「实时取到的六件套」通过 [headers] 注入即可，
+ * 发码逻辑一行都不用改。这是「能静态落地、不依赖硬件」的那一部分。
+ */
+fun interface DeviceGuardHeaders {
+    /** 返回本次发码要带的 guard 头；没有真值就返回空 map。 */
+    fun headers(): Map<String, String>
+}
 
 /**
  * 豆包登录客户端：手机号 + 短信验证码。
@@ -27,24 +44,66 @@ import java.util.UUID
  *    或直接成功（单账号）。
  * 2. **第二次**（多账号选号）：带 `mobile_ticket` + `sec_uid` + `sms_code_key`，**不带 code**。
  *
- * 网关侧用 `msgid` 通道承载「选中账号的 sec_uid」（前缀 `sel:`），
- * 与 [io.synapse.core.provider.SmsLoginSupport] 的 msgid 语义兼容。
+ * 网关侧「选中账号」token 走 `msgid` 或 `code` 两个通道之一（见 [extractSelToken]），
+ * 与 [io.synapse.core.provider.SmsLoginSupport] 的入参形态保持兼容。
  */
 class DoubaoAuthClient(
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    /** 设备票据注入口；默认空实现 = 不带 guard 头（见 [DeviceGuardHeaders]）。 */
+    private val guardHeaders: DeviceGuardHeaders = DeviceGuardHeaders { emptyMap() },
 ) {
 
-    /** 「选中账号」的 msgid 前缀：`sel:<sec_uid>`。 */
+    /** 「选中账号」的 token 前缀：`sel:<sec_uid>`。 */
     companion object {
         const val SEL_PREFIX = "sel:"
         private const val BASE = DoubaoProvider.BASE_URL
         private const val XOR_KEY = 0x05
         private const val APP_NAME = "nova_ai"
         private const val PASSPORT_SUPPORT_FLOW = "captcha,passport_user_ban,verify"
-        /** 实测请求头里的 csrf 是登录前会话的固定值；服务器侧无法复现，先用固定占位。 */
-        private const val CSRF = "a94476b1e02f2fd3c0d4137f86f48562"
-        /** 设备 cdid（与公共 query 一致，成对保存防风控）。 */
+
+        /**
+         * 发码请求**不带 csrf**。
+         *
+         * 真机埋点实测 `request_csrf_token=0`（发码请求不带 csrf）、
+         * `response_csrf_token=1`（csrf 是响应才下发的，存进 CsrfTokenManager_sp.xml）。
+         * 早期这里写死一个 hex 值，等于「带了不该带的头」，与抓包相反 —— 已被实测推翻，
+         * 改成空串（空串时整个头省略，服务端按未登录会话处理，才是正确起点）。
+         */
+        private const val CSRF = ""
+
+        /**
+         * 固定设备身份三件套。
+         *
+         * ⚠️ 实测这三项**每次登录由设备注册链动态下发**（不同会话 cdid 不同），
+         * 写死会被判成「复用旧设备」而触发风控。但独立网关 App 没有豆包的设备注册链
+         * （`get_ticket_no_server_cert` → `get_client_cert` → TEE 静态签名），拿不到动态值；
+         * Python 对照实验里「换全新随机指纹」直接 403（guard 注册链缺失），比固定值更糟。
+         * 所以这里**保持固定、如实标注边界**，不假装能复刻，也不添加填假值的 guard 头
+         * （假头只会让服务端裁决位更差）。
+         */
         private const val DEVICE_CDID = "8d39bab5-a4ac-41b2-b9b2-53fccbb889df"
+        private const val DEVICE_IID = "393003648174026"
+        private const val DEVICE_ID = "1923490807555162"
+
+        /**
+         * 从 [io.synapse.core.provider.SmsLoginSupport.loginBySmsCode] 的两个入参通道
+         * 提取「选中账号」token；都没有返回空串（= 普通验证码登录）。
+         *
+         * ## 为什么要两个通道都认
+         *
+         * 多账号对话框调的是 `onSmsLogin(id, phone, selMsgid, ccode)` ——
+         * 按 `ProviderUiActions` 的签名，第 3 个参数是 **code**，不是 msgid。
+         * 所以 `sel:<sec_uid>` 实际落在 `code` 上；而 `msgid` 里存的是发码时
+         * 的 encodedMobile（hex）。旧实现只判 msgid ⇒ 选号永远失败，且会把
+         * `sel:xxx` 当成验证码 XOR 后发给上游。抽成纯函数后，这个判据可单测锁死。
+         *
+         * 两个通道都带 sel 时以 msgid 为准（标准通道优先）。
+         */
+        fun extractSelToken(msgid: String, code: String): String = when {
+            msgid.startsWith(SEL_PREFIX) -> msgid
+            code.startsWith(SEL_PREFIX) -> code
+            else -> ""
+        }
 
         /** 每字节 XOR 0x05，再转 hex（小写）。空串返回空串。 */
         fun xorEncode(s: String): String =
@@ -125,7 +184,7 @@ class DoubaoAuthClient(
             "multi_login" to "1",
             "type" to xorEncode("24"),
         )
-        val resp = post("passport/mobile/send_code/v1/", body, anonymousHeaders())
+        val resp = post("passport/mobile/send_code/v1/", body, buildLoginHeaders())
         val data = resp.data
         if (resp.status !in 200..299) {
             throw DoubaoLoginException("发码失败：HTTP ${resp.status} ${data.take(200)}")
@@ -151,11 +210,8 @@ class DoubaoAuthClient(
     /**
      * 验证码登录。
      *
-     * [msgid] 来自 [sendSmsCode] 的调用方保存（实为 encodedMobile 的载体说明，见下），
-     * 或 `sel:<sec_uid>` 表示多账号选号。
-     *
-     * 实现约定：[msgid] 直接传 [SendResult.encodedMobile]；
-     * 多账号时传 `sel:<sec_uid>` 并把 `mobileTicket`/`smsCodeKey` 一起带上。
+     * [msgid] 直接传 [SendResult.encodedMobile]；多账号选号时把 `sel:<sec_uid>`
+     * 放在 [msgid]（[loginSelect] 就是这么调的），`mobileTicket` / `smsCodeKey` 一起带上。
      */
     fun loginBySmsCode(
         phone: String,
@@ -186,7 +242,7 @@ class DoubaoAuthClient(
             add("mobile" to encodedMobile)
             add("multi_login" to "1")
         }
-        val resp = post("passport/auth/one_login/", form(*body.toTypedArray()), anonymousHeaders())
+        val resp = post("passport/auth/one_login/", form(*body.toTypedArray()), buildLoginHeaders())
 
         if (resp.status !in 200..299) {
             throw DoubaoLoginException("登录失败：HTTP ${resp.status} ${resp.data.take(200)}")
@@ -198,7 +254,7 @@ class DoubaoAuthClient(
             ?: 0
 
         return when {
-            errorCode == 0 || errorCode == null -> {
+            errorCode == 0 -> {
                 val setCookie = resp.setCookie
                 if (setCookie.isEmpty()) {
                     throw DoubaoLoginException("登录成功但没有下发 Cookie（HTTP ${resp.status}）")
@@ -299,7 +355,7 @@ class DoubaoAuthClient(
             "os" to "android",
             "ssmix" to "a",
             "_rticket" to nowMillis().toString(),
-            "cdid" to "8d39bab5-a4ac-41b2-b9b2-53fccbb889df",
+            "cdid" to DEVICE_CDID,
             "channel" to "oppo_482431_64",
             "aid" to "482431",
             "app_name" to APP_NAME,
@@ -327,8 +383,8 @@ class DoubaoAuthClient(
             "dora_bond_count" to "0",
             "has_dora_device" to "0",
             "pkg_type" to "release_version",
-            "iid" to "393003648174026",
-            "device_id" to "1923490807555162",
+            "iid" to DEVICE_IID,
+            "device_id" to DEVICE_ID,
             "doubao_account_sdk_version" to "1.0.3-alpha.0",
         )
         return params.entries.joinToString("&") { (k, v) ->
@@ -336,17 +392,34 @@ class DoubaoAuthClient(
         }
     }
 
-    /** 登录请求头（实测：无 X-SS-STUB；csrf 用固定占位即可过）。 */
-    private fun anonymousHeaders(): Map<String, String> = mapOf(
-        "Content-Type" to "application/x-www-form-urlencoded",
-        "User-Agent" to "com.larus.nova/15070040 (Linux; U; Android 16; zh_CN)",
-        "x-tt-request-tag" to "t=0;n=0",
-        "x-tt-passport-csrf-token" to CSRF,
-        "X-SS-REQ-TICKET" to nowMillis().toString(),
-        "x-vc-bdturing-sdk-version" to "4.1.1.cn",
-        "agent-version" to "old",
-        "bd-ticket-guard-version" to "3",
-    )
+    /**
+     * 通用登录头（发码 / 换 token 共用）。
+     *
+     * - 实测**不需要** `X-SS-STUB`（只在开发者平台出现）；
+     * - `x-tt-passport-csrf-token`：发码请求 `request_csrf_token=0` ⇒ **不带**，
+     *   csrf 是响应才下发的。CSRF 为空串时整个头省略，不发空值骗自己；
+     * - `bd-ticket-guard-version: 3` 只是协议版本声明，**不等于**六件套齐了。
+     *   真正决定 403→200 的是 [guardHeaders] 注入的动态票据。
+     */
+    private fun anonymousHeaders(): Map<String, String> = buildMap {
+        put("Content-Type", "application/x-www-form-urlencoded")
+        put("User-Agent", "com.larus.nova/15070040 (Linux; U; Android 16; zh_CN)")
+        put("x-tt-request-tag", "t=0;n=0")
+        if (CSRF.isNotEmpty()) put("x-tt-passport-csrf-token", CSRF)
+        put("X-SS-REQ-TICKET", nowMillis().toString())
+        put("x-vc-bdturing-sdk-version", "4.1.1.cn")
+        put("agent-version", "old")
+        put("bd-ticket-guard-version", "3")
+    }
+
+    /**
+     * 发码头 = 通用头 + 设备票据注入。
+     *
+     * 公开是为了：① 设备注册链打通后可直接复用/核对头集合；
+     * ② 单测能锁死「没真值就不发假 guard 头」这条纪律，不依赖发网络请求。
+     */
+    fun buildLoginHeaders(): Map<String, String> =
+        anonymousHeaders() + guardHeaders.headers()
 
     private fun mergeCookies(setCookie: List<String>, existingCookie: String): String {
         val map = LinkedHashMap<String, String>()
@@ -405,7 +478,7 @@ class DoubaoMultiAccountException(
 
         /**
          * 序列化候选列表进 message（管线用 message 传错误，结构体到这里就丢了）：
-         * `MULTI_ACCOUNT|<sec_uid>|<名称>|<sec_uid>|<名称>...`
+         * `MULTI_ACCOUNT|<hint>|<sec_uid>|<名称>|<sec_uid>|<名称>...`
          *
          * 名称里若含 `|` 会破坏格式 —— 显示名做替换兜底。
          */

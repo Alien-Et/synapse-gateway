@@ -249,14 +249,22 @@ class DoubaoProvider(
         msgid: String,
         ccode: String,
     ): ProviderAccount {
-        val sel = msgid.startsWith(DoubaoAuthClient.SEL_PREFIX)
-        val outcome = if (sel) {
-            val pending = pendingMulti.remove(msgid)
+        // 「选中账号」的 sel token 可能落在 msgid（标准通道）或 code（当前 UI 的传法），
+        // 抽成纯函数由单测锁死，避免再出现「只判一个通道 → 选号必失败」的回归。
+        val selToken = DoubaoAuthClient.extractSelToken(msgid, code)
+        val outcome = if (selToken.isNotEmpty()) {
+            val pending = pendingMulti.remove(selToken)
                 ?: throw IllegalStateException("多账号会话已过期或不存在，请重新登录")
+            // 一个选号会话给每个候选都注册了 key（都指向同一份 outcome）。
+            // Collection.remove(o) 只删**一个**匹配元素，清不干净；按引用逐 key 移除，
+            // 也避免 data class 的 equals 把另一批内容恰好相同的会话误删。
+            for (entry in pendingMulti.entries) {
+                if (entry.value === pending) pendingMulti.remove(entry.key)
+            }
             authClient.loginSelect(
                 phone = phone,
                 ccode = ccode,
-                msgid = msgid,
+                msgid = selToken,
                 mobileTicket = pending.mobileTicket,
                 smsCodeKey = pending.smsCodeKey,
             )
@@ -266,6 +274,11 @@ class DoubaoProvider(
         return when (outcome) {
             is DoubaoAuthClient.LoginOutcome.Success -> {
                 val credential = outcome.credential
+                // Set-Cookie 有可能不含主凭证（上游异常 / 中间代理改写），此时落库一个
+                // 「能存进去但一调就 401」的废账号，比直接报错更难排查。登录即校验。
+                if (!credential.hasTicket) {
+                    throw DoubaoLoginException("登录响应未下发主凭证 d_ticket，请重新登录")
+                }
                 val uid = credential.uid.ifEmpty {
                     "doubao-" + credential.cookie.hashCode().toUInt().toString(16)
                 }
@@ -277,20 +290,22 @@ class DoubaoProvider(
                 )
             }
             is DoubaoAuthClient.LoginOutcome.MultiAccount -> {
-                // 多账号：把候选列表以「第一个账号的 sec_uid」作为 msgid 返回给 UI，
-                // 完整候选存在 pendingMulti 里。UI 端发现 MultiAccount 时应展示选择列表，
-                // 再以 `sel:<选中的 sec_uid>` 重新调 loginBySmsCode。
-                // 由于 SmsLoginSupport 接口只有「成功返回 ProviderAccount」一种形态，
-                // 这里把候选信息塞进异常消息传递（UI 端解析 `MULTI:` 前缀）。
+                // 多账号：候选信息塞进异常消息传递（SmsLoginSupport 只允许返回
+                // ProviderAccount 或抛异常，UI 端解析 `MULTI_ACCOUNT|` 前缀）。
+                // ⚠️ 旧实现只注册「第一个账号」的 key，用户选第 2/3 个时
+                // pendingMulti.remove() 必然落空。改成**每个候选都注册一份**。
                 val first = outcome.subAccounts.firstOrNull()
                     ?: throw IllegalStateException("多账号响应里没有候选账号")
-                val selMsgid = DoubaoAuthClient.SEL_PREFIX + first.secUid
-                pendingMulti[selMsgid] = outcome
+                outcome.subAccounts.forEach { sub ->
+                    if (sub.secUid.isNotEmpty()) {
+                        pendingMulti[DoubaoAuthClient.SEL_PREFIX + sub.secUid] = outcome
+                    }
+                }
                 throw DoubaoMultiAccountException(
                     accounts = outcome.subAccounts,
                     mobileTicket = outcome.mobileTicket,
                     smsCodeKey = outcome.smsCodeKey,
-                    hintMsgid = selMsgid,
+                    hintMsgid = DoubaoAuthClient.SEL_PREFIX + first.secUid,
                 )
             }
         }
