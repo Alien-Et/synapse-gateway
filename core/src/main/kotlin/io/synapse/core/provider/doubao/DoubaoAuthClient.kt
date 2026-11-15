@@ -376,8 +376,39 @@ class DoubaoMultiAccountException(
     val smsCodeKey: String,
     /** 建议用户选第一个账号时用的 msgid；UI 可按用户实际选择构造。 */
     val hintMsgid: String,
-) : Exception(MESSAGE) {
+) : Exception(toMessage(accounts, hintMsgid)) {
+
     companion object {
         const val MESSAGE = "MULTI_ACCOUNT"
+
+        /**
+         * 序列化候选列表进 message（管线用 message 传错误，结构体到这里就丢了）：
+         * `MULTI_ACCOUNT|<sec_uid>|<名称>|<sec_uid>|<名称>...`
+         *
+         * 名称里若含 `|` 会破坏格式 —— 显示名做替换兜底。
+         */
+        private fun toMessage(accounts: List<DoubaoAuthClient.SubAccount>, hint: String): String {
+            val parts = accounts.joinToString("|") { a ->
+                val name = (a.name.ifEmpty { a.secUid.takeLast(6) }).replace("|", "/")
+                "${a.secUid}|$name"
+            }
+            return "$MESSAGE|$hint|$parts"
+        }
+
+        /** 从 [DoubaoMultiAccountException.message] 解回候选列表；格式不符返回 null。 */
+        fun parse(message: String?): Pair<String, List<SubAccount>>? {
+            if (message == null || !message.startsWith(MESSAGE)) return null
+            val seg = message.split("|")
+            if (seg.size < 3) return null
+            val hint = seg[1]
+            val subs = ArrayList<SubAccount>()
+            var i = 2
+            while (i + 1 < seg.size) {
+                subs += SubAccount(secUid = seg[i], name = seg[i + 1], avatar = "", tenantName = "", isLoggedIn = false)
+                i += 2
+            }
+            if (subs.isEmpty()) return null
+            return hint to subs
+        }
     }
 }

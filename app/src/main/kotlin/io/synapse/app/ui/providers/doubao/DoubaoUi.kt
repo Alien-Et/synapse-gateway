@@ -1,23 +1,26 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package io.synapse.app.ui.providers.doubao
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import io.synapse.app.ui.ChoiceChip
 import io.synapse.app.ui.OutlineActionButton
@@ -27,35 +30,33 @@ import io.synapse.app.ui.providers.ProviderUi
 import io.synapse.app.ui.providers.ProviderUiActions
 import io.synapse.core.gateway.ProviderSettings
 import io.synapse.core.pool.AccountStatus
+import io.synapse.core.provider.doubao.DoubaoAuthClient
+import io.synapse.core.provider.doubao.DoubaoMultiAccountException
 import io.synapse.core.provider.doubao.DoubaoProvider
 
 /**
  * 豆包供应商的界面。
  *
- * ## 线路由用户决定，不是自动推断
+ * ## 登录双通道
  *
- * 「专家 / 极速」在协议上是两个字段（`need_deep_think` + `model_item_key`），
- * 每个请求自带，所以完全可以做成界面开关。这里做成**供应商设置**，
- * 一次选定、之后所有对话都按它走 —— 而不是让用户每次调用都改模型名。
+ * **手机号短信**是主路径（SmsLoginSupport，authKind=SMS_CODE）：UI 与讯飞（Loomy）同构，
+ * code 为空先发码，有码则登录。msgid（encodedMobile）由 ViewModel 的 smsMsgIds 自动传递。
  *
- * 为什么不放进模型名（像 Cline 的池前缀那样）：
- * 池前缀影响的是「用哪个额度」，属于模型身份；线路影响的是「用哪种推理方式」，
- * 属于用户偏好。把偏好塞进模型名会让模型列表出现一堆同义条目。
+ * **Cookie 粘贴**保留为备用路径：某些环境（如代理登录、设备迁移）下用户手里
+ * 已经有现成 Cookie，直接贴进来最快。两条路径产出同一种凭证，互不冲突。
  *
- * ## 生视频已实测
+ * ## 多账号（1454）
  *
- * 请求侧（模型 key `seedance_v2.0_mini`、比例/时长参数、附件块 `block_type 10052`）
- * 与响应侧（`creations[].type == 2`、`video.status == 3`、`video.download_url`）
- * 均已从真实会话解出，见 docs/13.2.3。
- *
- * **唯一的限制是异步**：豆包先回「预计等待 10 分钟」，生成完再 push 结果，
- * 所以本轮对话通常拿不到视频。界面上如实说明，不让用户以为失败了。
+ * 该手机号绑定了多个豆包账号时，Provider 抛 [DoubaoMultiAccountException]，
+ * 引擎把它折叠成 `LoginOutcome(error="MULTI_ACCOUNT|...")`。
+ * 这里解析出候选列表弹选择框，用户选谁就用 `sel:<sec_uid>` 作为 code 重登
+ * （Provider 端按 `sel:` 前缀走二次 one_login，不再要求验证码）。
  */
 object DoubaoUi : ProviderUi {
 
     override val id: String = DoubaoProvider.ID
 
-    override fun description() = "生文（专家 / 极速）+ 生图 + 生视频"
+    override fun description() = "手机号短信登录 / 生文（专家・极速）/ 生图 / 生视频"
 
     @Composable
     override fun Icon(modifier: Modifier) {
@@ -67,38 +68,193 @@ object DoubaoUi : ProviderUi {
         )
     }
 
-    /**
-     * 登录入口：粘贴 Cookie。
-     *
-     * 豆包的鉴权全在 Cookie 里，没有标准的 OAuth/设备授权流程可走，
-     * 所以这里就是「把抓到的 Cookie 贴进来」。
-     */
     @Composable
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
+        var ccode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("86") }
+        var phone by remember { mutableStateOf("") }
+        var code by remember { mutableStateOf("") }
         var cookie by remember { mutableStateOf("") }
-        SectionCard(enterIndex = 0) {
-            SectionLabel("添加账号")
-            OutlinedTextField(
-                value = cookie,
-                onValueChange = { cookie = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Cookie") },
-                placeholder = { Text("d_ticket=...; ttwid=...; bd_sso_hi3jfd=...") },
-                minLines = 3,
-                maxLines = 6,
-                textStyle = MaterialTheme.typography.bodySmall,
-            )
-            OutlineActionButton("导入凭证") {
-                if (cookie.isNotBlank()) {
-                    actions.onImport(id, cookie.trim())
-                    cookie = ""
+        var countdown by remember { mutableStateOf(0) }
+        var busy by remember { mutableStateOf(false) }
+        var lastError by remember { mutableStateOf("") }
+        // 多账号选择状态
+        var multiCandidates by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+        var multiHint by remember { mutableStateOf("") }
+        var multiPhone by remember { mutableStateOf("") }
+        var multiCcode by remember { mutableStateOf("86") }
+        var showMultiDialog by remember { mutableStateOf(false) }
+
+        androidx.compose.runtime.LaunchedEffect(countdown) {
+            if (countdown > 0) {
+                kotlinx.coroutines.delay(1_000)
+                countdown -= 1
+            }
+        }
+
+        fun handleSmsError(raw: String) {
+            val parsed = DoubaoMultiAccountException.parse(raw)
+            if (parsed != null) {
+                val (hint, subs) = parsed
+                multiHint = hint
+                multiCandidates = subs.map { it.secUid to it.name }
+                multiPhone = phone.trim()
+                multiCcode = ccode.trim().ifBlank { "86" }
+                showMultiDialog = true
+                lastError = ""
+            } else {
+                lastError = raw
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // ---------------- 短信登录（主路径） ----------------
+            SectionCard(enterIndex = 0) {
+                SectionLabel("手机号登录")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    androidx.compose.material3.OutlinedTextField(
+                        value = ccode,
+                        onValueChange = { value -> ccode = value.filter(Char::isDigit).take(4) },
+                        modifier = Modifier.fillMaxWidth(0.24f),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        label = { androidx.compose.material3.Text("国家码") },
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = phone,
+                        onValueChange = { phone = it.filter(Char::isDigit).take(15) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        label = { androidx.compose.material3.Text("手机号") },
+                    )
+                }
+                androidx.compose.material3.OutlinedTextField(
+                    value = code,
+                    onValueChange = { code = it.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    label = { androidx.compose.material3.Text("验证码（6 位）") },
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            countdown = 60
+                            busy = true
+                            lastError = ""
+                            actions.onSmsLogin(id, phone.trim(), "", ccode.trim().ifBlank { "86" }) { err ->
+                                busy = false
+                                if (err.isNotEmpty()) {
+                                    countdown = 0
+                                    handleSmsError(err)
+                                }
+                            }
+                        },
+                        enabled = phone.isNotBlank() && countdown == 0 && !busy,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        androidx.compose.material3.Text(if (countdown > 0) "${countdown} 秒后重发" else "发送验证码")
+                    }
+                    Button(
+                        onClick = {
+                            busy = true
+                            lastError = ""
+                            actions.onSmsLogin(id, phone.trim(), code.trim(), ccode.trim().ifBlank { "86" }) { err ->
+                                busy = false
+                                if (err.isNotEmpty()) handleSmsError(err)
+                            }
+                        },
+                        enabled = phone.isNotBlank() && code.isNotBlank() && !busy,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        androidx.compose.material3.Text(if (busy) "登录中…" else "登录")
+                    }
+                }
+                if (lastError.isNotEmpty()) {
+                    androidx.compose.material3.Text(
+                        text = lastError,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
-            Text(
-                text = "豆包的鉴权全在 Cookie 里（主凭证 d_ticket）。用抓包工具取到整串 Cookie 后" +
-                    "原样贴进来即可，不用手工拆字段 —— 上游以后加新 Cookie 也不会失效。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+
+            // ---------------- Cookie 导入（备用路径） ----------------
+            SectionCard(enterIndex = 1) {
+                SectionLabel("Cookie 导入（备用）")
+                androidx.compose.material3.OutlinedTextField(
+                    value = cookie,
+                    onValueChange = { cookie = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { androidx.compose.material3.Text("Cookie") },
+                    placeholder = { androidx.compose.material3.Text("d_ticket=...; ttwid=...; 整串原样粘贴") },
+                    minLines = 3,
+                    maxLines = 6,
+                    textStyle = MaterialTheme.typography.bodySmall,
+                )
+                OutlineActionButton("导入凭证") {
+                    if (cookie.isNotBlank()) {
+                        actions.onImport(id, cookie.trim())
+                        cookie = ""
+                    }
+                }
+                androidx.compose.material3.Text(
+                    text = "手机号登录是主路径；Cookie 留给「手里已经有现成凭证」的场景。" +
+                        "从抓包工具整串复制，不用手工拆字段。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (accounts.isNotEmpty()) {
+                SectionCard {
+                    SectionLabel("账号")
+                    accounts.forEach { status ->
+                        androidx.compose.material3.Text(
+                            text = "${status.displayName} · ${status.uid}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
+
+        // ---------------- 多账号选择对话框 ----------------
+        if (showMultiDialog && multiCandidates.isNotEmpty()) {
+            AlertDialog(
+                onDismissRequest = { showMultiDialog = false },
+                confirmButton = {},
+                title = { androidx.compose.material3.Text("选择要登录的账号") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        androidx.compose.material3.Text(
+                            text = "该手机号绑定了 ${multiCandidates.size} 个豆包账号：",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        multiCandidates.forEach { (secUid, name) ->
+                            androidx.compose.material3.OutlinedButton(
+                                onClick = {
+                                    showMultiDialog = false
+                                    val selMsgid = DoubaoAuthClient.SEL_PREFIX + secUid
+                                    busy = true
+                                    // code 传 sel:<sec_uid>：Provider 识别前缀后走二次 one_login（无需验证码）
+                                    actions.onSmsLogin(id, multiPhone, selMsgid, multiCcode) { err ->
+                                        busy = false
+                                        if (err.isNotEmpty()) lastError = err
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                androidx.compose.material3.Text(name)
+                            }
+                        }
+                    }
+                },
             )
         }
     }
@@ -108,31 +264,24 @@ object DoubaoUi : ProviderUi {
     override fun AccountExtra(status: AccountStatus, actions: ProviderUiActions) {
         SectionCard {
             SectionLabel("账号")
-            Text(
+            androidx.compose.material3.Text(
                 text = "uid：${status.uid.ifEmpty { "—" }}",
                 style = MaterialTheme.typography.bodySmall,
             )
             if (status.detail.isNotEmpty()) {
-                Text(
+                androidx.compose.material3.Text(
                     text = status.detail,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text(
-                text = "固定窗口：开启后所有对话复用同一个 conversation_id，" +
-                    "上下文连续、首字更快；关掉则每轮都是新会话。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 
     /**
      * 专属设置：线路 + 固定窗口。
      *
-     * 这两项都写进 `ProviderSettings.options`（不写凭证），
-     * 所以换线路不会触发重新登录，也不会被上游覆盖。
+     * 这两项都写进 `ProviderSettings.options`（不写凭证），换线路不触发重新登录。
      */
     @Composable
     override fun SettingsSection(settings: ProviderSettings, onUpdate: (ProviderSettings) -> Unit) {
@@ -155,7 +304,7 @@ object DoubaoUi : ProviderUi {
                     onUpdate(settings.copy(options = settings.options + ("line" to DoubaoProvider.LINE_FAST)))
                 }
             }
-            Text(
+            androidx.compose.material3.Text(
                 text = if (currentLine == DoubaoProvider.LINE_EXPERT) {
                     "专家模式：深度思考作答（need_deep_think=3），更准但更慢，会显示思考过程。"
                 } else {
@@ -174,14 +323,14 @@ object DoubaoUi : ProviderUi {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text("固定在一个对话窗口", style = MaterialTheme.typography.bodySmall)
-                    Text(
+                    androidx.compose.material3.Text("固定在一个对话窗口", style = MaterialTheme.typography.bodySmall)
+                    androidx.compose.material3.Text(
                         text = "复用同一个 conversation_id，上下文连续、首字更快",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(
+                androidx.compose.material3.Switch(
                     checked = fixedWindow,
                     onCheckedChange = { checked ->
                         onUpdate(
@@ -196,12 +345,12 @@ object DoubaoUi : ProviderUi {
 
         SectionCard {
             SectionLabel("生图 / 生视频")
-            Text(
+            androidx.compose.material3.Text(
                 text = "模型名里带 seedream 走生图、带 seedance 走生视频。\n" +
                     "生图结果以 Markdown 图片链接出现；生视频结果以视频链接 + 封面出现。",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Text(
+            androidx.compose.material3.Text(
                 text = "⏳ 视频是异步生成的：豆包会先回「预计等待 10 分钟」，生成完再推送结果。" +
                     "所以这一轮对话里通常拿不到视频，属正常现象，不是失败。",
                 style = MaterialTheme.typography.labelSmall,
