@@ -21,6 +21,7 @@
 | [14](14.总结.md) | 总结与改动守则 | — |
 | [15](15.模型目录与刷新.md) | 目录来源、流式加载、云端变更检测 | `gateway/GatewayEngine.kt`、`ui/ModelsScreen.kt` |
 | [16](16.自动签到.md) | 两条触发路径、时区与抖动、登录后检查、提醒方式 | `gateway/AutoCheckin*.kt`、`ui/AutoCheckinScreen.kt` |
+| [17](17.设备证明链与TEE.md) | TEE / Key Attestation 复刻：密钥参数、CSR、上报协议、硬边界 | `provider/doubao/TeeKeyStore.kt`、`Pkcs10.kt`、`DoubaoDeviceAttestation.kt` |
 
 ## 其它文档
 
