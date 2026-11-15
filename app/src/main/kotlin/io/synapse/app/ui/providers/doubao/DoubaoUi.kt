@@ -292,8 +292,33 @@ object DoubaoUi : ProviderUi {
      */
     @Composable
     override fun SettingsSection(settings: ProviderSettings, onUpdate: (ProviderSettings) -> Unit) {
-        val currentLine = settings.options["line"].orEmpty().ifEmpty { DoubaoProvider.LINE_FAST }
-        val fixedWindow = settings.options["fixedWindow"]?.let { it != "false" } ?: true
+        // 本地镜像状态：引擎的 providerSettings 是普通方法调用（非 Compose state），
+        // 点击后只写引擎 + refresh() 不会触发本屏 recompose —— 界面会卡在旧值，
+        // 表现为「点切换没反应 / 过很久才变」。这里用 remember(settings.options)
+        // 镜像一份，点击先本地反转立即刷新 UI，再异步落库（对齐 CodeBuddy 的
+        // RegionSelector 做法）。options 变化（引擎侧写入后 refresh 回来）也会重镜像。
+        var currentLine by remember(settings.options) {
+            mutableStateOf(settings.options["line"].orEmpty().ifEmpty { DoubaoProvider.LINE_FAST })
+        }
+        var fixedWindow by remember(settings.options) {
+            mutableStateOf(settings.options["fixedWindow"]?.let { it != "false" } ?: true)
+        }
+
+        fun applyLine(line: String) {
+            if (currentLine == line) return
+            currentLine = line
+            onUpdate(settings.copy(options = settings.options + ("line" to line)))
+        }
+
+        fun applyFixedWindow(checked: Boolean) {
+            if (fixedWindow == checked) return
+            fixedWindow = checked
+            onUpdate(
+                settings.copy(
+                    options = settings.options + ("fixedWindow" to if (checked) "true" else "false"),
+                ),
+            )
+        }
 
         SectionCard {
             SectionLabel("对话线路")
@@ -301,15 +326,11 @@ object DoubaoUi : ProviderUi {
                 ChoiceChip(
                     text = "专家模式",
                     selected = currentLine == DoubaoProvider.LINE_EXPERT,
-                ) {
-                    onUpdate(settings.copy(options = settings.options + ("line" to DoubaoProvider.LINE_EXPERT)))
-                }
+                ) { applyLine(DoubaoProvider.LINE_EXPERT) }
                 ChoiceChip(
                     text = "极速模式",
                     selected = currentLine == DoubaoProvider.LINE_FAST,
-                ) {
-                    onUpdate(settings.copy(options = settings.options + ("line" to DoubaoProvider.LINE_FAST)))
-                }
+                ) { applyLine(DoubaoProvider.LINE_FAST) }
             }
             Text(
                 text = if (currentLine == DoubaoProvider.LINE_EXPERT) {
@@ -339,13 +360,7 @@ object DoubaoUi : ProviderUi {
                 }
                 Switch(
                     checked = fixedWindow,
-                    onCheckedChange = { checked ->
-                        onUpdate(
-                            settings.copy(
-                                options = settings.options + ("fixedWindow" to if (checked) "true" else "false"),
-                            ),
-                        )
-                    },
+                    onCheckedChange = { checked -> applyFixedWindow(checked) },
                 )
             }
         }

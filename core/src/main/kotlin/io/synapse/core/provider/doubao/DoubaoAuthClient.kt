@@ -127,9 +127,21 @@ class DoubaoAuthClient(
         )
         val resp = post("passport/mobile/send_code/v1/", body, anonymousHeaders())
         val data = resp.data
-        // 发码成功判据：response code 0（实测响应结构未抓到，宽松处理）
         if (resp.status !in 200..299) {
             throw DoubaoLoginException("发码失败：HTTP ${resp.status} ${data.take(200)}")
+        }
+        // HTTP 200 不代表发码成功：上游用 body 里的 error_code 报业务错误
+        // （实测 error_code=7「访问太频繁」、error_code!=0 都回 200）。只判状态码
+        // 会把「拒绝发码」当成「已发送」，用户点完没收到短信，看起来就是「没反应」。
+        val json = parse(data)
+        val bizCode = json?.let { root ->
+            root.get("error_code")?.takeIf { it.isJsonPrimitive }?.asInt
+                ?: root.objOrNull("data")?.get("error_code")?.takeIf { it.isJsonPrimitive }?.asInt
+        }
+        if (bizCode != null && bizCode != 0) {
+            val desc = json?.objOrNull("data")?.stringOrNull("description")
+                ?: json?.stringOrNull("description").orEmpty()
+            throw DoubaoLoginException("发码失败（error_code=$bizCode）：${desc.ifEmpty { "上游拒绝发送" }}")
         }
         return SendResult(encodedMobile = encodedMobile)
     }
