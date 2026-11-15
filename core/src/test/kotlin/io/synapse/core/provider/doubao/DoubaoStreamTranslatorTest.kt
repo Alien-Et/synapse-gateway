@@ -3,7 +3,10 @@ package io.synapse.core.provider.doubao
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import io.synapse.core.provider.ErrorKind
 
 /**
  * `creation_block` 的解析。
@@ -198,5 +201,73 @@ data: {"ack_client_meta":{"conversation_id":"38453873148032002"}}
     fun `finish 输出 DONE`() {
         val translator = DoubaoStreamTranslator(model = "seed")
         assertTrue(translator.finish().joinToString("").contains("[DONE]"))
+    }
+
+    /**
+     * 实测回归（逆向资料 §18.18/§18.19）：账号/设备被频控时豆包回 HTTP 200 + SSE，
+     * 帧序列 SSE_HEARTBEAT → STREAM_ERROR(710022002) → SSE_REPLY_END。
+     * 旧实现把 STREAM_ERROR 丢掉，只补一个空 stop，客户端看到「正常结束但零输出」。
+     * 这里锁死：必须产出网关能识别的 OpenAI 顶层 error 帧 + [DONE]，
+     * 且不再补第二个「正常 stop」，非流式路径能取到 SOFT_RATE 的 failure。
+     */
+    @Test
+    fun `STREAM_ERROR 频控码输出顶层 error 帧且不补正常 stop`() {
+        val translator = DoubaoStreamTranslator(model = "seed")
+        val raw = """event: SSE_HEARTBEAT
+data: {}
+
+event: STREAM_ERROR
+data: {"error_code":710022002,"error_msg":"当前服务访问频繁，请稍后再试","extra":{"ack":"1"}}
+
+event: SSE_REPLY_END
+data: {"end_type":3}
+
+"""
+        val out = StringBuilder()
+        for (line in raw.split("\n")) out.append(translator.translate(line).joinToString(""))
+        val text = out.toString()
+        assertTrue(text.contains("\"error\""), "应输出 OpenAI 顶层 error 对象：$text")
+        assertTrue(text.contains("上游访问频繁，请稍后再试"), "频控码应映射稳定中文：$text")
+        assertTrue(text.contains("[DONE]"), "错误帧应自带终止帧：$text")
+        assertFalse(text.contains("\"finish_reason\":\"stop\""), "不应再补正常 stop：$text")
+        assertFalse(text.contains("å½å"), "不应把乱码 error_msg 透传给客户端：$text")
+        val failure = assertNotNull(translator.failure)
+        assertEquals(ErrorKind.SOFT_RATE, failure.kind)
+        assertEquals(710022002L, failure.code)
+        assertTrue(translator.finish().isEmpty(), "出错后 finish 不应重复补 DONE")
+    }
+
+    @Test
+    fun `STREAM_ERROR 其它错误码保留上游原文且不当成限流`() {
+        val translator = DoubaoStreamTranslator(model = "seed")
+        val raw = """event: STREAM_ERROR
+data: {"error_code":123,"error_msg":"参数不合规"}
+
+"""
+        val out = StringBuilder()
+        for (line in raw.split("\n")) out.append(translator.translate(line).joinToString(""))
+        assertTrue(out.toString().contains("参数不合规"), "其它码应保留原文：$out")
+        val failure = assertNotNull(translator.failure)
+        assertEquals(123L, failure.code)
+        assertEquals(ErrorKind.SERVER, failure.kind, "未知码不应误判成 SOFT_RATE 去退避重试")
+        assertEquals("SERVER", out.toString().substringAfter("\"type\":\"").substringBefore("\""))
+    }
+
+    /** 回归：SSE_REPLY_END 会置 finished，但正常流 EOF 时仍必须补 [DONE]，否则客户端半截挂起。 */
+    @Test
+    fun `正常流 SSE_REPLY_END 之后 finish 仍补 DONE`() {
+        val translator = DoubaoStreamTranslator(model = "seed")
+        val raw = """event: CHUNK_DELTA
+data: {"text":"你好"}
+
+event: SSE_REPLY_END
+data: {"end_type":3}
+
+"""
+        val out = StringBuilder()
+        for (line in raw.split("\n")) out.append(translator.translate(line).joinToString(""))
+        assertNull(translator.failure)
+        assertTrue(out.toString().contains("\"finish_reason\":\"stop\""), "正常流应以 stop 收尾：$out")
+        assertTrue(translator.finish().joinToString("").contains("[DONE]"), "正常流必须补终止帧")
     }
 }

@@ -4,10 +4,13 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import io.synapse.core.provider.ErrorKind
 import io.synapse.core.provider.SSE_DONE
+import io.synapse.core.provider.UpstreamError
 import io.synapse.core.util.arrayOrNull
 import io.synapse.core.util.asObjectOrNull
 import io.synapse.core.util.intOrNull
+import io.synapse.core.util.longOrNull
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.stringOrNull
 import java.util.UUID
@@ -32,7 +35,21 @@ import java.util.UUID
  * | `STREAM_CHUNK` | `patch_op[].patch_value.content_block[]`，按块类型分流 |
  * | `CHUNK_DELTA` | `{"text":"字"}` → `delta.content` |
  * | `DOWNLINK_CMD` | IM 指令帧，丢弃 |
+ * | **`STREAM_ERROR`** | **流内业务错误 → OpenAI 顶层 `error` 帧 + `[DONE]`**（见下） |
  * | `SSE_REPLY_END` | `finish_reason: "stop"` |
+ *
+ * ## 为什么 `STREAM_ERROR` 不能丢
+ *
+ * 实测（逆向资料 §18.18/§18.19）：账号/设备被频控时豆包回的是 **HTTP 200 + SSE**，
+ * 帧序列 `SSE_HEARTBEAT → STREAM_ERROR(710022002「当前服务访问频繁，请稍后再试」)
+ * → SSE_REPLY_END`。旧实现的 `else -> emptyList()` 把错误帧整帧吞掉，
+ * 只补一个空 `finish_reason:stop`：流式客户端收到「正常结束但零输出」，
+ * 非流式被判成「豆包返回空回复」——用户永远看不到真正的原因。
+ *
+ * 对齐 TraeSse / RaccoonProvider 的既有做法：发 OpenAI 标准顶层 `error` 对象帧，
+ * 网关 `GatewayHttpServer.parseChunk` 能识别 `error.message` 并把调用记为 FAILED；
+ * 同时把 [failure] 暴露给 `DoubaoProvider` 的非流式路径，返回 `StreamFailureChatCall`
+ * 而不是含糊的「空回复」。
  *
  * ## 内容块（实测 block_type）
  *
@@ -58,6 +75,15 @@ class DoubaoStreamTranslator(
     private var finished = false
     private var conversationReported = false
 
+    /**
+     * 流内业务错误（HTTP 200 但 SSE 里报了错）。
+     *
+     * `DoubaoProvider` 非流式路径聚合完后读它，返回 `StreamFailureChatCall`，
+     * 才能把「访问太频繁」如实传给网关/客户端，而不是误报成「空回复」。
+     */
+    var failure: UpstreamError? = null
+        private set
+
     /** 已经输出过的媒体 id，避免重复推同一张图（上游会在后续帧里重复下发完整结果）。 */
     private val emittedCreations = HashSet<String>()
 
@@ -81,8 +107,8 @@ class DoubaoStreamTranslator(
         return emptyList()
     }
 
-    /** 流结束：补 `[DONE]`。 */
-    fun finish(): List<String> = listOf(SSE_DONE)
+    /** 流结束：只有 `STREAM_ERROR` 错误帧已自带 `[DONE]` 时才跳过；正常流照常补，避免半截流。 */
+    fun finish(): List<String> = if (failure != null) emptyList() else listOf(SSE_DONE)
 
     // ------------------------------------------------------------------ 派发
 
@@ -94,7 +120,10 @@ class DoubaoStreamTranslator(
                 reportConversation(payload)
                 emptyList()
             }
+            "STREAM_ERROR" -> onStreamError(payload)
             "SSE_REPLY_END" -> {
+                // 已经因 STREAM_ERROR 结束过就不要再补一个「正常 stop」，
+                // 否则同一条流里既有 FAILED 又有 SUCCESS，语义自相矛盾。
                 if (finished) return emptyList()
                 finished = true
                 listOf(chunk(JsonObject(), "stop"))
@@ -102,6 +131,45 @@ class DoubaoStreamTranslator(
             // SSE_HEARTBEAT / FULL_MSG_NOTIFY / STREAM_MSG_NOTIFY / DOWNLINK_CMD
             else -> emptyList()
         }
+    }
+
+    /**
+     * `STREAM_ERROR`：HTTP 200 的流内业务错误。
+     *
+     * 实测载荷：`{"error_code":710022002,"error_msg":"当前服务访问频繁，请稍后再试",
+     * "extra":{"ack":"1"}}`。`error_msg` 在抓包里被 Hook 以 latin-1 解码成了乱码，
+     * 所以**不盲信原文**：`710022002`（以及发码端点的 `7`）一律映射成稳定的中文
+     * 「上游访问频繁，请稍后再试」，其它码保留上游原文（截断防日志爆炸）。
+     *
+     * 输出 OpenAI 标准顶层 `error` 帧 + `[DONE]`：网关 `parseChunk` 读 `error.message`
+     * 把调用记为 FAILED，客户端也能直接看到原因（对齐 TraeSse / RaccoonProvider）。
+     */
+    private fun onStreamError(payload: String): List<String> {
+        if (finished) return emptyList()
+        finished = true
+        val obj = parse(payload)
+        val code = obj?.longOrNull("error_code") ?: 0L
+        val raw = obj?.stringOrNull("error_msg").orEmpty()
+        val message = when {
+            code == RATE_LIMIT_STREAM_CODE -> "上游访问频繁，请稍后再试"
+            raw.isNotEmpty() -> "豆包流内错误（$code）：${raw.take(200)}"
+            else -> "豆包流内错误（$code）"
+        }
+        /**
+         * 只有实测的频控码才归 `SOFT_RATE`（退避重试）；其它未知流内错误归 `SERVER`
+         * （如实失败、不误判成凭证失效或空回复）。一律标 SOFT_RATE 会让「参数不合规」
+         * 这类错误也被网关拿去退避重试，那是另一种误报。
+         */
+        val kind = if (code == RATE_LIMIT_STREAM_CODE) ErrorKind.SOFT_RATE else ErrorKind.SERVER
+        failure = UpstreamError(kind, message, code)
+        val errorFrame = JsonObject().apply {
+            add("error", JsonObject().apply {
+                addProperty("code", code)
+                addProperty("message", message)
+                addProperty("type", kind.name)
+            })
+        }
+        return listOf("data: $errorFrame\n\n", SSE_DONE)
     }
 
     /** `CHUNK_DELTA`：`{"text":"字"}`，逐字增量。 */
@@ -313,5 +381,8 @@ class DoubaoStreamTranslator(
 
         /** `video.status`：实测完成态是 3。 */
         const val VIDEO_STATUS_DONE = 3
+
+        /** `/chat/completion` 流内频控码（与发码端点 `error_code=7` 同源，实测）。 */
+        const val RATE_LIMIT_STREAM_CODE = 710022002L
     }
 }

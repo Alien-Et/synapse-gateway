@@ -17,6 +17,7 @@ import io.synapse.core.provider.ProviderHooks
 import io.synapse.core.provider.ProviderModel
 import io.synapse.core.provider.ProviderModelCatalogView
 import io.synapse.core.provider.StreamingChatCall
+import io.synapse.core.provider.StreamFailureChatCall
 import io.synapse.core.provider.UpstreamError
 import io.synapse.core.util.HttpSupport
 import io.synapse.core.util.NetworkErrorText
@@ -219,6 +220,11 @@ class DoubaoProvider(
         } finally {
             runCatching { streamingCall.close() }
         }
+        // HTTP 200 不代表成功：豆包被频控时会在 SSE 里回 STREAM_ERROR
+        // （710022002「当前服务访问频繁」）。翻译器已把它转成 OpenAI 顶层 error 帧；
+        // 非流式路径要从 translator 里取回同一份 failure，如实交给网关换号/退避，
+        // 绝不能当成「空回复」或「凭证失效」——那会误导用户去重新登录。
+        translator.failure?.let { return StreamFailureChatCall(200, it) }
         if (OpenAiSseAggregator.isEmptyCompletion(aggregated)) {
             return FailedChatCall(200, "豆包返回空回复（上游 200 但没有任何内容）")
         }

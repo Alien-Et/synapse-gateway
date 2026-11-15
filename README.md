@@ -352,7 +352,7 @@ trae-global/qwen-max            →  字节国外/qwen-max
 | `mcloud` | 灵犀 | `ai.yun.139.com` / `orches.yun.139.com` | 请求体加密；短信登录带滑块人机校验 |
 | `chatgpt` | ChatGPT | Codex 订阅后端 | Responses API，不是 Chat Completions |
 | `cline` | Cline | `api.cline.bot` | 免费池 / 订阅池共用一份凭证 |
-| `doubao` | 豆包 | `api-normal.doubao.com` | 字节 ChatGPT 型；生文/生图/生视频三线路 + 固定窗口；手机号短信登录 |
+| `doubao` | 豆包 | `api-normal.doubao.com` | 字节 ChatGPT 型；生文/生图/生视频三线路 + 固定窗口；手机号短信登录；**HTTP 200 的流内频控会如实转成失败**，不当成空回复 |
 
 **各家的坑：**
 
@@ -362,7 +362,7 @@ trae-global/qwen-max            →  字节国外/qwen-max
 - **讯飞** — 鉴权失败是 HTTP 200 + 业务码，不判业务码会把错误 JSON 当正常回复透传
 - **商汤** — 响应外层是 `{"status":..., "data":...}`；字段用标准名（不认 `max_new_tokens`）
 - **Cline** — 免费池靠 `X-CLIENT-TYPE: cline-sdk` 这道产品面校验（缺了 403、写成 `cline-cli` 会 500）；令牌带 `workos:` 前缀，去掉就 401；`cline-pass/` 要订阅，没订阅的账号会 403 `ENTITLEMENT_ERROR`
-- **豆包** — 手机号短信登录（`SmsLoginSupport`，`authKind=SMS_CODE`）；登录字段按 `mix_mode=1` 混淆（每字节 XOR 0x05）；`d_ticket` 判空须用 `extractCookie` 而非 `contains`；生视频是异步 push（非 SSE），判据 `video.status==3` 且 `vid` 非空；多账号走 `sel:<sec_uid>` 二次登录（详见 [docs/08](docs/08.上游陷阱清单.md)）
+- **豆包** — 手机号短信登录（`SmsLoginSupport`，`authKind=SMS_CODE`）；登录字段按 `mix_mode=1` 混淆（每字节 XOR 0x05）；`d_ticket` 判空须用 `extractCookie` 而非 `contains`；生视频是异步 push（非 SSE），判据 `video.status==3` 且 `vid` 非空；多账号走 `sel:<sec_uid>` 二次登录；**对话鉴权只在 Cookie 层**（实测全套票据头 / 仅 Cookie / Cookie+STUB 三种组合响应一字不差），`chatHeaders()` 不补多余头；账号/设备被频控时上游回 `HTTP 200 + STREAM_ERROR(710022002)`，网关转成 OpenAI 顶层 `error` 帧并归 `SOFT_RATE`，非流式走 `StreamFailureChatCall`，不会误报「空回复」或「凭证失效」（详见 [docs/08](docs/08.上游陷阱清单.md)）
 
 ---
 
