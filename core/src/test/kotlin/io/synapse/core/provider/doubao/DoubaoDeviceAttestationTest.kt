@@ -7,6 +7,7 @@ import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -145,6 +146,55 @@ class DoubaoDeviceAttestationTest {
     }
 
     // ------------------------------------------------------------------ 协议装配
+
+    @Test
+    fun `裸点编码的形状与上游 HTTP 头一致`() {
+        val kp = KeyPairGenerator.getInstance("EC")
+            .apply { initialize(ECGenParameterSpec("secp256r1")) }
+            .generateKeyPair()
+
+        // 未压缩点：0x04 || X(32) || Y(32) = 65 字节；base64 后 88 字符（含一个 = 填充）
+        val point = TeeKeyStore().ecPoint(kp.public)
+        assertEquals(65, point.size)
+        assertEquals(0x04, point[0].toInt())
+        val b64 = Base64.getEncoder().encodeToString(point)
+        assertEquals(88, b64.length)
+        assertTrue(b64.endsWith("="))
+
+        // 与 X.509 SPKI 判然不同（同一条曲线 SPKI 的 base64 是 124 字符）：
+        // 上游 `bd-ticket-guard-ree-public-key` / `-client-cert` 的 `pub.` 体只吃裸点。
+        assertEquals(124, Base64.getEncoder().encodeToString(kp.public.encoded).length)
+
+        // 回退路径（从 SPKI 尾部切 65 字节）必须与 getW() 路径逐字节一致
+        val enc = kp.public.encoded
+        assertContentEquals(point, enc.copyOfRange(enc.size - 65, enc.size))
+    }
+
+    @Test
+    fun `client-cert 头是两层封装`() {
+        val point = TeeKeyStore().ecPoint(
+            KeyPairGenerator.getInstance("EC")
+                .apply { initialize(ECGenParameterSpec("secp256r1")) }
+                .generateKeyPair().public,
+        )
+        val header = DoubaoDeviceAttestation.publicBlobHeader(
+            Base64.getEncoder().encodeToString(point),
+        )
+        // 解一层拿到 `pub.` + 内层 base64，再解一层才是 65 字节裸点 ——
+        // 与抓包实测的 client-cert 头形状（外层 124 字符）完全一致。
+        val inner = String(Base64.getDecoder().decode(header), Charsets.UTF_8)
+        assertTrue(inner.startsWith("pub."))
+        assertEquals(65, Base64.getDecoder().decode(inner.removePrefix("pub.")).size)
+        assertEquals(124, header.length)
+    }
+
+    @Test
+    fun `JVM 上取不到平台信息时省略头`() {
+        assertFailsWith<ClassNotFoundException> { Class.forName("android.os.Build") }
+        val client = DoubaoDeviceAttestation()
+        assertEquals("", client.displayOsVersion())
+        assertEquals("", client.serverCertSn())
+    }
 
     @Test
     fun `public 前缀包的形状与上游一致`() {

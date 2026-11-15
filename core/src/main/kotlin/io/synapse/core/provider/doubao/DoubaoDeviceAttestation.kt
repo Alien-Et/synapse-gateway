@@ -85,6 +85,27 @@ class DoubaoDeviceAttestation(
         const val HEADER_ATTEST_RESULT = "bd-ticket-guard-verify-public-key-result"
         const val HEADER_LOG_ID = "X-Tt-Logid"
 
+        // ---- 业务请求头（抓包实测，`send_code` / `account/info` 登录前就带这一套） ----
+
+        /** `1` = TEE 可用。 */
+        const val HEADER_TEE_STATUS = "bd-ticket-guard-tee-status"
+
+        /** `get_client_cert` 响应里 `data.server_sn` 回填；服务端据此找自己的证书。 */
+        const val HEADER_SERVER_CERT_SN = "bd-ticket-guard-server-cert-sn"
+
+        /** 机型 + 系统版本串，设备侧 `Build.DISPLAY`（如 `PJE110_16.0.5.1301(CN01)`）。 */
+        const val HEADER_DISPLAY_OS_VERSION = "bd-ticket-guard-display-os-version"
+
+        /** guard 协议大版本，上游固定 `3`。 */
+        const val HEADER_VERSION = "bd-ticket-guard-version"
+
+        /** 迭代版本，抓包里以 `2` 为主。 */
+        const val HEADER_ITERATION_VERSION = "bd-ticket-guard-iteration-version"
+
+        const val TEE_STATUS_AVAILABLE = "1"
+        const val GUARD_VERSION = "3"
+        const val ITERATION_VERSION = "2"
+
         /** `verify_pub_key` 写死的请求标签（补偿检查用的是 `t=<0/1>;n=1`）。 */
         const val REQUEST_TAG = "t=0;n=0"
 
@@ -95,6 +116,7 @@ class DoubaoDeviceAttestation(
         private const val KEY_REE_PUBLIC = "ree_public_x509"
         private const val KEY_CLIENT_CERT = "client_cert_pem"
         private const val KEY_ATTEST_CERTS = "attest_certs_header"
+        private const val KEY_SERVER_CERT_SN = "server_cert_sn"
 
         /**
          * challenge = SHA-256(`teePub + "#" + reePub`)。
@@ -146,11 +168,9 @@ class DoubaoDeviceAttestation(
         if (!tee.isAvailable()) return null
         if (!force) cachedPrepared?.let { return it }
 
-        val reePublic = reeKeyPair().public.encoded
-        val reePublicKey = Base64.getEncoder().encodeToString(reePublic)
-
+        val reePublicKey = reePublicKeyBase64()
         val signing = tee.ensureSigningKeyPair(signingAlias)
-        val teePublicKey = Base64.getEncoder().encodeToString(signing.public.encoded)
+        val teePublicKey = Base64.getEncoder().encodeToString(tee.ecPoint(signing.public))
         val challenge = computeChallenge(teePublicKey, reePublicKey)
         val challengeBase64 = Base64.getEncoder().encodeToString(challenge)
 
@@ -201,9 +221,44 @@ class DoubaoDeviceAttestation(
         return pair
     }
 
-    /** REE 公钥 base64（供请求头用）。 */
+    /**
+     * REE 公钥 base64 —— **裸点**（65 字节 `04 || X || Y`）。
+     *
+     * 抓包实测 `bd-ticket-guard-ree-public-key` 解码后正好 65 字节、首字节 `0x04`，
+     * base64 88 字符（含一个 `=` 填充）；上游同一把密钥在 SP 里另存一份 X.509 SPKI
+     * （`sp_key_public_key_ree_*`，124 字符）用于内部校验 —— **HTTP 头只吃裸点**。
+     *
+     * 端到端校验：把真机 SP 的 REE 私钥（`sp_key_private_key_ree_*`）在 P-256 上推公钥，
+     * 得到的裸点与 `sp_key_public_key_ree_*` 逐字节一致，证明这条推导链无误。
+     */
     fun reePublicKeyBase64(): String =
-        Base64.getEncoder().encodeToString(reeKeyPair().public.encoded)
+        Base64.getEncoder().encodeToString(tee.ecPoint(reeKeyPair().public))
+
+    /**
+     * TEE 主密钥公钥 base64 —— 同样是**裸点**。
+     *
+     * 抓包里 `bd-ticket-guard-client-cert` 解两层后就是这个点；反编译侧对应的日志
+     * 字符串是 `add TEE public key instead of cert`（没有证书时用 TEE 公钥顶上）。
+     */
+    fun teePublicKeyBase64(): String =
+        Base64.getEncoder().encodeToString(tee.ecPoint(tee.ensureSigningKeyPair(signingAlias).public))
+
+    /**
+     * `bd-ticket-guard-display-os-version`：设备侧 `Build.DISPLAY` 原样串。
+     *
+     * 抓包值 `PJE110_16.0.5.1301(CN01)` 即该机型 `Build.DISPLAY`。`:core` 是纯 JVM
+     * 模块，只能反射读；JVM 上读不到就返回空串，头自动省略。
+     */
+    fun displayOsVersion(): String = runCatching {
+        val build = Class.forName("android.os.Build")
+        val display = build.getField("DISPLAY").get(null) as? String
+        display?.takeIf { it.isNotBlank() }
+            ?: (build.getField("MODEL").get(null) as? String).orEmpty() +
+            "_" + (build.getField("RELEASE").get(null) as? String).orEmpty()
+    }.getOrDefault("")
+
+    /** `bd-ticket-guard-server-cert-sn`：`get_client_cert` 响应里的 `data.server_sn`。 */
+    fun serverCertSn(): String = cache.get(KEY_SERVER_CERT_SN).orEmpty()
 
     /**
      * 走一次 `get_client_cert`：用主 TEE 密钥签的 CSR 换服务端签发的 client-cert。
@@ -212,11 +267,15 @@ class DoubaoDeviceAttestation(
      */
     fun enrollClientCert(force: Boolean = false): String {
         if (!tee.isAvailable()) return ""
-        if (!force) cache.get(KEY_CLIENT_CERT)?.takeIf { it.isNotEmpty() }?.let { return it }
+        if (!force) {
+            val cached = cache.get(KEY_CLIENT_CERT)
+            // 证书与 server_sn 是配对的：缺任一就重新登记（否则业务头拿不到 sn）
+            if (!cached.isNullOrEmpty() && cache.get(KEY_SERVER_CERT_SN) != null) return cached
+        }
+        if (prepare() == null) return ""
 
-        val prepared = prepare() ?: return ""
         val csrPem = runCatching {
-            Pkcs10.toPem(Pkcs10.build(tee.ensureSigningKeyPair(signingAlias), signingAlias))
+            Pkcs10.toPem(Pkcs10.build(tee.ensureSigningKeyPair(signingAlias)))
         }.getOrNull() ?: return ""
 
         val csrB64 = Base64.getEncoder().encodeToString(csrPem.toByteArray(Charsets.UTF_8))
@@ -237,12 +296,11 @@ class DoubaoDeviceAttestation(
             HEADER_REE_PUBLIC_KEY to reePublicKeyBase64(),
         )
         val resp = post(PATH_GET_CLIENT_CERT, body, headers) ?: return ""
-        val cert = resp.jsonBody?.let { root ->
-            root.getAsJsonObject("data")?.stringOrNull("cert")
-        }.orEmpty()
+        val data = resp.jsonBody?.getAsJsonObject("data")
+        val cert = data?.stringOrNull("cert").orEmpty()
+        data?.stringOrNull("server_sn")?.takeIf { it.isNotEmpty() }
+            ?.let { cache.put(KEY_SERVER_CERT_SN, it) }
         if (cert.isNotEmpty()) cache.put(KEY_CLIENT_CERT, cert)
-        // prepared 只用于触发密钥准备；这里显式引用一下，避免被优化掉语义
-        if (prepared.certChainSize < 0) return ""
         return cert
     }
 
@@ -251,10 +309,11 @@ class DoubaoDeviceAttestation(
      */
     fun verifyPubKey(): VerifyResult? {
         val prepared = prepare() ?: return null
+        runCatching { enrollClientCert() } // 先保证已登记（verify 依赖登记结果）
         val headers = buildVerifyHeaders(
             prepared = prepared,
             reePublicKey = reePublicKeyBase64(),
-            clientCert = enrollClientCert(),
+            clientCert = teePublicKeyBase64(),
         )
         val resp = post(PATH_VERIFY_PUB_KEY, "", headers) ?: return null
         val result = parseVerifyResult(resp.headers)
@@ -265,13 +324,13 @@ class DoubaoDeviceAttestation(
     // ------------------------------------------------------------------ 请求期：头注入
 
     /**
-     * 装配 `verify_pub_key` / 请求管线用的三个头。
+     * 装配 **`verify_pub_key` 专用**的三个头（业务请求不要用这个，见 [asGuardHeaders]）。
      *
      * | 头 | 值 | 缺失后果 |
      * |---|---|---|
-     * | `bd-ticket-guard-attest-certs` | 证书链 | 服务端无法验 TEE |
-     * | `bd-ticket-guard-ree-public-key` | REE 公钥 | 无法验读写分离 |
-     * | `bd-ticket-guard-client-cert` | `get_client_cert` 下发 | 同上 |
+     * | `bd-ticket-guard-attest-certs` | 证书链（PEM 链整体 base64） | 服务端无法验 TEE |
+     * | `bd-ticket-guard-ree-public-key` | REE 公钥裸点 base64 | 无法验读写分离 |
+     * | `bd-ticket-guard-client-cert` | **TEE 公钥**裸点 base64（`pub.` 封装） | 同上 |
      *
      * 另有固定 `x-tt-request-tag: t=0;n=0`（写死，不是随机值）。
      */
@@ -310,17 +369,39 @@ class DoubaoDeviceAttestation(
     /**
      * 接进 [DeviceGuardHeaders]：**这就是上游「请求管线取头」那一步的等价物**。
      *
-     * 拿不到真值（TEE 不可用 / 证书链为空）就返回空 map —— 与接线前的默认实现一致。
+     * 交付的是**业务请求**该带的那一套（与抓包 `send_code/v1` / `account/info/v2` 对齐）：
+     *
+     * | 头 | 值 | 说明 |
+     * |---|---|---|
+     * | `bd-ticket-guard-tee-status` | `1` | TEE 可用 |
+     * | `bd-ticket-guard-version` | `3` | 协议大版本 |
+     * | `bd-ticket-guard-iteration-version` | `2` | 迭代版本 |
+     * | `bd-ticket-guard-display-os-version` | `Build.DISPLAY` | 机型串 |
+     * | `bd-ticket-guard-client-cert` | `base64("pub." + base64(裸点))` | **TEE 公钥**（不是证书） |
+     * | `bd-ticket-guard-ree-public-key` | `base64(裸点)` | REE 公钥 |
+     * | `bd-ticket-guard-server-cert-sn` | `data.server_sn` | 服务端证书序列号 |
+     *
+     * 两个**只在 `verify_pub_key` 出现**的头不在这里：`bd-ticket-guard-attest-certs`
+     * （证书链）与 `x-tt-request-tag: t=0;n=0`。抓包实证登录前的业务请求不带它们，
+     * 混进来反而是特征差异（专用头见 [buildVerifyHeaders]）。
+     *
+     * 拿不到真值（TEE 不可用 / 公钥取不出）就返回空 map —— 与接线前的默认实现一致。
      */
     fun asGuardHeaders(): DeviceGuardHeaders = DeviceGuardHeaders {
-        val prepared = runCatching { prepare() }.getOrNull() ?: return@DeviceGuardHeaders emptyMap()
-        if (prepared.attestCerts.isEmpty()) return@DeviceGuardHeaders emptyMap()
-        val cert = runCatching { enrollClientCert() }.getOrDefault("")
-        buildVerifyHeaders(
-            prepared = prepared,
-            reePublicKey = runCatching { reePublicKeyBase64() }.getOrDefault(""),
-            clientCert = cert,
-        )
+        if (runCatching { prepare() }.getOrNull() == null) return@DeviceGuardHeaders emptyMap()
+        val teePoint = runCatching { teePublicKeyBase64() }.getOrNull().orEmpty()
+        if (teePoint.isEmpty()) return@DeviceGuardHeaders emptyMap()
+        runCatching { enrollClientCert() } // 触发登记：拿 client-cert 与 server_sn
+        buildMap {
+            put(HEADER_TEE_STATUS, TEE_STATUS_AVAILABLE)
+            put(HEADER_VERSION, GUARD_VERSION)
+            put(HEADER_ITERATION_VERSION, ITERATION_VERSION)
+            displayOsVersion().takeIf { it.isNotEmpty() }?.let { put(HEADER_DISPLAY_OS_VERSION, it) }
+            put(HEADER_CLIENT_CERT, publicBlobHeader(teePoint))
+            runCatching { reePublicKeyBase64() }.getOrNull()?.takeIf { it.isNotEmpty() }
+                ?.let { put(HEADER_REE_PUBLIC_KEY, it) }
+            serverCertSn().takeIf { it.isNotEmpty() }?.let { put(HEADER_SERVER_CERT_SN, it) }
+        }
     }
 
     // ------------------------------------------------------------------ HTTP

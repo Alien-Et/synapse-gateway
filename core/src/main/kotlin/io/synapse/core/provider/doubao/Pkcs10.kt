@@ -127,14 +127,22 @@ object Pkcs10 {
     private const val PEM_END = "-----END CERTIFICATE REQUEST-----"
 
     /**
+     * subject CN。上游 CSR 的 subject 是 `C="", O="", OU="", CN=bd-ticket-guard`
+     * （抓包实测，`303B 3109…1300 … 3118…130F 62642D7469636B65742D6775617264`）。
+     * DER 里 subject 是 `SET OF`，成员无序，所以用 JVM 的 `X500Principal` 拼出来
+     * 字节顺序相反但语义等价；服务端按 name 解析，实测同一端点可正常签发。
+     */
+    const val DEFAULT_SUBJECT_CN = "bd-ticket-guard"
+
+    /**
      * 组装并签名 `CertificationRequest`。
      *
      * [keyPair] 的私钥若来自 AndroidKeyStore，[KeyPair.private] 是一个**句柄**：
      * `getEncoded()` 会抛异常，但 `Signature.initSign()` 能用 —— 签名在 TEE 内完成，
      * 私钥永不离开安全芯片（这正是复刻的关键）。
      */
-    fun build(keyPair: KeyPair, subjectCn: String): ByteArray {
-        val subject = X500Principal("CN=$subjectCn").encoded
+    fun build(keyPair: KeyPair, subjectCn: String = DEFAULT_SUBJECT_CN): ByteArray {
+        val subject = X500Principal("C=,O=,OU=,CN=$subjectCn").encoded
         val publicKeyInfo = keyPair.public.encoded
             ?: throw IllegalStateException("公钥无法编码（不是有效的 EC 公钥）")
 

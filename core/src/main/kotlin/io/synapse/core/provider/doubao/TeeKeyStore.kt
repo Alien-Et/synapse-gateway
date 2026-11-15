@@ -186,6 +186,36 @@ class TeeKeyStore {
 
     // ------------------------------------------------------------------ 签名 / 导出
 
+    /**
+     * EC 公钥 → **未压缩点**字节（`0x04 || X(32) || Y(32)`，共 65 字节）。
+     *
+     * 上游 HTTP 头用的是**裸点**而不是 X.509 SPKI：抓包里
+     * `bd-ticket-guard-ree-public-key` 解码后正好 65 字节、首字节 `0x04`，
+     * `bd-ticket-guard-client-cert`（`pub.` 体）解两层后也是 65 字节裸点。
+     * 注意它与 [certificateToPem] 那条链上的 SPKI 形态**不可混用**：
+     * 同一条曲线 SPKI 约 91 字节、base64 后 124 字符，形状一眼可辨。
+     */
+    fun ecPoint(publicKey: PublicKey): ByteArray {
+        val w = runCatching { (publicKey as java.security.interfaces.ECPublicKey).w }.getOrNull()
+        if (w != null) return byteArrayOf(0x04) + fixed32(w.affineX) + fixed32(w.affineY)
+        // 回退：未压缩点的 X.509 SPKI 尾部 65 字节就是裸点
+        val enc = publicKey.encoded
+        require(enc != null && enc.size >= 65 && enc[enc.size - 65] == 0x04.toByte()) {
+            "公钥不是未压缩 EC 点，取不到裸点"
+        }
+        return enc.copyOfRange(enc.size - 65, enc.size)
+    }
+
+    /** BigInteger → 定长 32 字节（P-256 的 X / Y 坐标）。 */
+    private fun fixed32(v: BigInteger): ByteArray {
+        val raw = v.toByteArray()
+        return when {
+            raw.size == 32 -> raw
+            raw.size > 32 -> raw.copyOfRange(raw.size - 32, raw.size) // 去掉符号位补的 0x00
+            else -> ByteArray(32 - raw.size) + raw
+        }
+    }
+
     /** SHA256withECDSA 签名（TEE 内运算）。 */
     fun sign(alias: String, data: ByteArray): ByteArray {
         val key = privateKey(alias) ?: throw TeeUnavailableException("私钥不存在：$alias")
