@@ -50,11 +50,21 @@ class DoubaoAuthClient(
         fun xorEncode(s: String): String =
             s.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it.toInt() and 0xFF xor XOR_KEY) }
 
-        /** [xorEncode] 的逆操作。 */
+        /**
+         * [xorEncode] 的逆操作。
+         *
+         * 注意：hex → 字节之后**还要再 XOR 一次**（XOR 是自逆运算）。
+         * 只做 hex 解码不做异或，得到的是密文的可读乱码 —— 看起来像
+         * 「能读的 ASCII」，最容易骗过肉眼 review。
+         */
         fun xorDecode(hex: String): String {
+            if (hex.length % 2 != 0) return ""
             val bytes = ByteArray(hex.length / 2)
             for (i in bytes.indices) {
-                bytes[i] = ((Character.digit(hex[i * 2], 16) shl 4) or Character.digit(hex[i * 2 + 1], 16)).toByte()
+                val hi = Character.digit(hex[i * 2], 16)
+                val lo = Character.digit(hex[i * 2 + 1], 16)
+                if (hi < 0 || lo < 0) return ""
+                bytes[i] = (((hi shl 4) or lo) xor XOR_KEY).toByte()
             }
             return bytes.toString(Charsets.UTF_8)
         }
@@ -396,15 +406,15 @@ class DoubaoMultiAccountException(
         }
 
         /** 从 [DoubaoMultiAccountException.message] 解回候选列表；格式不符返回 null。 */
-        fun parse(message: String?): Pair<String, List<SubAccount>>? {
+        fun parse(message: String?): Pair<String, List<DoubaoAuthClient.SubAccount>>? {
             if (message == null || !message.startsWith(MESSAGE)) return null
             val seg = message.split("|")
             if (seg.size < 3) return null
             val hint = seg[1]
-            val subs = ArrayList<SubAccount>()
+            val subs = ArrayList<DoubaoAuthClient.SubAccount>()
             var i = 2
             while (i + 1 < seg.size) {
-                subs += SubAccount(secUid = seg[i], name = seg[i + 1], avatar = "", tenantName = "", isLoggedIn = false)
+                subs += DoubaoAuthClient.SubAccount(secUid = seg[i], name = seg[i + 1], avatar = "", tenantName = "", isLoggedIn = false)
                 i += 2
             }
             if (subs.isEmpty()) return null

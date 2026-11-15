@@ -42,8 +42,13 @@ data class DoubaoCredential(
     val conversationId: String = "",
 ) {
 
-    /** Cookie 里是否含主凭证 `d_ticket`。 */
-    val hasTicket: Boolean get() = cookie.contains("d_ticket=")
+    /**
+     * Cookie 里是否含主凭证 `d_ticket`。
+     *
+     * 用 [cookieValue] 判而不是 `cookie.contains("d_ticket=")`：用户从抓包工具
+     * 复制出来的串常带空格（`d_ticket = xxx`），`contains` 会漏判。
+     */
+    val hasTicket: Boolean get() = cookieValue("d_ticket").isNotEmpty()
 
     /** 按名字取单个 Cookie 值（取不到返回空串）。 */
     fun cookieValue(name: String): String {
@@ -85,7 +90,7 @@ data class DoubaoCredential(
             if (!text.startsWith("{")) {
                 // 原始 Cookie 串：uid / cdid 尽量从 Cookie 里挖，挖不到留空
                 val cookie = text.removePrefix("Cookie:").trim()
-                if (!cookie.contains("d_ticket=")) return null
+                if (extractCookie(cookie, "d_ticket").isEmpty()) return null
                 return DoubaoCredential(
                     cookie = cookie,
                     uid = extractCookie(cookie, "__tea__ug__uid"),
@@ -95,7 +100,7 @@ data class DoubaoCredential(
             }
             val obj = runCatching { JsonParser.parseString(text).asJsonObject }.getOrNull() ?: return null
             val cookie = obj.stringOrEmpty("cookie")
-            if (cookie.isEmpty() || !cookie.contains("d_ticket=")) return null
+            if (cookie.isEmpty() || extractCookie(cookie, "d_ticket").isEmpty()) return null
             return DoubaoCredential(
                 cookie = cookie,
                 uid = obj.stringOrEmpty("uid").ifEmpty { extractCookie(cookie, "__tea__ug__uid") },

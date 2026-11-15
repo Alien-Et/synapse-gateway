@@ -26,10 +26,19 @@ import kotlin.test.assertTrue
  */
 class DoubaoStreamTranslatorTest {
 
+    /**
+     * 把一段 `content_block` JSON 喂进翻译器。
+     *
+     * ⚠️ 测试里为了排版好看，块 JSON 常写成多行。但 **SSE 的 `data:` 字段必须是单行** ——
+     * 内嵌裸换行会被 [DoubaoStreamTranslator.translate] 当成新的一行，
+     * 而那一行不带 `data:` 前缀，于是 JSON 被拦腰截断、解析失败、输出为空。
+     * 这里统一压平，避免测试自己把自己绊倒（真实抓包里 data 就是单行）。
+     */
     private fun translateOneBlock(blockJson: String): String {
         val translator = DoubaoStreamTranslator(model = "seedance_v2.0_mini")
+        val flat = blockJson.replace("\n", "").replace("\r", "")
         val raw = """event: STREAM_CHUNK
-data: {"patch_op":[{"patch_value":{"content_block":[$blockJson]}}]}
+data: {"patch_op":[{"patch_value":{"content_block":[$flat]}}]}
 
 """
         val out = StringBuilder()
@@ -135,9 +144,10 @@ data: {"patch_op":[{"patch_value":{"content_block":[$blockJson]}}]}
                       "video_model":"$videoModel"}}
         ]}}}"""
         val translator = DoubaoStreamTranslator(model = "seedance_v2.0_mini")
+        val flat = block.replace("\n", "").replace("\r", "")
         fun feed(): String {
             val raw = """event: STREAM_CHUNK
-data: {"patch_op":[{"patch_value":{"content_block":[$block]}}]}
+data: {"patch_op":[{"patch_value":{"content_block":[$flat]}}]}
 
 """
             val sb = StringBuilder()
@@ -155,9 +165,7 @@ data: {"patch_op":[{"patch_value":{"content_block":[$block]}}]}
     fun `thinking_block 输出 reasoning_content`() {
         val translator = DoubaoStreamTranslator(model = "seed")
         val raw = """event: STREAM_CHUNK
-data: {"patch_op":[{"patch_value":{"content_block":[
-  {"block_type":10040,"content":{"thinking_block":{"summary":"先想一想"}}}
-]}}]}
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10040,"content":{"thinking_block":{"summary":"先想一想"}}}]}}]}
 
 """
         val out = StringBuilder()

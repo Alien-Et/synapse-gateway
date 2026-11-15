@@ -14,14 +14,21 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import io.synapse.app.ui.ChoiceChip
 import io.synapse.app.ui.OutlineActionButton
 import io.synapse.app.ui.SectionCard
@@ -70,7 +77,7 @@ object DoubaoUi : ProviderUi {
 
     @Composable
     override fun LoginEntry(accounts: List<AccountStatus>, actions: ProviderUiActions) {
-        var ccode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("86") }
+        var ccode by rememberSaveable { mutableStateOf("86") }
         var phone by remember { mutableStateOf("") }
         var code by remember { mutableStateOf("") }
         var cookie by remember { mutableStateOf("") }
@@ -84,9 +91,9 @@ object DoubaoUi : ProviderUi {
         var multiCcode by remember { mutableStateOf("86") }
         var showMultiDialog by remember { mutableStateOf(false) }
 
-        androidx.compose.runtime.LaunchedEffect(countdown) {
+        LaunchedEffect(countdown) {
             if (countdown > 0) {
-                kotlinx.coroutines.delay(1_000)
+                delay(1_000)
                 countdown -= 1
             }
         }
@@ -115,30 +122,30 @@ object DoubaoUi : ProviderUi {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    androidx.compose.material3.OutlinedTextField(
+                    OutlinedTextField(
                         value = ccode,
                         onValueChange = { value -> ccode = value.filter(Char::isDigit).take(4) },
                         modifier = Modifier.fillMaxWidth(0.24f),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        label = { androidx.compose.material3.Text("国家码") },
+                        label = { Text("国家码") },
                     )
-                    androidx.compose.material3.OutlinedTextField(
+                    OutlinedTextField(
                         value = phone,
                         onValueChange = { phone = it.filter(Char::isDigit).take(15) },
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                        label = { androidx.compose.material3.Text("手机号") },
+                        label = { Text("手机号") },
                     )
                 }
-                androidx.compose.material3.OutlinedTextField(
+                OutlinedTextField(
                     value = code,
                     onValueChange = { code = it.filter(Char::isDigit).take(6) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    label = { androidx.compose.material3.Text("验证码（6 位）") },
+                    label = { Text("验证码（6 位）") },
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(
@@ -157,7 +164,7 @@ object DoubaoUi : ProviderUi {
                         enabled = phone.isNotBlank() && countdown == 0 && !busy,
                         modifier = Modifier.weight(1f),
                     ) {
-                        androidx.compose.material3.Text(if (countdown > 0) "${countdown} 秒后重发" else "发送验证码")
+                        Text(if (countdown > 0) "${countdown} 秒后重发" else "发送验证码")
                     }
                     Button(
                         onClick = {
@@ -171,11 +178,11 @@ object DoubaoUi : ProviderUi {
                         enabled = phone.isNotBlank() && code.isNotBlank() && !busy,
                         modifier = Modifier.weight(1f),
                     ) {
-                        androidx.compose.material3.Text(if (busy) "登录中…" else "登录")
+                        Text(if (busy) "登录中…" else "登录")
                     }
                 }
                 if (lastError.isNotEmpty()) {
-                    androidx.compose.material3.Text(
+                    Text(
                         text = lastError,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.error,
@@ -186,12 +193,12 @@ object DoubaoUi : ProviderUi {
             // ---------------- Cookie 导入（备用路径） ----------------
             SectionCard(enterIndex = 1) {
                 SectionLabel("Cookie 导入（备用）")
-                androidx.compose.material3.OutlinedTextField(
+                OutlinedTextField(
                     value = cookie,
                     onValueChange = { cookie = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { androidx.compose.material3.Text("Cookie") },
-                    placeholder = { androidx.compose.material3.Text("d_ticket=...; ttwid=...; 整串原样粘贴") },
+                    label = { Text("Cookie") },
+                    placeholder = { Text("d_ticket=...; ttwid=...; 整串原样粘贴") },
                     minLines = 3,
                     maxLines = 6,
                     textStyle = MaterialTheme.typography.bodySmall,
@@ -202,7 +209,7 @@ object DoubaoUi : ProviderUi {
                         cookie = ""
                     }
                 }
-                androidx.compose.material3.Text(
+                Text(
                     text = "手机号登录是主路径；Cookie 留给「手里已经有现成凭证」的场景。" +
                         "从抓包工具整串复制，不用手工拆字段。",
                     style = MaterialTheme.typography.labelSmall,
@@ -214,7 +221,7 @@ object DoubaoUi : ProviderUi {
                 SectionCard {
                     SectionLabel("账号")
                     accounts.forEach { status ->
-                        androidx.compose.material3.Text(
+                        Text(
                             text = "${status.displayName} · ${status.uid}",
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -228,16 +235,16 @@ object DoubaoUi : ProviderUi {
             AlertDialog(
                 onDismissRequest = { showMultiDialog = false },
                 confirmButton = {},
-                title = { androidx.compose.material3.Text("选择要登录的账号") },
+                title = { Text("选择要登录的账号") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        androidx.compose.material3.Text(
+                        Text(
                             text = "该手机号绑定了 ${multiCandidates.size} 个豆包账号：",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         multiCandidates.forEach { (secUid, name) ->
-                            androidx.compose.material3.OutlinedButton(
+                            OutlinedButton(
                                 onClick = {
                                     showMultiDialog = false
                                     val selMsgid = DoubaoAuthClient.SEL_PREFIX + secUid
@@ -250,7 +257,7 @@ object DoubaoUi : ProviderUi {
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                androidx.compose.material3.Text(name)
+                                Text(name)
                             }
                         }
                     }
@@ -264,12 +271,12 @@ object DoubaoUi : ProviderUi {
     override fun AccountExtra(status: AccountStatus, actions: ProviderUiActions) {
         SectionCard {
             SectionLabel("账号")
-            androidx.compose.material3.Text(
+            Text(
                 text = "uid：${status.uid.ifEmpty { "—" }}",
                 style = MaterialTheme.typography.bodySmall,
             )
             if (status.detail.isNotEmpty()) {
-                androidx.compose.material3.Text(
+                Text(
                     text = status.detail,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -304,7 +311,7 @@ object DoubaoUi : ProviderUi {
                     onUpdate(settings.copy(options = settings.options + ("line" to DoubaoProvider.LINE_FAST)))
                 }
             }
-            androidx.compose.material3.Text(
+            Text(
                 text = if (currentLine == DoubaoProvider.LINE_EXPERT) {
                     "专家模式：深度思考作答（need_deep_think=3），更准但更慢，会显示思考过程。"
                 } else {
@@ -323,14 +330,14 @@ object DoubaoUi : ProviderUi {
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column(Modifier.weight(1f)) {
-                    androidx.compose.material3.Text("固定在一个对话窗口", style = MaterialTheme.typography.bodySmall)
-                    androidx.compose.material3.Text(
+                    Text("固定在一个对话窗口", style = MaterialTheme.typography.bodySmall)
+                    Text(
                         text = "复用同一个 conversation_id，上下文连续、首字更快",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                androidx.compose.material3.Switch(
+                Switch(
                     checked = fixedWindow,
                     onCheckedChange = { checked ->
                         onUpdate(
@@ -345,12 +352,12 @@ object DoubaoUi : ProviderUi {
 
         SectionCard {
             SectionLabel("生图 / 生视频")
-            androidx.compose.material3.Text(
+            Text(
                 text = "模型名里带 seedream 走生图、带 seedance 走生视频。\n" +
                     "生图结果以 Markdown 图片链接出现；生视频结果以视频链接 + 封面出现。",
                 style = MaterialTheme.typography.bodySmall,
             )
-            androidx.compose.material3.Text(
+            Text(
                 text = "⏳ 视频是异步生成的：豆包会先回「预计等待 10 分钟」，生成完再推送结果。" +
                     "所以这一轮对话里通常拿不到视频，属正常现象，不是失败。",
                 style = MaterialTheme.typography.labelSmall,
