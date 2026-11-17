@@ -9,7 +9,7 @@
 | [02](02.模块与文件地图.md) | 每个文件是干什么的 | `core/`、`app/` |
 | [03](03.路由与选号.md) | 标签路由、选号规则、区域约束 | `gateway/GatewayEngine.kt`、`pool/AccountPool.kt` |
 | [04](04.供应商协议层.md) | Provider 接口、协议表、地址拼接、端点识别 | `provider/`、`gateway/ProviderProtocols.kt` |
-| [05](05.容错机制.md) | 冷却、禁用、熔断、并发、请求体上限 | `failover/` |
+| [05](05.容错机制.md) | 冷却、禁用、熔断、并发、请求体上限、跨供应商（手写候选 / 按模型名自动匹配） | `failover/` |
 | [06](06.账号池与状态.md) | 账号状态、自定义名、导入导出 | `pool/` |
 | [07](07.端点与透传.md) | 端点目录、透传规则、模型测试分流 | `provider/ApiEndpoints.kt`、`gateway/GatewayHttpServer.kt` |
 | [08](08.上游陷阱清单.md) | 各家的实测坑 | `provider/*/` |
