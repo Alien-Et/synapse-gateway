@@ -1690,8 +1690,15 @@ class AppViewModel(
     // ------------------------------------------------------------------ 账号
 
     fun setAccountEnabled(providerId: String, uid: String, enabled: Boolean) = action {
-        engine.setAccountEnabled(providerId, uid, enabled)
-        if (enabled) "已启用该账号" else "已停用该账号"
+        when (val result = engine.setAccountEnabled(providerId, uid, enabled)) {
+            io.synapse.core.gateway.AccountToggleResult.Enabled -> "已启用该账号"
+            io.synapse.core.gateway.AccountToggleResult.Disabled -> "已停用该账号"
+            is io.synapse.core.gateway.AccountToggleResult.StillInvalid ->
+                "凭证仍然失效（${result.reason}），请重新登录"
+            is io.synapse.core.gateway.AccountToggleResult.Unverified ->
+                "${result.reason}；账号仍是停用状态"
+            io.synapse.core.gateway.AccountToggleResult.NotFound -> "账号不存在"
+        }
     }
 
     fun removeAccount(providerId: String, uid: String) = action {

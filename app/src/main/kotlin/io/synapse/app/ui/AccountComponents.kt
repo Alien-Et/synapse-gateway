@@ -254,6 +254,10 @@ fun AccountPriorityArrows(
 
 /**
  * 账号启用/停用开关：绑定 [ProviderUiActions.onToggleAccount]。
+ *
+ * 开关状态用 [AccountStatus.usable]（= 未凭证失效 且 未被手动停用），而不是只看
+ * `enabled`：凭证失效的账号必须显示成「关」，否则用户看到「凭证失效」却配着一个开着的
+ * 开关，完全不知道该点哪里。点开这个关着的开关 = 一次重新鉴权，凭证确实可用了才恢复。
  */
 @Composable
 fun AccountEnableSwitch(
@@ -263,7 +267,7 @@ fun AccountEnableSwitch(
     modifier: Modifier = Modifier,
 ) {
     Switch(
-        checked = account.enabled,
+        checked = account.usable,
         onCheckedChange = { actions.onToggleAccount(providerId, account.uid, it) },
         modifier = modifier,
     )

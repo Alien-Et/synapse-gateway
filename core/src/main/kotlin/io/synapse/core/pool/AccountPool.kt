@@ -277,6 +277,26 @@ class AccountPool(
     }
 
     /**
+     * 解除「凭证失效」硬禁用 —— 只在用户手动启用、且**鉴权确认凭证已可用**之后调用。
+     *
+     * 硬禁用不是用户点一下开关就该消失的状态：它代表「上游明确说这份凭证不行」。
+     * 所以解除它的前提是先验证，验证通过才清标记；验证不通过保持原样。
+     *
+     * @return true 表示确实清掉了硬禁用标记。
+     */
+    fun clearDisabled(providerId: String, uid: String): Boolean {
+        val found = lock.write {
+            val entry = entries[keyOf(providerId, uid)] ?: return@write false
+            if (!entry.disabled) return@write false
+            entry.disabled = false
+            entry.reason = ""
+            true
+        }
+        if (found) persistState(providerId, uid)
+        return found
+    }
+
+    /**
      * 对话成功：把「上次被判定为额度耗尽」留下的 0 标记摘掉。
      *
      * 为什么需要：额度为 0 的号会在选号时被跳过（[pick] 的 skipEmptyCredits）。

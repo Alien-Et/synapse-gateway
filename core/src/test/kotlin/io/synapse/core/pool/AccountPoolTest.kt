@@ -348,6 +348,39 @@ class AccountPoolTest {
     }
 
     @Test
+    fun `解除硬禁用只清失效标记并落盘`() {
+        val store = InMemoryKeyValueStore()
+        val pool = newPool(store)
+        pool.upsert(account("a"))
+        pool.disable(TRAE, "a", "登录已失效")
+        assertTrue(pool.status(TRAE, "a")!!.disabled)
+
+        assertTrue(pool.clearDisabled(TRAE, "a"))
+        val status = pool.status(TRAE, "a")!!
+        assertFalse(status.disabled)
+        assertEquals("", status.reason)
+        assertTrue(status.enabled, "解除硬禁用不该顺手把用户开关关掉")
+        assertTrue(status.usable)
+
+        // 必须落盘：重启后不能又变回「凭证失效」
+        val reloaded = newPool(store).status(TRAE, "a")!!
+        assertFalse(reloaded.disabled)
+    }
+
+    @Test
+    fun `对正常账号解除硬禁用返回 false 且不动状态`() {
+        val pool = newPool()
+        pool.upsert(account("a"))
+        pool.setEnabled(TRAE, "a", false, reason = "手动停用")
+
+        assertFalse(pool.clearDisabled(TRAE, "a"))
+        val status = pool.status(TRAE, "a")!!
+        assertFalse(status.disabled)
+        assertFalse(status.enabled, "手动停用不该被这次调用顺手打开")
+        assertEquals("手动停用", status.reason)
+    }
+
+    @Test
     fun `未知账号上的操作是空操作`() {
         val pool = newPool()
         pool.disable(TRAE, "nope", "x")

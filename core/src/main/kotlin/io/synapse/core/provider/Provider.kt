@@ -38,6 +38,54 @@ enum class ProviderCapability {
     POINTS_BILLS,
 }
 
+/** 一次鉴权探测的结论。 */
+enum class CredentialVerdict {
+    /** 凭证可用（能读到额度，或鉴权端点明确通过）。 */
+    VALID,
+
+    /** 凭证确实失效（失效措辞/401/403）：只能重新登录。 */
+    INVALID,
+
+    /** 该供应商没有可用的鉴权探测端点（如纯 Cookie 鉴权的豆包）。 */
+    UNSUPPORTED,
+
+    /** 无法确认（网络错误、超时、上游 5xx）：既不能说好也不能说坏。 */
+    UNKNOWN,
+}
+
+/**
+ * 从一次额度查询的结果判断凭证状态。
+ *
+ * 判据只有两类，且都有意保守：
+ * - `known == true` → 鉴权通过（能读到真实额度，说明凭证被上游接受了）；
+ * - 失败说明里出现**明确的失效措辞** → 判定失效。
+ *
+ * 网络错误、5xx、看不懂的报错一律算 [CredentialVerdict.UNKNOWN]：
+ * 一次超时不该把账号重新判死，更不该把坏凭证当成好的放回去。
+ */
+fun judgeCredentialVerdict(info: CreditInfo): CredentialVerdict {
+    if (info.known) return CredentialVerdict.VALID
+    val text = "${info.detail} ${info.actionHint}".lowercase()
+    return if (INVALID_MARKERS.any { text.contains(it) }) CredentialVerdict.INVALID
+    else CredentialVerdict.UNKNOWN
+}
+
+/** 明确的失效措辞。只认「登录/session/token 失效」这类确定表述，不认裸状态码片段。 */
+private val INVALID_MARKERS = listOf(
+    "登录已失效",
+    "凭证已失效",
+    "凭证失效",
+    "未登录",
+    "未授权",
+    "token 已失效",
+    "token已失效",
+    "session expired",
+    "not logged in",
+    "unauthorized",
+    "http 401",
+    "http 403",
+)
+
 /** 供应商专属动作（provider 实现 [Provider.performAction]，UI 组件按名字调用）。 */
 
 /** 每日签到；支持的 provider 与 UI 都按这个名字调用。 */
@@ -169,6 +217,22 @@ interface Provider {
 
     /** 账号额度/积分；无此能力返回 null。 */
     fun creditInfo(account: ProviderAccount): CreditInfo? = null
+
+    /**
+     * 鉴权探测：这份凭证现在**还能不能用**。
+     *
+     * 只在一个低频场景被调用：用户手动打开一个「凭证失效」账号的开关时，先确认它是不是
+     * 真的失效了 —— 避免用户明明还能用、却因为一次瞬时故障被一直挡在门外。
+     *
+     * 默认实现走 [creditInfo]：能读到额度就说明鉴权通过（额度端点和对话端点共用同一套凭证）。
+     * 读不到时再看失败说明里有没有明确的失效措辞；网络错误一律算「无法确认」，
+     * 绝不因为一次超时就把账号重新判死（也绝不把坏凭证误判成好的）。
+     */
+    fun verifyCredential(account: ProviderAccount): CredentialVerdict {
+        val info = creditInfo(account) ?: return CredentialVerdict.UNSUPPORTED
+        return judgeCredentialVerdict(info)
+    }
+
 
     /** 额度包明细（可选）；没有额度包概念的 provider 返回空列表。 */
     fun creditPacks(account: ProviderAccount): List<QuotaPack> = emptyList()

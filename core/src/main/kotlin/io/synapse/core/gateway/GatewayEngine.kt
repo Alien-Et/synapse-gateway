@@ -10,6 +10,7 @@ import io.synapse.core.pool.PoolSummary
 import io.synapse.core.provider.ACTION_CHECKIN
 import io.synapse.core.provider.ACTION_COMPLETE_TASKS
 import io.synapse.core.provider.AuthKind
+import io.synapse.core.provider.CredentialVerdict
 import io.synapse.core.provider.CreditInfo
 import io.synapse.core.provider.DeviceAuthPoll
 import io.synapse.core.provider.DeviceAuthTicket
@@ -803,9 +804,57 @@ class GatewayEngine(
         return removed
     }
 
-    fun setAccountEnabled(providerId: String, uid: String, enabled: Boolean) {
-        pool.setEnabled(providerId, uid, enabled, reason = if (enabled) "" else "手动停用")
-        log("${if (enabled) "启用" else "停用"}账号：$providerId/$uid")
+    /**
+     * 手动开关账号。
+     *
+     * 打开一个**凭证失效**的账号时，先做一次鉴权探测：凭证确实可用了才解除硬禁用。
+     * 不能凭一次点击就把「上游明确说这份凭证不行」的状态抹掉 —— 那会让坏账号重新进入
+     * 选号池，用户紧接着又收到一次 401。反过来，鉴权通过就说明上次的判定已经过时
+     * （或只是一次瞬时故障），此时应当恢复它，而不是逼用户重新登录。
+     */
+    fun setAccountEnabled(providerId: String, uid: String, enabled: Boolean): AccountToggleResult {
+        val status = pool.status(providerId, uid) ?: return AccountToggleResult.NotFound
+        if (!enabled) {
+            pool.setEnabled(providerId, uid, false, reason = "手动停用")
+            log("停用账号：$providerId/$uid")
+            return AccountToggleResult.Disabled
+        }
+        if (status.disabled) {
+            return when (verifyAccount(providerId, uid)) {
+                CredentialVerdict.VALID -> {
+                    pool.clearDisabled(providerId, uid)
+                    pool.setEnabled(providerId, uid, true)
+                    log("账号凭证已恢复可用：$providerId/$uid")
+                    AccountToggleResult.Enabled
+                }
+                CredentialVerdict.INVALID -> {
+                    val reason = pool.status(providerId, uid)?.reason.orEmpty().ifEmpty { "凭证无效" }
+                    log("启用被拒（凭证仍然失效）：$providerId/$uid")
+                    AccountToggleResult.StillInvalid(reason)
+                }
+                CredentialVerdict.UNSUPPORTED, CredentialVerdict.UNKNOWN -> {
+                    log("启用被拒（无法确认凭证状态）：$providerId/$uid")
+                    AccountToggleResult.Unverified("无法确认凭证状态（网络异常或该供应商不支持校验）")
+                }
+            }
+        }
+        pool.setEnabled(providerId, uid, true)
+        log("启用账号：$providerId/$uid")
+        return AccountToggleResult.Enabled
+    }
+
+    /**
+     * 鉴权探测一份凭证当前还能不能用。
+     *
+     * 临期凭证先做一次安全刷新（[freshAccount]），否则拿一个已经过期几分钟的 token 去探，
+     * 只会得到「失效」的假结论。
+     */
+    fun verifyAccount(providerId: String, uid: String): CredentialVerdict {
+        val provider = registry.get(providerId) ?: return CredentialVerdict.UNKNOWN
+        val stored = pool.account(providerId, uid) ?: return CredentialVerdict.UNKNOWN
+        val account = freshAccount(provider, stored)
+        return runCatching { provider.verifyCredential(account) }
+            .getOrDefault(CredentialVerdict.UNKNOWN)
     }
 
     /**
@@ -2906,6 +2955,24 @@ private fun resultPage(ok: Boolean, who: String, error: String): String {
         </style></head>
         <body><div class="card"$marker><h1>$title</h1><p>$message</p></div></body></html>
     """.trimIndent()
+}
+
+/** 手动切换账号开关的结果。 */
+sealed interface AccountToggleResult {
+    /** 已启用：鉴权通过，或该账号本来就不是「凭证失效」。 */
+    data object Enabled : AccountToggleResult
+
+    /** 已停用（用户手动关闭）。 */
+    data object Disabled : AccountToggleResult
+
+    /** 鉴权确认凭证**仍然失效**：保持停用，只能重新登录。 */
+    data class StillInvalid(val reason: String) : AccountToggleResult
+
+    /** 无法确认凭证状态（网络异常 / 该供应商不支持校验）：保持停用。 */
+    data class Unverified(val reason: String) : AccountToggleResult
+
+    /** 账号不存在（可能刚被删除）。 */
+    data object NotFound : AccountToggleResult
 }
 
 /** 默认用网络接口枚举局域网地址；Android 侧注入系统实现更准。 */
