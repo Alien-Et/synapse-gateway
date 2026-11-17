@@ -524,6 +524,32 @@ class GatewayEngine(
 
     fun isModelBlocked(fullId: String): Boolean = modelBlocklist.blocks(fullId)
 
+    /**
+     * 跨供应商候选（`providerId` + 模型名）是否被本机屏蔽。
+     *
+     * 屏蔽名单存的是 **fullId**（`中文标签/模型名`，如 `字节国内/glm-5.2`），而候选只记
+     * `providerId` + `model`（如 `trae` + `glm-5.2`）—— 两者不能直接比。
+     *
+     * 反过来拆：取名单里每个条目的前缀，经 [normalizeProviderPrefix] 还原成 providerId，
+     * 再与候选的 providerId 比较。这样区域型供应商（腾讯/字节：一个 providerId 对应
+     * 「国内」「国外」两个标签）无论屏蔽的是哪个区域，都能正确命中。
+     *
+     * 为什么不能只看界面过滤：候选配置是落盘的，用户先勾了候选、之后在模型页屏蔽了
+     * 那个模型，配置里那条还在 —— 故障转移时仍会打到它。
+     */
+    fun isCandidateBlocked(providerId: String, model: String): Boolean {
+        if (modelBlocklist.blocked.isEmpty()) return false
+        val suffix = "/$model"
+        return modelBlocklist.blocked.any { fullId ->
+            if (fullId.length <= suffix.length || !fullId.endsWith(suffix)) return@any false
+            val prefix = fullId.substringBefore('/')
+            // 已知标签（腾讯国内→codebuddy）要还原成 providerId 才能与候选比较；
+            // 未知供应商的前缀本身就是 providerId（`alpha/xxx`），normalize 返回 null 时直接用它。
+            val owner = normalizeProviderPrefix(prefix) ?: prefix
+            owner == providerId
+        }
+    }
+
     /** 更新屏蔽名单并落盘；独立入口，不调用 reconfigureProviders。 */
     fun updateModelBlocklist(updated: ModelBlocklist) {
         modelBlocklist = updated

@@ -142,6 +142,8 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
             candidates = state.failover.crossProvider.candidates,
             strategy = state.failover.crossProvider.strategy,
             providerCredits = remember(state.accounts) { providerCreditLabels(state.accounts) },
+            // 屏蔽名单：候选列表里不再列出被屏蔽的模型（已勾选的会置灰标注，便于取消）
+            isBlocked = { routed -> state.modelBlocklist.blocks(routed.fullId) },
             // 写透：勾一下就落盘，不等「保存」。读改写在 ViewModel 里基于 engine
             // 权威值做，连点也不会丢更新（界面持有的 state 可能已过期）。
             onToggleCandidate = { candidate, checked ->

@@ -107,6 +107,32 @@ class CrossProviderFailoverTest {
     }
 
     @Test
+    fun `被屏蔽的候选不会被动用`() {
+        val cfg = CrossProviderFailoverConfig(
+            enabled = true, candidates = listOf(a, b, c), strategy = CrossProviderStrategy.IN_ORDER,
+        )
+        // 第一个候选在屏蔽名单里：必须直接落到第二个，而不是「先打一次再失败」
+        val d = CrossProviderSwitchDecider(
+            config = { cfg },
+            isBlocked = { it.key == a.key },
+        )
+        assertEquals(
+            b,
+            d.decide(CrossProviderSwitchDecider.Trigger.ProviderCircuitOpen("x"), emptySet())?.candidate,
+        )
+    }
+
+    @Test
+    fun `候选全部被屏蔽时不换家`() {
+        val cfg = CrossProviderFailoverConfig(enabled = true, candidates = listOf(a, b))
+        val d = CrossProviderSwitchDecider(config = { cfg }, isBlocked = { true })
+        assertNull(
+            d.decide(CrossProviderSwitchDecider.Trigger.ProviderCircuitOpen("x"), emptySet()),
+            "全被屏蔽还换家，等于把请求发到用户明确不想用的模型上",
+        )
+    }
+
+    @Test
     fun `按额度优先挑剩余最多的`() {
         val cfg = CrossProviderFailoverConfig(
             enabled = true, candidates = listOf(a, b, c), strategy = CrossProviderStrategy.BY_CREDITS,

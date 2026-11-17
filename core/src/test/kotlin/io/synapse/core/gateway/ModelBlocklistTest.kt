@@ -151,6 +151,35 @@ class ModelBlocklistTest {
     }
 
     @Test
+    fun `跨供应商候选的屏蔽判定只命中同一家`() {
+        val engine = engineWith(twoModels())
+        engine.blockModels(listOf("alpha/m1"))
+        assertTrue(engine.isCandidateBlocked("alpha", "m1"))
+        assertFalse(engine.isCandidateBlocked("alpha", "m2"))
+        // 同名模型在别家：不算被屏蔽（屏蔽是「这家这个模型」，不是「这个模型名」）
+        assertFalse(engine.isCandidateBlocked("beta", "m1"))
+    }
+
+    @Test
+    fun `区域型供应商任一区域被屏蔽都算候选被屏蔽`() {
+        // 腾讯/字节一个 providerId 对应「国内 / 国外」两个标签，
+        // 候选只记 providerId + model，所以要能反查到区域标签。
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.blockModels(listOf("字节国内/glm-5.2"))
+        assertTrue(engine.isCandidateBlocked("trae", "glm-5.2"))
+        assertFalse(engine.isCandidateBlocked("codebuddy", "glm-5.2"))
+        assertFalse(engine.isCandidateBlocked("trae", "glm-5.3"))
+    }
+
+    @Test
+    fun `模型 id 自带斜杠时（Cline 池前缀）也能正确判定`() {
+        val engine = GatewayEngine(InMemoryKeyValueStore())
+        engine.blockModels(listOf("Cline/cline-pass/deepseek-v4-pro"))
+        assertTrue(engine.isCandidateBlocked("cline", "cline-pass/deepseek-v4-pro"))
+        assertFalse(engine.isCandidateBlocked("cline", "cline-free/deepseek-v4-pro"))
+    }
+
+    @Test
     fun `屏蔽名单落盘后新引擎仍生效`() {
         val store = InMemoryKeyValueStore()
         val engine = GatewayEngine(store)

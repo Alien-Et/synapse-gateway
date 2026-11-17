@@ -1,11 +1,13 @@
 package io.synapse.app.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -15,6 +17,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.synapse.core.failover.CrossProviderCandidate
@@ -56,6 +60,13 @@ fun CrossProviderDialog(
     strategy: CrossProviderStrategy,
     /** 各供应商已缓存的剩余额度文案（providerId → 「积分 12,345」），未知的供应商不放进 map。 */
     providerCredits: Map<String, String>,
+    /**
+     * 该模型是否在本机屏蔽名单里。
+     *
+     * 屏蔽的模型默认**不列出来**（用户已经明确表示不想用它，再摆出来只会误勾）；
+     * 但如果它已经被勾成候选，仍要显示并标注，否则用户看不到「这条其实早就失效了」。
+     */
+    isBlocked: (RoutedModel) -> Boolean = { false },
     /** 勾选/取消某个候选（true = 勾上）。调用方应立即落盘。 */
     onToggleCandidate: (CrossProviderCandidate, Boolean) -> Unit,
     onStrategyChange: (CrossProviderStrategy) -> Unit,
@@ -71,7 +82,13 @@ fun CrossProviderDialog(
     // 这里用节流版：反复开关弹窗不会反复打上游。
     LaunchedEffect(Unit) { onEnsureModels() }
 
-    val grouped = models.groupBy { it.providerName.ifEmpty { it.providerId } }
+    // 已屏蔽且没被勾选的模型直接不列出；已勾选的保留，但下面会置灰标注「已屏蔽」。
+    val visibleModels = models.filter { routed ->
+        !isBlocked(routed) || candidates.any {
+            it.providerId == routed.providerId && it.model == routed.model.id
+        }
+    }
+    val grouped = visibleModels.groupBy { it.providerName.ifEmpty { it.providerId } }
 
     AppDialog(
         title = "跨供应商故障转移",
@@ -174,9 +191,13 @@ fun CrossProviderDialog(
             items.forEach { routed ->
                 val candidate = CrossProviderCandidate(routed.providerId, routed.model.id)
                 val checked = candidates.any { it.key == candidate.key }
+                val blocked = isBlocked(routed)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        // 已屏蔽但仍在候选里的行：降透明度提示「这条即使勾着也不会生效」，
+                        // 但点击仍可操作（用来取消勾选）。
+                        .alpha(if (blocked) 0.55f else 1f)
                         .clickable { onToggleCandidate(candidate, !checked) },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Start,
@@ -191,6 +212,18 @@ fun CrossProviderDialog(
                             text = routed.model.id,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (blocked) {
+                        Text(
+                            text = "已屏蔽",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier
+                                .padding(end = 4.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f))
+                                .padding(horizontal = 5.dp, vertical = 1.dp),
                         )
                     }
                     // 倍率：上游给的才有（腾讯/字节/商汤/讯飞都往 extra["rate"] 填）。

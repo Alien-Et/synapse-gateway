@@ -33,6 +33,14 @@ import kotlin.random.Random
 class CrossProviderSwitchDecider(
     private val config: () -> CrossProviderFailoverConfig,
     private val random: Random = Random.Default,
+    /**
+     * 候选是否被本机屏蔽（屏蔽名单）。
+     *
+     * 默认恒 `false`，不改变既有行为；路由侧注入引擎的判定。必须在这里再过一遍，
+     * 不能只在界面过滤：候选配置是**落盘**的，用户昨天勾了某个模型、今天在模型页
+     * 把它屏蔽了，配置文件里那条候选还在 —— 只过滤列表的话，故障转移照样会打过去。
+     */
+    private val isBlocked: (CrossProviderCandidate) -> Boolean = { false },
 ) {
 
     /** 应当换供应商的结论。[candidate] 为选中的落点。 */
@@ -58,7 +66,7 @@ class CrossProviderSwitchDecider(
         // 开关关着，或没有候选：直接不参与（默认路径）
         if (!cfg.active) return null
         if (!trigger.qualifies) return null
-        val remaining = cfg.candidates.filter { it.key !in attempted }
+        val remaining = cfg.candidates.filter { it.key !in attempted && !isBlocked(it) }
         if (remaining.isEmpty()) return null
         val picked = cfg.strategy.pick(remaining, creditsOf, random) ?: return null
         return Verdict(picked, trigger.describe())

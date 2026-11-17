@@ -640,6 +640,9 @@ class GatewayHttpServer(
         val crossProviderTried = LinkedHashSet<String>().apply { add("${primaryRoute.providerId}|${primaryRoute.model}") }
         val crossProviderDecider = io.synapse.core.failover.CrossProviderSwitchDecider(
             config = { engine.failoverSettings().crossProvider },
+            // 屏蔽名单兜底：候选配置是落盘的，用户可能在勾选之后才屏蔽某个模型。
+            // 只在界面过滤列表不够 —— 这里不过一遍，故障转移照样会打到被屏蔽的模型。
+            isBlocked = { candidate -> engine.isCandidateBlocked(candidate.providerId, candidate.model) },
         )
         // ★ 「按模型名自动匹配同名模型」的独立判定器（读内存目录快照，零网络）。
         // 只被下面 tryCrossProvider 的一个分支调用，主循环一行不改。
