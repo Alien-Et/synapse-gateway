@@ -349,6 +349,8 @@ class TraeProvider(
         return try {
             val status = checkinClient(regionOfAccount(account)).status(trae)
             if (status.checkedIn) return ProviderActionResult.success("今日已签到")
+            // 上游明确说活动未开启就别发 claim：拿了也是「活动暂不可用」(9090)，用户看不出所以然
+            if (status.enabled == false) return ProviderActionResult.failure("签到活动未开启")
             val outcome = claimWithRetry(trae)
             if (outcome == ClaimOutcome.ALREADY_CHECKED_IN) {
                 ProviderActionResult.success("今日已签到")
@@ -524,6 +526,8 @@ internal fun ensureDeviceIds(account: TraeAccount): TraeAccount {
 internal fun traeErrorMessage(e: TraeHttpException): String = when (e.upstreamCode) {
     9074L -> "签到被拒：设备指纹未通过校验，去账号详情点「重新生成」后重试"
     4001L -> "模型或客户端版本不被上游接受（可在供应商设置里上调版本号）"
+    // 9090 是上游活动发放链路的「活动暂不可用」码（另一条链路对应 9069）：不是请求错，是活动侧当下领不到
+    9090L -> "签到活动暂不可用（活动侧原因），稍后再试"
     // 上游业务错误：优先给可读文案；拿不到再退回网络异常翻译（含超时/连不上等）。
     else -> e.message?.takeIf { it.isNotBlank() } ?: NetworkErrorText.describe(e)
 }

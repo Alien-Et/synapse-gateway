@@ -113,4 +113,10 @@ class TraeErrorTextTest {
         assertEquals(123L, e.upstreamCode)
         assertEquals(body, e.body)
     }
+
+    @Test
+    fun `活动暂不可用码给出活动侧原因的说明`() {
+        val e = TraeHttpException(200, TraeErrorKind.CLIENT, """{"code":9090,"message":"活动暂不可用"}""", 9090L)
+        assertEquals("签到活动暂不可用（活动侧原因），稍后再试", traeErrorMessage(e))
+    }
 }

@@ -193,4 +193,15 @@ class NotifyUsageEventTest {
         ).asJsonObject
         assertEquals(9L, raw.getAsJsonObject("cn_credits_remain_info").get("ide_credits").asLong)
     }
+
+    @Test
+    fun `上游没给 enable 字段时活动状态未知而非未开启`() {
+        // 默认 false 会把「上游没说」误判成「活动未开启」，从而白跳过签到
+        assertNull(TraeUgParse.parseStatus("""{"checked_in":false,"credits":0}""")?.enabled)
+    }
+
+    @Test
+    fun `上游明确说未开启时保留 false`() {
+        assertEquals(false, TraeUgParse.parseStatus("""{"checked_in":false,"enable":false}""")?.enabled)
+    }
 }

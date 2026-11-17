@@ -8,7 +8,12 @@ import com.google.gson.JsonParser
 data class CheckinStatus(
     val checkedIn: Boolean,
     val credits: Long,
-    val enabled: Boolean,
+    /**
+     * 活动开启状态：true 开启、false 明确未开启、**null 表示上游没给这个字段**。
+     *
+     * 不能默认成 false —— 「上游没说」会被误判成「活动未开启」，从而白白跳过签到。
+     */
+    val enabled: Boolean?,
 )
 
 /** 签到结果。 */
@@ -178,7 +183,7 @@ internal object TraeUgParse {
         return CheckinStatus(
             checkedIn = scope.bool("checked_in") ?: scope.bool("checkedIn") ?: false,
             credits = scope.long("credits"),
-            enabled = scope.bool("enable") ?: scope.bool("enabled") ?: false,
+            enabled = scope.bool("enable") ?: scope.bool("enabled"),
         )
     }
 
