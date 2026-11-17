@@ -314,6 +314,8 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                         SectionCard {
                             CallRow(
                                 record,
+                                providerName = state.providerOf(record.providerId)?.displayName
+                                    ?: record.providerId,
                                 onClick = { detail = record },
                                 // 长按只开确认框：删的是一条带完整原文的记录，误触代价太高
                                 onLongClick = { confirmDelete = true },
@@ -364,7 +366,13 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
-private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun CallRow(
+    record: CallRecord,
+    /** 供应商展示名（渲染时从供应商表解析；找不到就退回 id，不落库）。 */
+    providerName: String,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -411,7 +419,9 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
                     tone = if (crossRegion) MaterialTheme.colorScheme.tertiary else tone,
                     dot = false,
                 )
-                TagPill(text = finalName, tone = tone, dot = true)
+                // 供应商名 + 账号名一起给：同一个账号体系可能横跨两个站（腾讯国内/国外），
+                // 只看账号名分不出这次走的哪个站。
+                TagPill(text = "$providerName · $finalName", tone = tone, dot = true)
                 // 「禁用」是长期状态（24 小时），与「冷却」不同：
                 // 看到它就知道该换模型了，等一会儿也没用。
                 if (record.modelBanned) {
@@ -439,6 +449,15 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             verticalArrangement = Arrangement.spacedBy(5.dp),
         ) {
             MetricChip("耗时", formatDuration(record.durationMillis), MaterialTheme.colorScheme.onSurfaceVariant)
+            // 失败时把上游状态码摆出来：判断根因最快的一条线索（402/403/429/5xx 一眼分清）。
+            // 0 表示压根没打到上游（如模型被禁用、并发闸门挡回），那就不显示，别显示成「上游 0」。
+            if (record.status != CallStatus.SUCCESS && record.httpStatus > 0) {
+                MetricChip(
+                    "上游",
+                    record.httpStatus.toString(),
+                    MaterialTheme.colorScheme.error,
+                )
+            }
             if (record.totalTokens > 0) {
                 MetricChip("tokens", formatTokens(record.totalTokens), MaterialTheme.colorScheme.primary)
             }
@@ -459,6 +478,9 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
             // 成功：只列出「试过但没成」的（不含最终成功的那个）
             record.status == CallStatus.SUCCESS ->
                 record.attemptedAccounts.filter { it != finalName && it.isNotEmpty() }
+            // 中断（客户端取消 / 连接断了）：**既不是成功也不是失败**，不打「故障」。
+            // 这里的账号只是「正在打的时候被中断了」，把它标红会让人以为账号有问题。
+            record.status == CallStatus.ABORTED -> emptyList()
             // 失败：列出所有试过的账号
             record.attemptedAccounts.isNotEmpty() ->
                 record.attemptedAccounts.filter { it.isNotEmpty() }
@@ -487,6 +509,23 @@ private fun CallRow(record: CallRecord, onClick: () -> Unit, onLongClick: () -> 
                     TagPill(text = "故障", tone = MaterialTheme.colorScheme.error, dot = false)
                     TagPill(text = name, tone = MaterialTheme.colorScheme.error, dot = true)
                 }
+            }
+        }
+        // 模型行：只在「上游实际收到的模型」与「客户端请求的」**不同**时才显示 ——
+        // 相同就是废话（绝大多数情况就是去掉标签），不占版面。
+        // 自定义供应商的短名、上游重写模型名等场景才会不同，那时这行是排查关键。
+        if (record.resolvedModel.isNotEmpty() && record.resolvedModel != record.model) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Text(
+                    text = "模型",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TagPill(text = record.resolvedModel, tone = MaterialTheme.colorScheme.onSurfaceVariant, dot = false)
             }
         }
         if (record.error.isNotEmpty()) {

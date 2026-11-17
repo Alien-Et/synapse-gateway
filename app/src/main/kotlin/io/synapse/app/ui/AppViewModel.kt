@@ -970,6 +970,7 @@ class AppViewModel(
     fun setOverlayKeepAlive(enabled: Boolean) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { io.synapse.app.data.KeepAlivePrefs.setOverlayEnabled(engine.store(), enabled) }
+            engine.noteForUser("保活：悬浮窗 → ${if (enabled) "开" else "关"}")
             if (enabled) {
                 if (!engine.isRunning()) {
                     notice("已开启，悬浮窗将在网关服务启动后显示")
@@ -1010,6 +1011,7 @@ class AppViewModel(
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 io.synapse.app.data.KeepAlivePrefs.setLiveNotificationEnabled(engine.store(), enabled)
+                engine.noteForUser("保活：实时状态通知 → ${if (enabled) "开" else "关"}")
             }
             io.synapse.app.service.LiveStatusNotifier.setEnabled(app, enabled)
             notice(if (enabled) "实时状态通知已开启" else "实时状态通知已关闭")
@@ -1030,20 +1032,36 @@ class AppViewModel(
 
     fun setDynamicColor(enabled: Boolean) {
         _state.value = _state.value.copy(dynamicColor = enabled)
-        viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setDynamicColor(enabled) } }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { appearance.setDynamicColor(enabled) }
+            // 纯 UI 层的动作不过引擎，但用户排障时要能看到「我刚才改了什么」，
+            // 所以统一往运行日志补一行（见 docs/11「请求日志要覆盖到什么」）。
+            engine.noteForUser("外观：动态取色 → ${if (enabled) "开" else "关"}")
+        }
     }
 
     /** 切换明暗模式（立即生效并落盘）。 */
     fun setThemeMode(mode: ThemeMode) {
         _state.value = _state.value.copy(themeMode = mode)
-        viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setThemeMode(mode) } }
+        val label = when (mode) {
+            ThemeMode.Light -> "浅色"
+            ThemeMode.Dark -> "深色"
+            ThemeMode.System -> "跟随系统"
+        }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { appearance.setThemeMode(mode) }
+            engine.noteForUser("外观：明暗模式 → $label")
+        }
     }
 
     /** 设置页面底色；[hex] 为 null 表示清除覆盖（恢复默认底色）。 */
     fun setBackgroundOverride(hex: String?) {
         if (hex == null) {
             _state.value = _state.value.copy(backgroundOverride = null)
-            viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setBackgroundHex(null) } }
+            viewModelScope.launch {
+                withContext(Dispatchers.IO) { appearance.setBackgroundHex(null) }
+                engine.noteForUser("外观：页面底色 → 恢复默认")
+            }
             return
         }
         val parsed = parseHexColor(hex)
@@ -1053,7 +1071,10 @@ class AppViewModel(
         }
         _state.value = _state.value.copy(backgroundOverride = parsed)
         val code = formatHex(parsed)
-        viewModelScope.launch { withContext(Dispatchers.IO) { appearance.setBackgroundHex(code) } }
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { appearance.setBackgroundHex(code) }
+            engine.noteForUser("外观：页面底色 → $code")
+        }
     }
 
     /**
@@ -1079,6 +1100,8 @@ class AppViewModel(
                 appearance.setGoldStartHex(startCode)
                 appearance.setGoldEndHex(endCode)
             }
+            // 记在去抖之后：取色是拖动逐帧触发的，按帧写日志会把运行日志刷爆
+            engine.noteForUser("外观：金色渐变 → $startCode → $endCode")
         }
     }
 
@@ -1093,6 +1116,7 @@ class AppViewModel(
         )
         viewModelScope.launch {
             withContext(Dispatchers.IO) { appearance.reset() }
+            engine.noteForUser("外观：恢复默认（明暗模式 / 页面底色 / 金色渐变）")
             _state.value = _state.value.copy(notice = "外观主题已恢复默认")
         }
     }

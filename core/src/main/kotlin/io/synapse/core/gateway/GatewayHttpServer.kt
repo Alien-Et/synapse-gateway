@@ -1081,6 +1081,7 @@ class GatewayHttpServer(
                         recordCall(
                             newCompletionId(), currentRoute.providerId, requestedModel, account.uid, account.nickname,
                             streaming, CallStatus.FAILED, call.status, null, 0L, failure.message, call.errorBody, body, startedAt,
+                            resolvedModel = resolvedModel,
                         )
                         finishActiveRequest()
                         gateHandle.release()
@@ -1220,6 +1221,7 @@ class GatewayHttpServer(
                         recordCall(
                             newCompletionId(), currentRoute.providerId, requestedModel, account.uid, account.nickname,
                             streaming, CallStatus.FAILED, call.status, null, 0L, error.message, call.errorBody, body, startedAt,
+                            resolvedModel = resolvedModel,
                         )
                         finishActiveRequest()
                         gateHandle.release()
@@ -1397,6 +1399,7 @@ class GatewayHttpServer(
                         attemptedAccounts = attemptedAccountNames.toList(),
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
+                        resolvedModel = resolvedModel,
                     )
                 }
 
@@ -1432,6 +1435,7 @@ class GatewayHttpServer(
                         attemptedAccounts = attemptedAccountNames.toList(),
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
+                        resolvedModel = resolvedModel,
                     )
                 }
 
@@ -1448,6 +1452,7 @@ class GatewayHttpServer(
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
                         attemptedAccounts = attemptedAccountNames.toList(),
+                        resolvedModel = resolvedModel,
                     )
                 }
 
@@ -1538,6 +1543,7 @@ class GatewayHttpServer(
                 // 日志卡片上的「禁用」标签会永远不显示。
                 modelBanned = engine.isModelBanned(lastProviderId, lastResolvedModel) ||
                     engine.isModelBanned(primaryRoute.providerId, primaryRoute.model),
+                resolvedModel = lastResolvedModel,
             )
         }
         return errorResponse(mappedFailure.status, mappedFailure.code, reason)
@@ -1567,6 +1573,8 @@ class GatewayHttpServer(
         // 区域信息：界面据 routeRegion != finalAccountRegion 判定「故障转移」
         routeRegion: String = "",
         finalAccountRegion: String = "",
+        // 上游实际收到的模型名（剥掉标签后）；与请求名不同时界面才单独说一句
+        resolvedModel: String = "",
     ): NanoHTTPD.Response {
         val id = newCompletionId()
         // 转发结果快照：由 produce 在结束时写入。header 写出失败时 produce 不执行，
@@ -1586,6 +1594,7 @@ class GatewayHttpServer(
                     didFailover = attemptedAccounts.size > 1,
                     routeRegion = routeRegion,
                     finalAccountRegion = finalAccountRegion,
+                    resolvedModel = resolvedModel,
                 )
                 } else {
                     recordCall(
@@ -1599,6 +1608,7 @@ class GatewayHttpServer(
                         didFailover = attemptedAccounts.size > 1,
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
+                        resolvedModel = resolvedModel,
                     )
                 }
             },
@@ -1761,6 +1771,8 @@ class GatewayHttpServer(
         routeRegion: String = "",
         finalAccountRegion: String = "",
         attemptedAccounts: List<String> = emptyList(),
+        // 上游实际收到的模型名（剥掉标签后）
+        resolvedModel: String = "",
     ): NanoHTTPD.Response {
         val payload = runCatching { JsonParser.parseString(aggregated).asJsonObject }.getOrNull()
         // 对调用方透明：将响应中的 model 归一化为客户端请求的逻辑模型
@@ -1779,6 +1791,7 @@ class GatewayHttpServer(
             attemptedAccounts = attemptedAccounts,
             routeRegion = routeRegion,
             finalAccountRegion = finalAccountRegion,
+            resolvedModel = resolvedModel,
         )
         // 同上：对话成功即证明有额度，先摘掉可能残留的「额度耗尽」标记
         engine.pool.clearExhaustedMark(providerId, uid)
@@ -2221,6 +2234,8 @@ class GatewayHttpServer(
         finalAccountRegion: String = "",
         /** 本次请求命中的模型是否处于禁用中（日志卡片据此打「禁用」标签）。 */
         modelBanned: Boolean = false,
+        /** 上游实际收到的模型名（剥掉标签后）；与 model 相同时界面不显示。 */
+        resolvedModel: String = "",
     ) {
         // 调用记录开关：关闭时不写任何记录（原文动辄几 KB，是存储的主要来源）；
         // 记录一 failover 链路的语义不变，只是不留痕。
@@ -2242,6 +2257,7 @@ class GatewayHttpServer(
                 routeRegion = routeRegion,
                 finalAccountRegion = finalAccountRegion,
                 modelBanned = modelBanned,
+                resolvedModel = resolvedModel,
                 streaming = streaming,
                 status = status,
                 httpStatus = httpStatus,

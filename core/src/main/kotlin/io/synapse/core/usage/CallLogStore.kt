@@ -23,6 +23,17 @@ data class CallRecord(
     /** 处理这次请求的供应商 id（如 `trae`、`custom:mysite`）。 */
     val providerId: String,
     val model: String,
+    /**
+     * 上游**实际收到**的模型名（已剥掉路由标签）。
+     *
+     * 与 [model] 的分工：[model] 是客户端请求的（带标签，如 `腾讯国内/glm-5.2`），
+     * 这张卡片的标题用它，因为用户要先对得上自己客户端的配置；这里记的是真正发给上游的
+     * 那个名字，只有**两者不同**时才需要在界面上单独说一句（自定义供应商的短名、重写等），
+     * 相同就是废话，不显示。
+     *
+     * 旧记录没有这个字段 → 读回空串，界面不显示那一行（不是「未知」，是「没必要说」）。
+     */
+    val resolvedModel: String = "",
     val accountUid: String,
     val accountNickname: String,
     /**
@@ -466,6 +477,7 @@ class CallLogStore(
                     startedAtMillis = obj.get("startedAt")?.asLong ?: 0L,
                     providerId = obj.get("providerId")?.asString.orEmpty(),
                     model = obj.get("model")?.asString.orEmpty(),
+                    resolvedModel = obj.get("resolvedModel")?.asString.orEmpty(),
                     accountUid = obj.get("accountUid")?.asString.orEmpty(),
                     accountNickname = obj.get("accountNickname")?.asString.orEmpty(),
                     finalAccount = obj.get("finalAccount")?.asString.orEmpty(),
@@ -642,6 +654,7 @@ private fun CallRecord.toJson(): JsonObject = JsonObject().apply {
     addProperty("startedAt", startedAtMillis)
     addProperty("providerId", providerId)
     addProperty("model", model)
+    if (resolvedModel.isNotEmpty()) addProperty("resolvedModel", resolvedModel)
     addProperty("accountUid", accountUid)
     addProperty("accountNickname", accountNickname)
     if (finalAccount.isNotEmpty()) addProperty("finalAccount", finalAccount)
