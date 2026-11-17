@@ -24,6 +24,7 @@ import io.synapse.app.ui.theme.formatHex
 import io.synapse.app.ui.theme.parseHexColor
 import io.synapse.app.service.GatewayService
 import io.synapse.app.service.GatewayTileService
+import io.synapse.app.service.LoginWaitService
 import io.synapse.core.gateway.BatchActionResult
 import io.synapse.core.gateway.BatchProgress
 import io.synapse.core.gateway.BatchStage
@@ -1170,7 +1171,11 @@ class AppViewModel(
             _state.value = _state.value.copy(busy = "")
             result.fold(
                 onSuccess = { ticket ->
+                    // 先拉起前台服务再打开浏览器：回调端口在本进程里，进程若被判 idle 冻结，
+                    // 授权结果就只能挂在 listen backlog 里没人应答（浏览器一直转圈）。
+                    LoginWaitService.start(app)
                     if (!openBrowser(ticket.loginUrl)) {
+                        LoginWaitService.stop(app)
                         _state.value = _state.value.copy(notice = "没有可用的浏览器，无法打开登录页")
                         return@fold
                     }
@@ -1181,7 +1186,10 @@ class AppViewModel(
                         _state.value = _state.value.copy(notice = "已在浏览器打开登录页，完成后会自动添加账号")
                     }
                 },
-                onFailure = { _state.value = _state.value.copy(notice = it.message ?: "打开登录页失败") },
+                onFailure = {
+                    LoginWaitService.stop(app)
+                    _state.value = _state.value.copy(notice = it.message ?: "打开登录页失败")
+                },
             )
         }
     }
@@ -1238,6 +1246,7 @@ class AppViewModel(
                 when (poll) {
                     is DeviceAuthPoll.Pending -> delay(3_000)
                     is DeviceAuthPoll.Success -> {
+                        LoginWaitService.stop(app)
                         _state.value = _state.value.copy(busy = "", notice = "登录成功：${engine.pool.displayNameOf(poll.account.providerId, poll.account.uid)}")
                         refresh()
                         return@launch
@@ -1248,6 +1257,7 @@ class AppViewModel(
                     }
                 }
             }
+            LoginWaitService.stop(app)
             _state.value = _state.value.copy(busy = "", notice = message)
             refresh()
         }

@@ -50,9 +50,17 @@
         </service>
 
         <service
+            android:name=".service.LoginWaitService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="浏览器登录期间保持进程活跃，使本地回环回调端口能接住授权结果" />
+        </service>
+
+        <service
             android:name=".service.GatewayTileService"
-            android:exported="true"
-            android:icon="@drawable/ic_stat_gateway"
+            android:exported="true"            android:icon="@drawable/ic_stat_gateway"
             android:label="网关"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
