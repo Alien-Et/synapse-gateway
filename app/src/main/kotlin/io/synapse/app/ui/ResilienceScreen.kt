@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -95,6 +96,13 @@ fun ResilienceScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> U
             onToggle = { on ->
                 viewModel.updateFailoverSettings(
                     state.failover.copy(crossProvider = failover.crossProvider.copy(enabled = on)),
+                )
+            },
+            onAutoMatchToggle = { on ->
+                viewModel.updateFailoverSettings(
+                    state.failover.copy(
+                        crossProvider = failover.crossProvider.copy(autoMatchSameModel = on),
+                    ),
                 )
             },
             onOpenConfig = { showCrossProviderDialog = true },
@@ -326,6 +334,7 @@ private fun formatBanDuration(hours: Int): String = when {
 private fun CrossProviderComponent(
     config: io.synapse.core.failover.CrossProviderFailoverConfig,
     onToggle: (Boolean) -> Unit,
+    onAutoMatchToggle: (Boolean) -> Unit,
     onOpenConfig: () -> Unit,
 ) {
     SectionLabel("跨供应商")
@@ -346,20 +355,54 @@ private fun CrossProviderComponent(
             }
             Switch(checked = config.enabled, onCheckedChange = onToggle)
         }
+
+        // ★ 候选来源二选一：手写候选 / 按模型名自动匹配同名模型。
+        HorizontalDivider(Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("按模型名自动匹配", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "作用：不用手写候选。当前模型报错或限速时，自动在其它供应商里找**同名模型**" +
+                        "（忽略大小写与 - _ . 等分隔符）继续请求，例如 deepseek-4.1 在多家上架就自动轮换。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = config.autoMatchSameModel,
+                onCheckedChange = onAutoMatchToggle,
+                enabled = config.enabled,
+            )
+        }
+        Text(
+            text = "依赖模型目录缓存：请先在「模型」页加载过一次目录，否则没有同名清单可用。",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+
         Spacer(Modifier.height(6.dp))
         Text(
             text = when {
+                config.autoMatchSameModel ->
+                    "已开启「按模型名自动匹配」· 策略：${config.strategy.label}"
                 config.candidates.isEmpty() -> "尚未选择候选模型（开启后也不会生效）"
                 else -> "已选 ${config.candidates.size} 个候选 · 策略：${config.strategy.label}"
             },
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(4.dp))
-        OutlineActionButton(
-            text = if (config.candidates.isEmpty()) "选择候选模型" else "修改候选与策略",
-            onClick = onOpenConfig,
-        )
+        if (!config.autoMatchSameModel) {
+            Spacer(Modifier.height(4.dp))
+            OutlineActionButton(
+                text = if (config.candidates.isEmpty()) "选择候选模型" else "修改候选与策略",
+                onClick = onOpenConfig,
+            )
+        }
     }
 }
 

@@ -40,16 +40,30 @@ data class CrossProviderFailoverConfig(
      */
     val candidates: List<CrossProviderCandidate> = emptyList(),
 
-    /** 换到候选时的挑选策略。 */
+    /**
+     * 换到候选时的挑选策略。 */
     val strategy: CrossProviderStrategy = CrossProviderStrategy.IN_ORDER,
+
+    /**
+     * 按模型名自动匹配同名模型（默认关闭）。
+     *
+     * - 关闭：用 [candidates]（用户手写的候选）；
+     * - 开启：**忽略 [candidates]**，改为在全局模型目录里找与当前模型同名的其它供应商，
+     *   见 [SameModelAutoRouter]。
+     *
+     * 两者**二选一**。混在一起会让「下一个落点是谁」既取决于手写顺序又取决于目录内容，
+     * 出了问题无从复现。
+     */
+    val autoMatchSameModel: Boolean = false,
 ) {
 
-    /** 是否有可用配置（开关打开且至少有一个候选）。 */
-    val active: Boolean get() = enabled && candidates.isNotEmpty()
+    /** 是否有可用配置（开关打开，且「手写候选」或「按名自动匹配」至少一条通路可用）。 */
+    val active: Boolean get() = enabled && (autoMatchSameModel || candidates.isNotEmpty())
 
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("enabled", enabled)
         addProperty("strategy", strategy.name)
+        addProperty("autoMatchSameModel", autoMatchSameModel)
         add("candidates", JsonArray().apply {
             candidates.forEach { add(it.toJson()) }
         })
@@ -70,6 +84,7 @@ data class CrossProviderFailoverConfig(
                 strategy = runCatching {
                     CrossProviderStrategy.valueOf(obj.get("strategy")?.asString.orEmpty())
                 }.getOrDefault(CrossProviderStrategy.IN_ORDER),
+                autoMatchSameModel = obj.get("autoMatchSameModel")?.asBoolean ?: false,
             )
         }
     }

@@ -639,17 +639,39 @@ class GatewayHttpServer(
         val crossProviderDecider = io.synapse.core.failover.CrossProviderSwitchDecider(
             config = { engine.failoverSettings().crossProvider },
         )
+        // ★ 「按模型名自动匹配同名模型」的独立判定器（读内存目录快照，零网络）。
+        // 只被下面 tryCrossProvider 的一个分支调用，主循环一行不改。
+        val sameModelRouter = io.synapse.core.failover.SameModelAutoRouter(
+            catalog = { engine.modelCatalogSnapshot },
+        )
 
         /**
          * 尝试换到另一个供应商：成功则改写 [currentRoute] 并返回 true（循环继续），
          * 否则返回 false（调用方照原样 break，行为不变）。
+         *
+         * 候选来源**二选一**：`crossProvider.autoMatchSameModel` 打开时按模型名自动找
+         * 同名模型（[io.synapse.core.failover.SameModelAutoRouter]），否则走用户手写候选
+         * （[io.synapse.core.failover.CrossProviderSwitchDecider]）。两条路共用同一套
+         * Trigger 语义，所以「什么算该换家」不会出现两套解释。
          */
         fun tryCrossProvider(trigger: io.synapse.core.failover.CrossProviderSwitchDecider.Trigger): Boolean {
-            val verdict = crossProviderDecider.decide(
-                trigger = trigger,
-                attempted = crossProviderTried,
-                creditsOf = { candidate -> engine.cachedCreditsOf(candidate.providerId) },
-            ) ?: return false
+            val crossCfg = engine.failoverSettings().crossProvider
+            val verdict = if (crossCfg.autoMatchSameModel) {
+                sameModelRouter.decide(
+                    trigger = trigger,
+                    currentProviderId = currentRoute.providerId,
+                    model = currentRoute.model,
+                    attempted = crossProviderTried,
+                    strategy = crossCfg.strategy,
+                    creditsOf = { candidate -> engine.cachedCreditsOf(candidate.providerId) },
+                )
+            } else {
+                crossProviderDecider.decide(
+                    trigger = trigger,
+                    attempted = crossProviderTried,
+                    creditsOf = { candidate -> engine.cachedCreditsOf(candidate.providerId) },
+                )
+            } ?: return false
             val candidate = verdict.candidate
             val label = routeLabelOf(candidate.providerId, null)
             log("跨供应商故障转移：${verdict.reason} → 改发 $label/${candidate.model}")

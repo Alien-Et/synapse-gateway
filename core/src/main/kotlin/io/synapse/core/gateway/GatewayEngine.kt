@@ -302,6 +302,20 @@ class GatewayEngine(
     private var providerHostsCache: Map<String, List<String>>? = null
 
     /**
+     * 最近一次加载成功的模型目录快照（全供应商聚合）。
+     *
+     * 专供「按模型名自动跨供应商路由」（[io.synapse.core.failover.SameModelAutoRouter]）
+     * 零网络读取：`models()` 会真打每家接口（单家读超时 300s），在失败重试路径上现拉
+     * 等于把一次超时放大成几十秒卡死。快照为空 = 该能力不参与，行为退化成原样。
+     *
+     * 写入时机只有一处：[modelsStreaming] 聚合完成时。不落盘 —— 它是「最近一次观察到
+     * 的目录」，重启后由下一次加载重新填充。
+     */
+    @Volatile
+    var modelCatalogSnapshot: List<RoutedModel> = emptyList()
+        private set
+
+    /**
      * 共享 I/O 线程池：模型目录、额度查询等会阻塞在网络上的并行任务都走这里。
      * 之前每次请求都 new 一个线程池再 shutdown，短连接 + 线程反复创建销毁纯属浪费；
      * 这里常驻复用，空闲线程 60 秒自行回收，不常占资源。
@@ -1974,6 +1988,8 @@ class GatewayEngine(
             if (chunk.error != null && pool.accounts(providerId).isEmpty()) continue
             chunk.error?.let { failures[chunk.providerId] = it }
         }
+        // 供「按模型名自动跨供应商路由」零网络读取：故障转移路径不能现拉上游。
+        if (aggregated.isNotEmpty()) modelCatalogSnapshot = aggregated
         return ModelsCatalog(aggregated, failures)
     }
 
