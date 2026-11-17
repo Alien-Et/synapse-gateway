@@ -36,6 +36,17 @@ class SameModelAutoRouterTest {
 
     private fun router(models: List<RoutedModel> = catalog) = SameModelAutoRouter { models }
 
+    /** 自动匹配模式下「能生效」的配置：总开关 + 自动匹配都开。 */
+    private fun cfg(
+        enabled: Boolean = true,
+        auto: Boolean = true,
+        strategy: CrossProviderStrategy = CrossProviderStrategy.IN_ORDER,
+    ) = CrossProviderFailoverConfig(
+        enabled = enabled,
+        autoMatchSameModel = auto,
+        strategy = strategy,
+    )
+
     // ---------------------------------------------------------------- 归一化
 
     @Test
@@ -93,6 +104,7 @@ class SameModelAutoRouterTest {
     fun `客户端错误不触发换家`() {
         assertNull(
             router().decide(
+                config = cfg(),
                 trigger = CrossProviderSwitchDecider.Trigger.ClientError(400),
                 currentProviderId = "mcloud",
                 model = "deepseek-4.1",
@@ -102,9 +114,44 @@ class SameModelAutoRouterTest {
         )
     }
 
+    /**
+     * 回归：第一版 `decide` 只看触发原因、不看总开关，于是「开了自动匹配 → 关掉总开关」
+     * 之后仍会跨供应商。用户能真实复现（界面上的开关是灰的，但配置里还是 true）。
+     */
+    @Test
+    fun `总开关关闭时绝不生效`() {
+        val off = cfg(enabled = false, auto = true)
+        assertFalse(off.active, "enabled=false 时 active 必须为 false")
+        assertNull(
+            router().decide(
+                config = off,
+                trigger = CrossProviderSwitchDecider.Trigger.UpstreamExhausted("mcloud"),
+                currentProviderId = "mcloud",
+                model = "deepseek-4.1",
+                attempted = setOf("mcloud|deepseek-4.1"),
+            ),
+            "总开关关了就不能再换家",
+        )
+    }
+
+    @Test
+    fun `自动匹配未开启时本判定器不参与`() {
+        assertNull(
+            router().decide(
+                config = cfg(auto = false),
+                trigger = CrossProviderSwitchDecider.Trigger.UpstreamExhausted("mcloud"),
+                currentProviderId = "mcloud",
+                model = "deepseek-4.1",
+                attempted = setOf("mcloud|deepseek-4.1"),
+            ),
+            "没开自动匹配就走手写候选那条路，这里必须让位",
+        )
+    }
+
     @Test
     fun `限速或上游失败时给出同名落点`() {
         val v = router().decide(
+            config = cfg(),
             trigger = CrossProviderSwitchDecider.Trigger.ModelFullyCooling("mcloud", "deepseek-4.1", 120),
             currentProviderId = "mcloud",
             model = "deepseek-4.1",
@@ -117,11 +164,11 @@ class SameModelAutoRouterTest {
     @Test
     fun `按额度策略能改写落点`() {
         val v = router().decide(
+            config = cfg(strategy = CrossProviderStrategy.BY_CREDITS),
             trigger = CrossProviderSwitchDecider.Trigger.UpstreamExhausted("mcloud"),
             currentProviderId = "mcloud",
             model = "deepseek-4.1",
             attempted = setOf("mcloud|deepseek-4.1"),
-            strategy = CrossProviderStrategy.BY_CREDITS,
             creditsOf = { c -> if (c.providerId == "trae") 900_000L else 10L },
         )
         assertEquals("trae|deepseek4.1", v?.candidate?.key, "额度多的那家应被优先选中")

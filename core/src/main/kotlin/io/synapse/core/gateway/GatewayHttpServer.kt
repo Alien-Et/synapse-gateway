@@ -658,11 +658,11 @@ class GatewayHttpServer(
             val crossCfg = engine.failoverSettings().crossProvider
             val verdict = if (crossCfg.autoMatchSameModel) {
                 sameModelRouter.decide(
+                    config = crossCfg, // 开关检查在判定器内部，这里不重复判、也不漏判
                     trigger = trigger,
                     currentProviderId = currentRoute.providerId,
                     model = currentRoute.model,
                     attempted = crossProviderTried,
-                    strategy = crossCfg.strategy,
                     creditsOf = { candidate -> engine.cachedCreditsOf(candidate.providerId) },
                 )
             } else {

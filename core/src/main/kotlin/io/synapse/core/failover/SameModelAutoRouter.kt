@@ -63,25 +63,36 @@ class SameModelAutoRouter(
     }
 
     /**
-     * 完整的「换不换」判定：触发条件成立 **且** 找得到同名模型，才给落点。
+     * 完整的「换不换」判定：开关确实打开 **且** 触发条件成立 **且** 找得到同名模型，才给落点。
+     *
+     * ## 为什么要把 [config] 传进来
+     *
+     * 「关掉总开关之后绝不干预」是这个能力的底线。判定器自己不看开关、指望调用方记得判断，
+     * 迟早会在某条新分支上漏掉 —— 事实上第一版就漏了：`autoMatchSameModel` 为 true 而
+     * `enabled` 已被关掉时，这里仍会返回落点。所以开关检查放进判定器内部，
+     * 与 [CrossProviderSwitchDecider] 保持同一纪律（它也是自己判 `cfg.active`）。
+     *
+     * 顺带把 `strategy` 也从 [config] 取，避免调用方传错一个与配置不一致的策略。
      *
      * 复用 [CrossProviderSwitchDecider.Trigger]（触发原因的分类与话术都不变），
      * 只把候选来源从「用户勾选」换成「按名匹配」—— 两个判定器共用同一套触发语义，
      * 将来加新的触发类型时两边同时获得。
      */
     fun decide(
+        config: CrossProviderFailoverConfig,
         trigger: CrossProviderSwitchDecider.Trigger,
         currentProviderId: String,
         model: String,
         attempted: Set<String>,
-        strategy: CrossProviderStrategy = CrossProviderStrategy.IN_ORDER,
         creditsOf: (CrossProviderCandidate) -> Long? = { null },
         random: Random = Random.Default,
     ): CrossProviderSwitchDecider.Verdict? {
+        // 开关关闭 / 没有候选来源 → 完全不参与（默认路径）
+        if (!config.active) return null
         if (!trigger.qualifies) return null
         val pool = candidatesFor(currentProviderId, model, attempted)
         if (pool.isEmpty()) return null
-        val picked = strategy.pick(pool, creditsOf, random) ?: return null
+        val picked = config.strategy.pick(pool, creditsOf, random) ?: return null
         return CrossProviderSwitchDecider.Verdict(
             candidate = picked,
             reason = "${trigger.describe()} → 同名模型自动路由",
