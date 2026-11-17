@@ -413,7 +413,8 @@ class GatewayHttpServer(
             engine.resolveRoute(requestedModel)
                 ?: return errorResponse(
                     400, "model_not_found",
-                    "无法识别模型「$requestedModel」：请写成「标签/模型名」，标签必须是已登录的供应商",
+                    "无法识别模型「$requestedModel」：请写成「标签/模型名」，标签必须是已登录的供应商" +
+                        "（若该模型在「模型」页被屏蔽，先取消屏蔽）",
                 )
         } else if (!endpoint.requiresModel) {
             pickPassthroughRoute(endpoint)
@@ -581,7 +582,8 @@ class GatewayHttpServer(
                 400,
                 "model_not_routable",
                 "模型「$requestedModel」无法路由。请写成「标签/模型名」，例如 腾讯国内/glm-5.2、" +
-                    "字节国外/doubao-pro。若标签已经写了，请到「供应商」页确认该供应商已登录且已启用。",
+                    "字节国外/doubao-pro。若标签已经写了，请到「供应商」页确认该供应商已登录且已启用；" +
+                    "若该模型在「模型」页被屏蔽，先取消屏蔽。",
             )
 
         val startedAt = System.currentTimeMillis()

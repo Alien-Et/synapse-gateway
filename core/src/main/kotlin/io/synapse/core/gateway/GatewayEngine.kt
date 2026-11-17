@@ -384,6 +384,9 @@ class GatewayEngine(
     @Volatile
     private var modelExposure: ModelExposureSettings = ModelExposureSettings.load(store)
 
+    /** 本机屏蔽的模型（黑名单）。与开放名单相反方向，屏蔽优先。 */
+    private var modelBlocklist: ModelBlocklist = ModelBlocklist.load(store)
+
     /** 当前正在监听的登录回调服务（同一时间只允许一个登录流程）。 */
     private var callbackServer: LoopbackCallbackServer? = null
 
@@ -509,15 +512,58 @@ class GatewayEngine(
         log("模型开放名单已更新（过滤=${if (updated.filterEnabled) "开启" else "关闭"}，已勾选=${updated.exposed.size}）")
     }
 
-    /** [filterEnabled] 为 false 时原样返回，否则只保留在开放名单中的模型。 */
-    private fun filterExposed(models: List<RoutedModel>): List<RoutedModel> =
-        if (!modelExposure.filterEnabled) models else models.filter { modelExposure.allows(it.fullId) }
+    // ------------------------------------------------------------------ 模型黑名单
+
+    fun modelBlocklist(): ModelBlocklist = modelBlocklist
 
     /**
-     * 对外暴露的模型目录：模型页 UI 用 `modelsStreaming`（不过滤，展示全量，供勾选）；
-     * HTTP `/v1/models` 用本方法（按开放名单过滤）。
+     * 批量屏蔽模型（幂等）。返回真正新增的条数。
+     *
+     * 屏蔽名单变化时同步裁掉「同名自动路由」用的目录快照：否则被屏蔽的模型仍会被当成
+     * 跨供应商候选，故障转移时又把它捡回来 —— 用户明明屏蔽了，请求却还是打到了它。
      */
-    fun exposedModels(): List<RoutedModel> = filterExposed(models())
+    fun blockModels(fullIds: Collection<String>): Int {
+        // 先算新增集合再落盘：updateModelBlocklist 会替换字段，
+        // 若在替换之后再比较新旧大小，差值永远是 0（曾经这样写，UI 一直提示「已屏蔽 0 个」）。
+        val added = fullIds.filterNot { modelBlocklist.blocks(it) }.toSet()
+        if (added.isEmpty()) return 0
+        updateModelBlocklist(modelBlocklist.withAll(added))
+        return added.size
+    }
+
+    /** 取消屏蔽一个模型。 */
+    fun unblockModel(fullId: String) {
+        val updated = modelBlocklist.without(fullId)
+        if (updated != modelBlocklist) updateModelBlocklist(updated)
+    }
+
+    fun isModelBlocked(fullId: String): Boolean = modelBlocklist.blocks(fullId)
+
+    /** 更新屏蔽名单并落盘；独立入口，不调用 reconfigureProviders。 */
+    fun updateModelBlocklist(updated: ModelBlocklist) {
+        modelBlocklist = updated
+        store.write(ModelBlocklist.STORE_KEY, updated.toJson().toString())
+        modelCatalogSnapshot = modelCatalogSnapshot.filterNot { updated.blocks(it.fullId) }
+        log("模型屏蔽名单已更新（已屏蔽=${updated.blocked.size}）")
+    }
+
+    /**
+     * 对外可见的模型：先去掉本机屏蔽的，再按开放名单过滤。
+     *
+     * 顺序不能反：屏蔽是「这个模型别再用」，开放名单是「只给这些」。
+     * 屏蔽优先，所以先减掉黑名单，再在白名单里挑。
+     */
+    private fun filterVisible(models: List<RoutedModel>): List<RoutedModel> {
+        val notBlocked = models.filterNot { modelBlocklist.blocks(it.fullId) }
+        return if (!modelExposure.filterEnabled) notBlocked
+        else notBlocked.filter { modelExposure.allows(it.fullId) }
+    }
+
+    /**
+     * 对外暴露的模型目录：模型页 UI 用 `modelsStreaming`（不过滤，展示全量，供勾选/屏蔽）；
+     * HTTP `/v1/models` 用本方法（先减屏蔽名单，再按开放名单过滤）。
+     */
+    fun exposedModels(): List<RoutedModel> = filterVisible(models())
 
     // ------------------------------------------------------------------ 代理
 
@@ -2039,7 +2085,10 @@ class GatewayEngine(
             chunk.error?.let { failures[chunk.providerId] = it }
         }
         // 供「按模型名自动跨供应商路由」零网络读取：故障转移路径不能现拉上游。
-        if (aggregated.isNotEmpty()) modelCatalogSnapshot = aggregated
+        // 屏蔽的模型必须在这里就排掉，否则同名匹配会把它当成可用落点。
+        if (aggregated.isNotEmpty()) {
+            modelCatalogSnapshot = aggregated.filterNot { modelBlocklist.blocks(it.fullId) }
+        }
         return ModelsCatalog(aggregated, failures)
     }
 
@@ -2239,7 +2288,11 @@ class GatewayEngine(
                 if (!hasRegionAccount) return null
             }
         }
-        return Route(provider.id, model, region)
+        // 本机屏蔽的模型直接判为不可路由。放在最后一步：只有标签、供应商、区域都成立时
+        // 才谈得上「这个模型被屏蔽了」，否则用户会收到一条与真实原因无关的屏蔽提示。
+        val route = Route(provider.id, model, region)
+        if (modelBlocklist.blocks("${routeLabel(route.providerId, route.region)}/${route.model}")) return null
+        return route
     }
 
     /**

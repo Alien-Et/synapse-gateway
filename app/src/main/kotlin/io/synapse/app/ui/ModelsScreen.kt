@@ -38,6 +38,8 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -53,6 +55,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -130,6 +133,27 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         viewModel.updateModelExposure(exposure.copy(filterEnabled = !exposure.filterEnabled))
                     },
                 )
+                // 一键测速：并发上限 4，避免自己把自己限流（见 AppViewModel.testAllModels）
+                Icon(
+                    Icons.Rounded.Speed,
+                    contentDescription = "一键测速",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .bouncyClick { viewModel.testAllModels() }
+                        .padding(6.dp),
+                )
+                // 一键屏蔽不可用：只在真有失败结果时出现，避免一个永远点不动的按钮
+                val failedCount = state.modelTestLatencies.values.count { it is ModelTestStatus.Failed }
+                if (failedCount > 0) {
+                    Icon(
+                        Icons.Rounded.Block,
+                        contentDescription = "屏蔽 $failedCount 个不可用模型",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier
+                            .bouncyClick { viewModel.blockFailedModels() }
+                            .padding(6.dp),
+                    )
+                }
                 Icon(
                     Icons.Filled.Refresh,
                     contentDescription = "刷新",
@@ -314,7 +338,9 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                             testStatus = testStatus,
                             exposureEnabled = exposure.filterEnabled,
                             exposed = exposure.allows(model.fullId),
+                            blocked = state.modelBlocklist.blocks(model.fullId),
                             onToggleExposed = { viewModel.toggleModelExposed(model.fullId, it) },
+                            onToggleBlocked = { viewModel.toggleModelBlocked(model.fullId) },
                             onCopy = {
                                 clipboard.setText(AnnotatedString(model.fullId))
                                 SystemPrompt.toast("已复制模型名称：${model.fullId}")
@@ -394,13 +420,19 @@ private fun ModelRow(
     testStatus: ModelTestStatus?,
     exposureEnabled: Boolean,
     exposed: Boolean,
+    blocked: Boolean,
     onToggleExposed: (Boolean) -> Unit,
+    onToggleBlocked: () -> Unit,
     onCopy: () -> Unit,
     onTest: () -> Unit,
     onShowFailure: (String) -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        // 被屏蔽的模型整行降透明度：一眼能看出它不对外暴露、也不参与路由；
+        // 只降视觉不拦截事件，屏蔽按钮仍然可点（否则没法取消屏蔽）。
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (blocked) 0.55f else 1f),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -428,6 +460,9 @@ private fun ModelRow(
                     text = model.fullId,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
+                    // 给名字让出「weight 优先、其余固定子项先占位」的测量顺序：
+                    // 不加 weight 时超长名字会占满整行，把后面的「已屏蔽」标签挤出屏幕。
+                    modifier = Modifier.weight(1f, fill = false),
                 )
                 Icon(
                     Icons.Filled.ContentCopy,
@@ -435,6 +470,20 @@ private fun ModelRow(
                     tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
                     modifier = Modifier.size(13.dp),
                 )
+                if (blocked) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f))
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                    ) {
+                        Text(
+                            text = "已屏蔽",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
             }
             Text(
                 text = buildString {
@@ -558,6 +607,28 @@ private fun ModelRow(
                 )
             }
             null -> Unit
+        }
+
+        // 屏蔽 / 取消屏蔽：屏蔽后该模型不对外暴露、不参与路由，也不进同名匹配快照。
+        // 放在「测试」左侧，方便测速失败后就地屏蔽；图标态区分当前状态。
+        Box(
+            modifier = Modifier
+                .bouncyClick(onClick = onToggleBlocked)
+                .clip(MaterialTheme.shapes.small)
+                .background(
+                    if (blocked) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f)
+                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                )
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Rounded.Block,
+                contentDescription = if (blocked) "取消屏蔽" else "屏蔽",
+                tint = if (blocked) MaterialTheme.colorScheme.onErrorContainer
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
         }
 
         // 右侧 Q 弹测试按钮

@@ -67,11 +67,16 @@ import io.synapse.core.usage.StorageReport
 import io.synapse.core.usage.UsageStats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -89,6 +94,9 @@ data class CustomAccountKeyRow(
 
 /** 验证码重发间隔（秒）：上游有频率限制，连点只会被拒。 */
 private const val SMS_RESEND_INTERVAL_MS = 60_000L
+
+/** 「一键测速」的并发上限：每次探测都是一次真实上游请求，并发过高会自己把自己限流。 */
+private const val MODEL_TEST_PARALLELISM = 4
 
 /** 金色渐变落盘去抖：取色拖动每帧都调 setGoldColors，攒一小段再写加密存储。 */
 private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
@@ -352,6 +360,8 @@ data class AppUiState(
     val liveNotification: Boolean = true,
     /** 模型开放名单：只对外暴露勾选的模型。 */
     val modelExposure: io.synapse.core.gateway.ModelExposureSettings = io.synapse.core.gateway.ModelExposureSettings(),
+    /** 模型屏蔽名单（本机黑名单）：屏蔽的模型不对外暴露、也不参与路由。 */
+    val modelBlocklist: io.synapse.core.gateway.ModelBlocklist = io.synapse.core.gateway.ModelBlocklist(),
     /** 故障转移与并发配置。 */
     val failover: io.synapse.core.failover.ModelFailoverSettings = io.synapse.core.failover.ModelFailoverSettings(),
     /** 自动签到偏好（两个触发开关默认都关）。 */
@@ -403,6 +413,7 @@ private class Snapshot(
     val security: io.synapse.core.security.SecuritySettings,
     val evidences: List<io.synapse.core.security.OutboundEvidence>,
     val modelExposure: io.synapse.core.gateway.ModelExposureSettings,
+    val modelBlocklist: io.synapse.core.gateway.ModelBlocklist,
     val failover: io.synapse.core.failover.ModelFailoverSettings,
     val autoCheckin: AutoCheckinSettings,
     val overlayKeepAlive: Boolean,
@@ -561,6 +572,7 @@ class AppViewModel(
                     security = engine.securitySettings(),
                     evidences = engine.sanitizer.evidenceList(),
                     modelExposure = engine.modelExposureSettings(),
+                    modelBlocklist = engine.modelBlocklist(),
                     failover = engine.failoverSettings(),
                     autoCheckin = engine.autoCheckinSettings(),
                     overlayKeepAlive = io.synapse.app.data.KeepAlivePrefs.overlayEnabled(engine.store()),
@@ -597,6 +609,7 @@ class AppViewModel(
                 security = snapshot.security,
                 evidences = snapshot.evidences,
                 modelExposure = snapshot.modelExposure,
+                modelBlocklist = snapshot.modelBlocklist,
                 failover = snapshot.failover,
                 // ⚠️ 少一行就是「界面永远看不到这次改动」：copy() 有默认值，漏字段编译不报错，
                 // 表现是「开关点了没反应、时间改不了」（引擎其实已经写进去了）。
@@ -757,13 +770,98 @@ class AppViewModel(
             val result = withContext(Dispatchers.IO) {
                 engine.probeModelLatency(routedModel.providerId, routedModel.model.id, routedModel.region)
             }
-            val updated = _state.value.modelTestLatencies.toMutableMap()
-            updated[fullId] = if (result.latencyMs > 0) {
+            val status = if (result.latencyMs > 0) {
                 ModelTestStatus.Success(result.latencyMs)
             } else {
                 ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" })
             }
-            _state.value = _state.value.copy(modelTestLatencies = updated)
+            _state.update { it.copy(modelTestLatencies = it.modelTestLatencies + (fullId to status)) }
+        }
+    }
+
+    /**
+     * 一键测速：把当前列表里的模型并发测一遍。
+     *
+     * 并发度限制在 [MODEL_TEST_PARALLELISM]：每次探测都是一次真实上游请求，
+     * 全量并发会在几十个模型时瞬间顶爆同一账号的限速阈值 —— 上游看到的是
+     * 高频请求，反过来把整批测成 429，测出来的「失败」全是自己造的。
+     */
+    fun testAllModels() {
+        val targets = _state.value.models
+        if (targets.isEmpty()) {
+            _state.value = _state.value.copy(notice = "还没有模型可测，先刷新模型列表")
+            return
+        }
+        viewModelScope.launch {
+            val marking = _state.value.modelTestLatencies.toMutableMap()
+            targets.forEach { marking[it.fullId] = ModelTestStatus.Testing }
+            _state.value = _state.value.copy(modelTestLatencies = marking)
+
+            val gate = Semaphore(MODEL_TEST_PARALLELISM)
+            val jobs = targets.map { model ->
+                async(Dispatchers.IO) {
+                    gate.withPermit {
+                        val result = engine.probeModelLatency(model.providerId, model.model.id, model.region)
+                        val status = if (result.latencyMs > 0) {
+                            ModelTestStatus.Success(result.latencyMs)
+                        } else {
+                            ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" })
+                        }
+                        // 逐个回写：界面能看到结果一条条亮起来，而不是最后一次性刷新。
+                        // 必须走 update 的 CAS 合并，不能「读 map → 改 → 整体写回」：
+                        // 4 个并发协程会复制同一份 map 再各自覆盖，先完成的条目被退回「测试中」。
+                        _state.update { it.copy(modelTestLatencies = it.modelTestLatencies + (model.fullId to status)) }
+                    }
+                }
+            }
+            jobs.awaitAll()
+            val failed = _state.value.modelTestLatencies.values.count { it is ModelTestStatus.Failed }
+            _state.value = _state.value.copy(
+                notice = "测速完成：${targets.size} 个模型，其中 $failed 个失败",
+            )
+        }
+    }
+
+    /** 一键屏蔽所有「测速失败」的模型（幂等；已经在屏蔽名单里的不会重复计数）。 */
+    fun blockFailedModels() {
+        val failed = _state.value.modelTestLatencies
+            .filterValues { it is ModelTestStatus.Failed }
+            .keys
+            .toList()
+        if (failed.isEmpty()) {
+            _state.value = _state.value.copy(notice = "没有测速失败的模型；先点「一键测速」")
+            return
+        }
+        viewModelScope.launch {
+            val added = withContext(Dispatchers.IO) { engine.blockModels(failed) }
+            // 屏蔽成功就把这些条目的测试结果清掉：一键屏蔽按钮只在「真有失败结果」时出现，
+            // 留着旧的失败状态会让按钮一直亮着，点一下只回一句「已经在名单里了」。
+            _state.update {
+                it.copy(
+                    modelBlocklist = engine.modelBlocklist(),
+                    modelTestLatencies = it.modelTestLatencies - failed.toSet(),
+                    notice = if (added == 0) "这些模型已经在屏蔽名单里了" else "已屏蔽 $added 个不可用模型",
+                )
+            }
+        }
+    }
+
+    /** 屏蔽 / 取消屏蔽单个模型。 */
+    fun toggleModelBlocked(fullId: String) {
+        viewModelScope.launch {
+            val nowBlocked = withContext(Dispatchers.IO) {
+                if (engine.isModelBlocked(fullId)) {
+                    engine.unblockModel(fullId)
+                    false
+                } else {
+                    engine.blockModels(listOf(fullId))
+                    true
+                }
+            }
+            _state.value = _state.value.copy(
+                modelBlocklist = engine.modelBlocklist(),
+                notice = if (nowBlocked) "已屏蔽「$fullId」" else "已取消屏蔽「$fullId」",
+            )
         }
     }
 
