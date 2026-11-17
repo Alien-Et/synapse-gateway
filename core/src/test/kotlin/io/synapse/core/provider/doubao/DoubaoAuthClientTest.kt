@@ -70,8 +70,15 @@ class DoubaoAuthClientTest {
         val h = DoubaoAuthClient().buildLoginHeaders()
         // 真机埋点：request_csrf_token=0，csrf 是响应才下发的
         assertFalse(h.containsKey("x-tt-passport-csrf-token"), "csrf 不该出现在发码请求里")
-        assertFalse(h.containsKey("X-SS-STUB"), "登录链路不需要 X-SS-STUB")
+        assertFalse(h.containsKey("X-SS-STUB"), "STUB 依赖 body，由 sendSmsCode 另加，不在通用头里")
         assertEquals("3", h["bd-ticket-guard-version"], "只声明协议版本，不冒充六件套齐了")
+        // 真机 send_code 带的确定性常量头（不含随机性）
+        assertEquals("-1", h["x-ttnet-bypass-to"])
+        assertEquals("2", h["sdk-version"])
+        assertEquals("60594", h["passport-sdk-version"])
+        assertEquals("x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_0", h["passport-sdk-settings"])
+        assertEquals("x-tt-token,sec_user_id", h["passport-sdk-sign"])
+        assertEquals("application/x-www-form-urlencoded; charset=UTF-8", h["Content-Type"])
         // 没真值就一个动态 guard 头都不发（写死过期值只会让裁决位更差）
         assertFalse(h.containsKey("bd-ticket-guard-client-cert"))
         assertFalse(h.containsKey("bd-ticket-guard-ree-public-key"))
@@ -113,5 +120,15 @@ class DoubaoAuthClientTest {
         assertEquals("阿飘", backSubs[0].name)
         assertEquals("uid-2", backSubs[1].secUid)
         assertEquals("小号/测试", backSubs[1].name, "名称里的 | 必须被替换，否则格式会炸")
+    }
+
+    @Test
+    fun `X-SS-STUB 等于 body 的 MD5 大写`() {
+        // 真机 send_code 抓包：body(235B) → STUB 逐字节一致（不是随机值）
+        val body = "terminal_type=3&app_name=nova_ai&auto_read=0&account_sdk_source=app&" +
+            "passport_support_flow=captcha%2Cpassport_user_ban%2Cverify&unbind_exist=35&" +
+            "mix_mode=1&os_type=4&mobile=2e3d3334363d3030363030303031&is6Digits=1&" +
+            "multi_login=1&type=3731"
+        assertEquals("D1E29E3416F5007C8002FAD64452DCA4", DoubaoAuthClient().md5Upper(body))
     }
 }

@@ -5,6 +5,7 @@ import io.synapse.core.util.NetworkErrorText
 import io.synapse.core.util.objOrNull
 import io.synapse.core.util.stringOrNull
 import java.net.URLEncoder
+import java.security.MessageDigest
 
 /**
  * 设备票据提供者（发码设备注册链的可扩展接入口）。
@@ -184,7 +185,11 @@ class DoubaoAuthClient(
             "multi_login" to "1",
             "type" to xorEncode("24"),
         )
-        val resp = post("passport/mobile/send_code/v1/", body, buildLoginHeaders())
+        // X-SS-STUB = MD5(body).upper()。抓包逐字节验证过（不是随机值）：
+        //   body(235B) → D1E29E3416F5007C8002FAD64452DCA4 == 抓包的 STUB。
+        // 之前注释写「实测不需要 STUB」是被坏抓包脚本骗了，已推翻。
+        val headers = buildLoginHeaders() + ("X-SS-STUB" to md5Upper(body))
+        val resp = post("passport/mobile/send_code/v1/", body, headers)
         val data = resp.data
         if (resp.status !in 200..299) {
             throw DoubaoLoginException("发码失败：HTTP ${resp.status} ${data.take(200)}")
@@ -192,6 +197,8 @@ class DoubaoAuthClient(
         // HTTP 200 不代表发码成功：上游用 body 里的 error_code 报业务错误
         // （实测 error_code=7「访问太频繁」、error_code!=0 都回 200）。只判状态码
         // 会把「拒绝发码」当成「已发送」，用户点完没收到短信，看起来就是「没反应」。
+        // 注意：7 的字面文案是"频繁"，但真机对照（退出重登豆包即可恢复）表明它实际
+        // 受会话 / 设备票据状态支配，不是单纯的 IP 或时间窗频控；排障见 docs/08。
         val json = parse(data)
         val bizCode = json?.let { root ->
             root.get("error_code")?.takeIf { it.isJsonPrimitive }?.asInt
@@ -377,6 +384,9 @@ class DoubaoAuthClient(
             "flow_app_variant" to "doubao",
             "user_is_login" to "0",
             "uid" to "0",
+            "sys_region" to "CN",
+            "tz_name" to "Asia/Shanghai",
+            "system_language_detail" to "zh-CN",
             "is_new_user" to "0",
             "region" to "CN",
             "lang" to "zh",
@@ -402,7 +412,7 @@ class DoubaoAuthClient(
      *   真正决定 403→200 的是 [guardHeaders] 注入的动态票据。
      */
     private fun anonymousHeaders(): Map<String, String> = buildMap {
-        put("Content-Type", "application/x-www-form-urlencoded")
+        put("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
         put("User-Agent", "com.larus.nova/15070040 (Linux; U; Android 16; zh_CN)")
         put("x-tt-request-tag", "t=0;n=0")
         if (CSRF.isNotEmpty()) put("x-tt-passport-csrf-token", CSRF)
@@ -410,6 +420,13 @@ class DoubaoAuthClient(
         put("x-vc-bdturing-sdk-version", "4.1.1.cn")
         put("agent-version", "old")
         put("bd-ticket-guard-version", "3")
+        // 以下 5 个是抓包确定的常量头：真机 send_code/v1 与 account/info/v2 都带，
+        // 且不含随机性（会话级的 Cookie 由服务端下发，这里不带空值骗自己）。
+        put("x-ttnet-bypass-to", "-1")
+        put("sdk-version", "2")
+        put("passport-sdk-version", "60594")
+        put("passport-sdk-settings", "x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_0")
+        put("passport-sdk-sign", "x-tt-token,sec_user_id")
     }
 
     /**
@@ -434,6 +451,11 @@ class DoubaoAuthClient(
         }
         return map.entries.joinToString("; ") { (k, v) -> "$k=$v" }
     }
+
+    /** `X-SS-STUB = MD5(body).upper()`，抓包逐字节验证。 */
+    internal fun md5Upper(text: String): String =
+        MessageDigest.getInstance("MD5").digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02X".format(it) }
 
     private fun form(vararg pairs: Pair<String, String>): String =
         pairs.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
