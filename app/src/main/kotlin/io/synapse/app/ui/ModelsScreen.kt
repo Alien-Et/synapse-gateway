@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -346,7 +345,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 }
 
-/** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
+/**
+ * 单个模型行：模型信息（点击复制）+ 延迟状态 + 屏蔽/测试按钮，失败原因单独占一行。
+ *
+ * 失败原因**必须显示在模型下方**、占整行宽度，不能塞进上面那行 Row：
+ * 它是个长句子（上游原文经常几十字），塞进 Row 后会把左侧信息列挤到极窄宽度，
+ * 长模型名/副标题随之逐字换行 —— 整行变成一条竖着的字母柱，页面直接没法看。
+ */
 @Composable
 private fun ModelRow(
     model: RoutedModel,
@@ -357,219 +362,240 @@ private fun ModelRow(
     onTest: () -> Unit,
     onShowFailure: (String) -> Unit,
 ) {
-    Row(
+    Column(
         // 被屏蔽的模型整行降透明度：一眼能看出它不对外暴露、也不参与路由；
         // 只降视觉不拦截事件，屏蔽按钮仍然可点（否则没法取消屏蔽）。
         modifier = Modifier
             .fillMaxWidth()
             .alpha(if (blocked) 0.55f else 1f),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // 左侧模型名与信息：点击复制模型名称
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .clip(MaterialTheme.shapes.small)
-                .clickable(onClick = onCopy)
-                .padding(vertical = 4.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            // 左侧模型名与信息：点击复制模型名称
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(onClick = onCopy)
+                    .padding(vertical = 4.dp),
             ) {
-                Text(
-                    text = model.fullId,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    // fill = false：名字短时紧贴复制图标，不把后面的「已屏蔽」标签推到行尾。
-                    // maxLines + Ellipsis 必须有：长名字（如 `字节国内/computer_use_subagent`）
-                    // 被 weight 限制到很窄的宽度后会逐字竖排成一条竖线，截断成省略号才是对的。
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                Icon(
-                    Icons.Filled.ContentCopy,
-                    contentDescription = "复制",
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
-                    modifier = Modifier.size(13.dp),
-                )
-                if (blocked) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f))
-                            .padding(horizontal = 5.dp, vertical = 1.dp),
-                    ) {
-                        Text(
-                            text = "已屏蔽",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                    }
-                }
-            }
-            Text(
-                text = buildString {
-                    append(model.model.name)
-                    if (model.model.contextWindow > 0) {
-                        append(" · 上下文 ${model.model.contextWindow}")
-                    }
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            // 能力标记：只有上游/供应商明确给了才显示，缺就不渲染（不猜）。
-            // 各家写 extra 的口径不统一（CodeBuddy 写 tools/vision="true"，Loomy 写 tool_call/attachment="1"），
-            // 这里把同义 key 与两种真假写法都认下，否则能力存在却显示不出来。
-            val extra = model.model.extra
-            fun flag(vararg keys: String): Boolean = keys.any { key ->
-                val v = extra[key]?.trim()?.lowercase()
-                v == "true" || v == "1"
-            }
-            val tags = buildList {
-                if (flag("reasoning")) add("思考")
-                if (flag("search", "web_search", "online")) add("联网")
-                if (flag("vision", "image", "attachment")) add("识图")
-                if (flag("tools", "tool_call", "toolcall")) add("工具")
-                extra["maxOutput"]?.takeIf { it.isNotBlank() }?.let { add("输出上限 $it") }
-                extra["vendor"]?.takeIf { it.isNotBlank() }?.let { add(it) }
-            }
-            if (tags.isNotEmpty()) {
-                Text(
-                    text = tags.joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                )
-            }
-            // 倍率与限时折扣：统一字段名 rate / rateDiscount / rateDiscountTag / rateDiscountUntil，
-            // 腾讯（credits + tags badge）、字节（本地参考表）、商汤（billing_*）都往这里填。
-            val rateLabel = extra["rate"]?.takeIf { it.isNotBlank() }
-            val discount = extra["rateDiscount"]?.takeIf { it.isNotBlank() }
-            if (rateLabel != null || discount != null) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    if (rateLabel != null) {
-                        Text(
-                            text = "倍率 $rateLabel",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    if (discount != null) {
-                        // 文案优先级：上游给的 tag（如「会员5折」「限时免费」）> 默认「限时」。
-                        //
-                        // ⚠️ tag 本身可能已经带日期（商汤的 `billing_discounts[].name`
-                        // 就叫「限免至10月31日」），这时再拼 rateDiscountUntil 会变成
-                        // 「限免至10月31日 0×（至 10月31日 23:59）」——同一日期出现两遍。
-                        // 所以 tag 里已经含日期就只用 tag，不再补时间；否则用「限时 X×（至 …）」。
-                        val tag = extra["rateDiscountTag"]?.takeIf { it.isNotBlank() }
-                        val until = extra["rateDiscountUntil"]?.takeIf { it.isNotBlank() }
-                        val tagHasDate = tag != null && DATE_IN_TEXT.containsMatchIn(tag)
-                        Text(
-                            text = when {
-                                // tag 已含日期：直接「限免至10月31日 0×」，最紧凑
-                                tagHasDate -> "$tag $discount"
-                                // 有独立截止时间：补到括号里
-                                until != null -> "${tag ?: "限时"} $discount（至 $until）"
-                                // 只有 tag
-                                tag != null -> "$tag $discount"
-                                // 什么都没有
-                                else -> "限时 $discount"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.tertiary,
-                        )
+                    Text(
+                        text = model.fullId,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        // fill = false：名字短时紧贴复制图标，不把后面的「已屏蔽」标签推到行尾。
+                        // maxLines + Ellipsis 必须有：只给 weight 不给 maxLines 时，
+                        // 宽度不够的 Text 会用换行去适应，长名字被压到一两个字符宽就竖排。
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Icon(
+                        Icons.Filled.ContentCopy,
+                        contentDescription = "复制",
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                        modifier = Modifier.size(13.dp),
+                    )
+                    if (blocked) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f))
+                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                        ) {
+                            Text(
+                                text = "已屏蔽",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
                     }
                 }
-            }
-            // 谷歌的模型级剩余额度（quotaInfo.remainingFraction），有才显示
-            val quotaRemaining = extra["quotaRemaining"]?.takeIf { it.isNotBlank() }
-            if (quotaRemaining != null) {
-                val resetAt = extra["quotaResetAt"]?.takeIf { it.isNotBlank() }
+                // 副标题：同样必须单行截断。它是上游给的模型名，长度不可控
+                // （`computer_use_subagent` 这种），不截断就会逐字竖排。
                 Text(
-                    text = if (resetAt != null) "额度 $quotaRemaining（$resetAt 重置）" else "额度 $quotaRemaining",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-            }
-        }
-
-        // 按钮左侧显示延迟：<5000ms 绿色，>=5000ms 橙色，失败/超时 红色
-        when (testStatus) {
-            is ModelTestStatus.Testing -> {
-                Text(
-                    text = "测试中...",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = buildString {
+                        append(model.model.name)
+                        if (model.model.contextWindow > 0) {
+                            append(" · 上下文 ${model.model.contextWindow}")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            is ModelTestStatus.Success -> {
-                val isFast = testStatus.latencyMs < 5000
-                Text(
-                    text = "${testStatus.latencyMs}ms",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = if (isFast) Color(0xFF2E7D32) else Color(0xFFEF6C00),
-                )
-            }
-            is ModelTestStatus.Failed -> {
-                Text(
-                    text = "失败：${testStatus.reason.take(60)}${if (testStatus.reason.length > 60) "…" else ""}",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.error,
-                    maxLines = 2,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .widthIn(max = 200.dp)
-                        .clip(MaterialTheme.shapes.small)
-                        .clickable { onShowFailure(testStatus.reason) }
-                        .padding(2.dp),
+                )
+                // 能力标记：只有上游/供应商明确给了才显示，缺就不渲染（不猜）。
+                // 各家写 extra 的口径不统一（CodeBuddy 写 tools/vision="true"，Loomy 写
+                // tool_call/attachment="1"），这里把同义 key 与两种真假写法都认下，
+                // 否则能力存在却显示不出来。
+                val extra = model.model.extra
+                fun flag(vararg keys: String): Boolean = keys.any { key ->
+                    val v = extra[key]?.trim()?.lowercase()
+                    v == "true" || v == "1"
+                }
+                val tags = buildList {
+                    if (flag("reasoning")) add("思考")
+                    if (flag("search", "web_search", "online")) add("联网")
+                    if (flag("vision", "image", "attachment")) add("识图")
+                    if (flag("tools", "tool_call", "toolcall")) add("工具")
+                    extra["maxOutput"]?.takeIf { it.isNotBlank() }?.let { add("输出上限 $it") }
+                    extra["vendor"]?.takeIf { it.isNotBlank() }?.let { add(it) }
+                }
+                if (tags.isNotEmpty()) {
+                    Text(
+                        text = tags.joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // 倍率与限时折扣：统一字段名 rate / rateDiscount / rateDiscountTag / rateDiscountUntil，
+                // 腾讯（credits + tags badge）、字节（本地参考表）、商汤（billing_*）都往这里填。
+                val rateLabel = extra["rate"]?.takeIf { it.isNotBlank() }
+                val discount = extra["rateDiscount"]?.takeIf { it.isNotBlank() }
+                if (rateLabel != null || discount != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        if (rateLabel != null) {
+                            Text(
+                                text = "倍率 $rateLabel",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        if (discount != null) {
+                            // 文案优先级：上游给的 tag（如「会员5折」「限时免费」）> 默认「限时」。
+                            //
+                            // ⚠️ tag 本身可能已经带日期（商汤的 `billing_discounts[].name`
+                            // 就叫「限免至10月31日」），这时再拼 rateDiscountUntil 会变成
+                            // 「限免至10月31日 0×（至 10月31日 23:59）」——同一日期出现两遍。
+                            // 所以 tag 里已经含日期就只用 tag，不再补时间；否则用「限时 X×（至 …）」。
+                            val tag = extra["rateDiscountTag"]?.takeIf { it.isNotBlank() }
+                            val until = extra["rateDiscountUntil"]?.takeIf { it.isNotBlank() }
+                            val tagHasDate = tag != null && DATE_IN_TEXT.containsMatchIn(tag)
+                            Text(
+                                text = when {
+                                    // tag 已含日期：直接「限免至10月31日 0×」，最紧凑
+                                    tagHasDate -> "$tag $discount"
+                                    // 有独立截止时间：补到括号里
+                                    until != null -> "${tag ?: "限时"} $discount（至 $until）"
+                                    // 只有 tag
+                                    tag != null -> "$tag $discount"
+                                    // 什么都没有
+                                    else -> "限时 $discount"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+                // 谷歌的模型级剩余额度（quotaInfo.remainingFraction），有才显示
+                val quotaRemaining = extra["quotaRemaining"]?.takeIf { it.isNotBlank() }
+                if (quotaRemaining != null) {
+                    val resetAt = extra["quotaResetAt"]?.takeIf { it.isNotBlank() }
+                    Text(
+                        text = if (resetAt != null) "额度 $quotaRemaining（$resetAt 重置）" else "额度 $quotaRemaining",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            // 延迟：<5000ms 绿色，>=5000ms 橙色。失败原因不在这里显示（见行下方整行提示），
+            // 否则一句上游原文会把左侧信息列挤成一条竖线。
+            when (testStatus) {
+                is ModelTestStatus.Testing -> {
+                    Text(
+                        text = "测试中...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                is ModelTestStatus.Success -> {
+                    val isFast = testStatus.latencyMs < 5000
+                    Text(
+                        text = "${testStatus.latencyMs}ms",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (isFast) Color(0xFF2E7D32) else Color(0xFFEF6C00),
+                        maxLines = 1,
+                    )
+                }
+                is ModelTestStatus.Failed, null -> Unit
+            }
+
+            // 屏蔽 / 取消屏蔽：屏蔽后该模型不对外暴露、不参与路由，也不进同名匹配快照。
+            // 放在「测试」左侧，方便测速失败后就地屏蔽；图标态区分当前状态。
+            Box(
+                modifier = Modifier
+                    .bouncyClick(onClick = onToggleBlocked)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(
+                        if (blocked) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f)
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                    )
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.Block,
+                    contentDescription = if (blocked) "取消屏蔽" else "屏蔽",
+                    tint = if (blocked) MaterialTheme.colorScheme.onErrorContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
                 )
             }
-            null -> Unit
-        }
 
-        // 屏蔽 / 取消屏蔽：屏蔽后该模型不对外暴露、不参与路由，也不进同名匹配快照。
-        // 放在「测试」左侧，方便测速失败后就地屏蔽；图标态区分当前状态。
-        Box(
-            modifier = Modifier
-                .bouncyClick(onClick = onToggleBlocked)
-                .clip(MaterialTheme.shapes.small)
-                .background(
-                    if (blocked) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f)
-                    else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+            // 右侧 Q 弹测试按钮
+            Box(
+                modifier = Modifier
+                    .bouncyClick(enabled = testStatus !is ModelTestStatus.Testing, onClick = onTest)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "测试",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Rounded.Block,
-                contentDescription = if (blocked) "取消屏蔽" else "屏蔽",
-                tint = if (blocked) MaterialTheme.colorScheme.onErrorContainer
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(16.dp),
-            )
+            }
         }
 
-        // 右侧 Q 弹测试按钮
-        Box(
-            modifier = Modifier
-                .bouncyClick(enabled = testStatus !is ModelTestStatus.Testing, onClick = onTest)
-                .clip(MaterialTheme.shapes.small)
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center,
-        ) {
+        // 失败原因：整行宽度、最多两行、超出省略，点开弹窗看完整原文。
+        (testStatus as? ModelTestStatus.Failed)?.let { failed ->
             Text(
-                text = "测试",
-                style = MaterialTheme.typography.labelMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                text = "失败：${failed.reason}",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable { onShowFailure(failed.reason) }
+                    .padding(horizontal = 2.dp, vertical = 2.dp),
             )
         }
     }
