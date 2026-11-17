@@ -98,12 +98,6 @@ class TraeAuthClient(private val version: TraeVersion) {
         )
     }
 
-    /** 仅当 token 在 [withinSeconds] 内将过期（或已过期）时才刷新；返回 null 表示无需刷新。 */
-    fun refreshIfNeeded(account: TraeAccount, withinSeconds: Long): TraeAccount? {
-        if (!account.needsRefresh(withinSeconds, nowSeconds())) return null
-        return exchangeToken(account)
-    }
-
     companion object {
         /** 优先用 TokenExpireAt，其次 now + TokenExpireDuration，都没有则 0（视为未知）。 */
         fun expiresAtOf(tokenExpireAt: Long, tokenExpireDuration: Long, now: Long): Long = when {

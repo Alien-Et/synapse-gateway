@@ -8,8 +8,9 @@ class InMemoryKeyValueStore : KeyValueStore {
 
     override fun read(key: String): String? = data[key]
 
-    override fun write(key: String, value: String) {
+    override fun write(key: String, value: String): Boolean {
         data[key] = value
+        return true
     }
 
     override fun delete(key: String) {

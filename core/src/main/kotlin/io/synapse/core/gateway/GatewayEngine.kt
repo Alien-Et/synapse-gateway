@@ -218,9 +218,10 @@ class GatewayEngine(
     spillDir: java.io.File? = null,
 ) {
     val settingsRepository = SettingsRepository(store)
-    val pool = AccountPool(store, nowMillis)
-    val callLogStore = CallLogStore(store, preloadOnConstruction = preloadCallLogs, spillDir = spillDir)
+    // requestLog 必须先建：账号池的落盘失败要写进运行日志（见 AccountPool.log 的说明）
     val requestLog = RequestLog(store, nowMillis = nowMillis)
+    val pool = AccountPool(store, nowMillis) { requestLog.warn(it) }
+    val callLogStore = CallLogStore(store, preloadOnConstruction = preloadCallLogs, spillDir = spillDir)
     val registry = ProviderRegistry()
 
     val sanitizer = io.synapse.core.security.RequestSanitizer(nowMillis)

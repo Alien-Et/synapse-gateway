@@ -19,8 +19,10 @@ class EncryptedKeyValueStore(context: Context) : KeyValueStore {
 
     override fun read(key: String): String? = prefs.getString(key, null)
 
-    override fun write(key: String, value: String) {
-        prefs.edit().putString(key, value).commit()
+    override fun write(key: String, value: String): Boolean {
+        val ok = prefs.edit().putString(key, value).commit()
+        if (!ok) Log.e(TAG, "写入失败（$key）：commit 返回 false，本次改动没有落盘")
+        return ok
     }
 
     /**
@@ -30,10 +32,12 @@ class EncryptedKeyValueStore(context: Context) : KeyValueStore {
      * 逐条 commit 等于四次同步加密写盘。合成一次事务后 I/O 降为 1/4，
      * 且这些聚合数据在语义上本就该原子更新（中途崩溃不会留下半套统计）。
      */
-    override fun writeBatch(entries: Map<String, String>) {
+    override fun writeBatch(entries: Map<String, String>): Boolean {
         val editor = prefs.edit()
         for ((key, value) in entries) editor.putString(key, value)
-        editor.commit()
+        val ok = editor.commit()
+        if (!ok) Log.e(TAG, "批量写入失败（${entries.size} 个键）：commit 返回 false，本次改动没有落盘")
+        return ok
     }
 
     override fun delete(key: String) {

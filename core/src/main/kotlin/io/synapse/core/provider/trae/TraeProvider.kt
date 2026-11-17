@@ -43,6 +43,13 @@ class TraeProvider(
     private val defaultModel: () -> String,
     private val hooks: ProviderHooks = ProviderHooks(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    /**
+     * 换 token 的实现，默认走真实端点。
+     *
+     * 抽出来只为可测：刷新纪律（单飞、锁内复查、失败冷却、过期护盾）是纯状态机，
+     * 用假实现就能在 JVM 单测里把并发与失败路径全跑一遍，不必打真上游。
+     */
+    private val exchange: ((TraeAccount) -> TraeAccount)? = null,
 ) : Provider, WebLoginSupport, io.synapse.core.provider.RegionAwareSupport {
 
     override val id: String = ID
@@ -58,6 +65,24 @@ class TraeProvider(
     private val authClients = ConcurrentHashMap<TraeRegion, TraeAuthClient>()
     private val checkinClients = ConcurrentHashMap<TraeRegion, TraeCheckinClient>()
     private val catalogs = ConcurrentHashMap<TraeRegion, TraeModelCatalog>()
+
+    // ------------------------------------------------------------------ 凭证刷新状态
+    //
+    // 刷新必须单飞：ExchangeToken 会轮换 refreshToken，并发刷新会让其中一个用旧 token
+    // 去换、必然失败；失败那次若正好跨在「新凭证落盘」之前，整条会话就作废。
+    private val refreshLock = Any()
+
+    /** 最近一次刷新成功的凭证（按 uid），锁内复查用。 */
+    @Volatile
+    private var lastRefreshed: Map<String, TraeAccount> = emptyMap()
+
+    /** 各账号最近一次刷新失败的秒级时间戳（按 uid），用于失败冷却。 */
+    @Volatile
+    private var lastRefreshFailedAt: Map<String, Long> = emptyMap()
+
+    /** 连续刷新失败次数（按账号）：决定还要不要护着过期凭证，避免瞬时失败把账号弄成「失效」。 */
+    @Volatile
+    private var refreshFailureStreak: Map<String, Int> = emptyMap()
 
     private fun chatClient(region: TraeRegion): TraeChatClient =
         chatClients.computeIfAbsent(region) { TraeChatClient(version(), region.agentHost) }
@@ -168,6 +193,17 @@ class TraeProvider(
 
     override fun openChat(account: ProviderAccount, openAiBody: String): ChatCall {
         val trae = parseOrNull(account) ?: return FailedChatCall(401, "账号凭证无法解析")
+        // 已确定过期、且刷新刚刚连续失败：如实报一个**可重试**的错误。
+        // 不能带着过期 token 打上游——那会拿到 401，被分类成 SESSION_DEAD 而把账号硬禁用，
+        // 一次瞬时刷新失败就变成了用户看到的「登录失效」。连续失败超过上限就不再护着。
+        if (shouldShieldExpiredCredential(
+                expiresAt = trae.expiresAt,
+                streak = synchronized(refreshLock) { refreshFailureStreak[trae.uid] ?: 0 },
+                nowSeconds = nowMillis() / 1000,
+            )
+        ) {
+            return FailedChatCall(503, "凭证已过期且刷新未成功，稍后会自动重试")
+        }
         val model = resolveModel(requestedModelOf(openAiBody))
         val call = try {
             chatClient(regionOfAccount(account)).openStream(trae, openAiBody)
@@ -221,8 +257,57 @@ class TraeProvider(
 
     override fun refreshAccount(account: ProviderAccount, skewSeconds: Long): ProviderAccount? {
         val trae = parseOrNull(account) ?: return null
-        val refreshed = authClientSingleton.refreshIfNeeded(trae, skewSeconds) ?: return null
-        return toProviderAccount(refreshed)
+        val nowSeconds = nowMillis() / 1000
+        // 不需要刷新时返回 null（调用方据此沿用原账号，语义与改造前一致）
+        if (!trae.needsRefresh(skewSeconds, nowSeconds)) return null
+        if (trae.refreshToken.isEmpty()) return null
+
+        val uid = account.uid
+        synchronized(refreshLock) {
+            // 锁内复查：并发请求跨入同一临期窗口时，复用别的线程刚刷出的凭证。
+            //
+            // 这一步是必须的，不是优化：ExchangeToken **每次都会轮换 refreshToken**，
+            // 两个线程拿同一个 refreshToken 去换，只有一个成功，另一个必然失败；
+            // 失败那次若刚好是「新凭证还没落盘」的窗口，整条会话就作废了。
+            val cached = lastRefreshed[uid]
+            if (cached != null && !cached.needsRefresh(skewSeconds, nowSeconds)) {
+                return toProviderAccount(cached)
+            }
+            // 失败冷却：刷新失败后短时间内不再重打，否则 token 被吊销后会按请求频率轰炸端点。
+            val failedAt = lastRefreshFailedAt[uid]
+            if (failedAt != null && nowSeconds - failedAt < REFRESH_COOLDOWN_SECONDS) return null
+            return try {
+                val refreshed = exchange?.invoke(trae) ?: authClientSingleton.exchangeToken(trae)
+                lastRefreshed = lastRefreshed + (uid to refreshed)
+                if (lastRefreshFailedAt.containsKey(uid)) lastRefreshFailedAt = lastRefreshFailedAt - uid
+                if (refreshFailureStreak.containsKey(uid)) refreshFailureStreak = refreshFailureStreak - uid
+                toProviderAccount(refreshed)
+            } catch (e: Exception) {
+                refreshFailed(uid, nowSeconds, e)
+            }
+        }
+    }
+
+    /** 记录一次刷新失败并返回 null（调用方据此沿用旧凭证，由护盾决定要不要打上游）。 */
+    private fun refreshFailed(uid: String, nowSeconds: Long, e: Exception): ProviderAccount? {
+        val detail = e.message?.takeIf { it.isNotBlank() } ?: e::class.simpleName.orEmpty()
+        hooks.onLog("字节 刷新凭证失败（$uid）：$detail")
+        lastRefreshFailedAt = lastRefreshFailedAt + (uid to nowSeconds)
+        refreshFailureStreak = refreshFailureStreak + (uid to ((refreshFailureStreak[uid] ?: 0) + 1))
+        return null
+    }
+
+    /**
+     * 是否应该拦住「带过期凭证去打上游」。
+     *
+     * 条件：凭证确实已过期 + 刷新刚失败过 + 连续失败次数还没超过上限。
+     * 上限存在的意义：真正被吊销的会话（refreshToken 已失效）也得能走到 401 → 禁用 →
+     * 提醒重新登录，不能被这个护盾永久堵住。
+     */
+    internal fun shouldShieldExpiredCredential(expiresAt: Long, streak: Int, nowSeconds: Long): Boolean {
+        if (expiresAt <= 0) return false
+        if (expiresAt > nowSeconds) return false
+        return streak in 1..MAX_SHIELD_STREAK
     }
 
     /** 粘贴 JSON 凭证导入：补齐设备指纹后换 token 并拉取用户信息。 */
@@ -511,6 +596,15 @@ class TraeProvider(
         private const val MAX_PENDING = 40
         private const val CHECKIN_BUSY_CODE = 9074L
         private const val CHECKIN_RETRY_DELAY_MS = 8_000L
+
+        /** 刷新失败后的冷却秒数：token 已被吊销时，别按请求频率继续轰炸刷新端点。 */
+        private const val REFRESH_COOLDOWN_SECONDS = 60L
+
+        /**
+         * 过期护盾的上限：连续失败超过这么多次就不再护着，
+         * 让真正被吊销的会话照常走到 401 → 禁用 → 提示重新登录。
+         */
+        private const val MAX_SHIELD_STREAK = 3
     }
 }
 

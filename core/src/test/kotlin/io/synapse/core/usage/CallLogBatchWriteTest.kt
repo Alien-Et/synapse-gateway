@@ -75,14 +75,16 @@ class CallLogBatchWriteTest {
         var lastBatch: Map<String, String>? = null
 
         override fun read(key: String): String? = data[key]
-        override fun write(key: String, value: String) {
+        override fun write(key: String, value: String): Boolean {
             singleWriteCount++
             data[key] = value
+            return true
         }
-        override fun writeBatch(entries: Map<String, String>) {
+        override fun writeBatch(entries: Map<String, String>): Boolean {
             batchCount++
             lastBatch = entries
             data.putAll(entries)
+            return true
         }
         override fun delete(key: String) { data.remove(key) }
         override fun keys(prefix: String): List<String> = data.keys.filter { it.startsWith(prefix) }

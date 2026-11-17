@@ -8,16 +8,28 @@ import java.io.File
  */
 interface KeyValueStore {
     fun read(key: String): String?
-    fun write(key: String, value: String)
 
     /**
-     * 一次事务写多个键。
+     * 写一个键，返回是否真的落盘成功。
+     *
+     * 返回布尔值而不是 Unit：Android 侧的加密存储在 commit 失败（磁盘满 / IO 错误）时
+     * 不会抛异常，只会返回 false。过去的实现把返回值丢掉，于是「凭证刷新后写回失败」
+     * 完全无声 —— 用户下次启动拿的是已作废的 refreshToken，表现为「登录又失效了」。
+     */
+    fun write(key: String, value: String): Boolean
+
+    /**
+     * 一次事务写多个键，返回是否全部成功。
      *
      * 默认逐条写（兼容所有实现）；加密存储可覆盖成一个 `commit()` 批量提交，
      * 避免「一笔调用记录要连续 4~5 次同步写盘」——那是高频请求下最明显的 I/O 放大点。
      */
-    fun writeBatch(entries: Map<String, String>) {
-        for ((key, value) in entries) write(key, value)
+    fun writeBatch(entries: Map<String, String>): Boolean {
+        var allOk = true
+        for ((key, value) in entries) {
+            if (!write(key, value)) allOk = false
+        }
+        return allOk
     }
 
     fun delete(key: String)
@@ -38,7 +50,7 @@ class FileKeyValueStore(private val root: File) : KeyValueStore {
         return runCatching { file.readText() }.getOrNull()
     }
 
-    override fun write(key: String, value: String) {
+    override fun write(key: String, value: String): Boolean {
         val file = fileFor(key)
         file.parentFile?.mkdirs()
         // 先写临时文件再改名，避免中途失败留下半截凭证
@@ -46,12 +58,13 @@ class FileKeyValueStore(private val root: File) : KeyValueStore {
         tmp.writeText(value)
         if (file.exists() && !file.delete()) {
             tmp.delete()
-            throw IllegalStateException("无法覆盖旧文件: ${file.path}")
+            return false
         }
         if (!tmp.renameTo(file)) {
             tmp.delete()
-            throw IllegalStateException("无法写入文件: ${file.path}")
+            return false
         }
+        return true
     }
 
     override fun delete(key: String) {

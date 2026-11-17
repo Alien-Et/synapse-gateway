@@ -125,6 +125,14 @@ private fun raisedAboveDefault(providerId: String, uid: String, priority: Int, s
 class AccountPool(
     private val store: KeyValueStore,
     private val nowMillis: () -> Long = System::currentTimeMillis,
+    /**
+     * 落盘失败的上报出口（写运行日志）。
+     *
+     * 加密存储的 `commit()` 失败不抛异常、只返回 false。凭证刷新后写回失败却没人知道，
+     * 代价是：磁盘上仍是已作废的 refreshToken，下次启动表现为「登录又失效了」。
+     * 所以账号/状态的落盘结果必须被检查并说出来。
+     */
+    private val log: (String) -> Unit = {},
 ) {
     private val lock = ReentrantReadWriteLock()
     private val entries = LinkedHashMap<String, Entry>()
@@ -570,7 +578,13 @@ class AccountPool(
         synchronized(accountIoLock(account.providerId, account.uid)) {
             // 重取当前内存里的最新凭证，避免并发写回时旧凭证覆盖新凭证（refreshToken 轮换最怕这个）。
             val latest = lock.read { entries[keyOf(account.providerId, account.uid)]?.account } ?: account
-            store.write(accountKey(account.providerId, account.uid), latest.toJson().toString())
+            val ok = store.write(accountKey(account.providerId, account.uid), latest.toJson().toString())
+            if (!ok) {
+                log(
+                    "账号凭证保存失败（${account.providerId}/${account.uid}）：" +
+                        "磁盘写入被拒绝，重启后可能拿到旧凭证",
+                )
+            }
         }
     }
 
@@ -585,7 +599,8 @@ class AccountPool(
         // 因为最后一次落盘执行时，所有内存更新都已完成（每个更新都会紧随一次落盘）。
         synchronized(accountIoLock(providerId, uid)) {
             val json = lock.read { entries[keyOf(providerId, uid)]?.let { stateJson(it).toString() } } ?: return
-            store.write(stateKey(providerId, uid), json)
+            val ok = store.write(stateKey(providerId, uid), json)
+            if (!ok) log("账号状态保存失败（$providerId/$uid）：磁盘写入被拒绝")
         }
     }
 
