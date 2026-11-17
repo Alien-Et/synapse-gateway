@@ -37,7 +37,6 @@ import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.gateway.LoginOutcome
 import io.synapse.core.gateway.AutoCheckinSettings
 import io.synapse.core.gateway.ModelCatalogChanges
-import io.synapse.core.gateway.ModelExposureSettings
 import io.synapse.core.gateway.ModelsCatalog
 import io.synapse.core.gateway.ProviderInfo
 import io.synapse.core.gateway.ProviderModelsChunk
@@ -358,8 +357,6 @@ data class AppUiState(
     val overlayKeepAlive: Boolean = false,
     /** 实时状态通知（仅网关有请求在途时显示）是否开启，默认开。 */
     val liveNotification: Boolean = true,
-    /** 模型开放名单：只对外暴露勾选的模型。 */
-    val modelExposure: io.synapse.core.gateway.ModelExposureSettings = io.synapse.core.gateway.ModelExposureSettings(),
     /** 模型屏蔽名单（本机黑名单）：屏蔽的模型不对外暴露、也不参与路由。 */
     val modelBlocklist: io.synapse.core.gateway.ModelBlocklist = io.synapse.core.gateway.ModelBlocklist(),
     /** 故障转移与并发配置。 */
@@ -412,7 +409,6 @@ private class Snapshot(
     val keepAlive: KeepAliveStatus,
     val security: io.synapse.core.security.SecuritySettings,
     val evidences: List<io.synapse.core.security.OutboundEvidence>,
-    val modelExposure: io.synapse.core.gateway.ModelExposureSettings,
     val modelBlocklist: io.synapse.core.gateway.ModelBlocklist,
     val failover: io.synapse.core.failover.ModelFailoverSettings,
     val autoCheckin: AutoCheckinSettings,
@@ -571,7 +567,6 @@ class AppViewModel(
                     keepAlive = KeepAlive.status(app),
                     security = engine.securitySettings(),
                     evidences = engine.sanitizer.evidenceList(),
-                    modelExposure = engine.modelExposureSettings(),
                     modelBlocklist = engine.modelBlocklist(),
                     failover = engine.failoverSettings(),
                     autoCheckin = engine.autoCheckinSettings(),
@@ -608,7 +603,6 @@ class AppViewModel(
                 keepAlive = snapshot.keepAlive,
                 security = snapshot.security,
                 evidences = snapshot.evidences,
-                modelExposure = snapshot.modelExposure,
                 modelBlocklist = snapshot.modelBlocklist,
                 failover = snapshot.failover,
                 // ⚠️ 少一行就是「界面永远看不到这次改动」：copy() 有默认值，漏字段编译不报错，
@@ -711,30 +705,7 @@ class AppViewModel(
             )
             // 变更摘要同时进运行日志：模型页的提示是一闪而过的，日志能回看「哪天少了什么」
             changes.summary().takeIf { it.isNotEmpty() }?.let { engine.noteForUser(it) }
-            // 清名单要读写加密存储（同步落盘），放到 IO 线程，避免主线程卡帧
-            pruneStaleExposure(catalog.models)
         }
-    }
-
-    /**
-     * 清掉开放名单里远端已不存在的模型。
-     *
-     * 只处理「本轮真的拉到了模型」的前缀：拉不到（无账号、上游临时故障）时目录可能只是暂时取不到，
-     * 不能凭此抹掉用户的勾选。
-     */
-    private suspend fun pruneStaleExposure(live: List<RoutedModel>) {
-        if (live.isEmpty()) return
-        val current = engine.modelExposureSettings()
-        if (current.exposed.isEmpty()) return
-        val liveIds = live.map { it.fullId }.toSet()
-        val prefixes = live.map { it.routePrefix }.toSet()
-        val stale = current.exposed.filter { it.substringBefore('/') in prefixes && it !in liveIds }
-        if (stale.isEmpty()) return
-        // 同步落盘（加密存储 commit），必须在 IO 线程
-        withContext(Dispatchers.IO) {
-            engine.updateModelExposure(current.copy(exposed = current.exposed - stale.toSet()))
-        }
-        _state.value = _state.value.copy(modelExposure = engine.modelExposureSettings())
     }
 
     /**
@@ -865,31 +836,7 @@ class AppViewModel(
         }
     }
 
-    // ------------------------------------------------------------------ 模型开放名单
-
-    fun updateModelExposure(updated: ModelExposureSettings) {
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { engine.updateModelExposure(updated) }
-            _state.value = _state.value.copy(modelExposure = updated)
-        }
-    }
-
-    /** 单个模型勾选/取消勾选。 */
-    fun toggleModelExposed(fullId: String, checked: Boolean) {
-        val current = engine.modelExposureSettings()
-        val exposed = current.exposed.toMutableSet()
-        if (checked) exposed.add(fullId) else exposed.remove(fullId)
-        updateModelExposure(current.copy(exposed = exposed))
-    }
-
-    /** 按分组（routePrefix）批量勾选/取消勾选当前已加载的模型。 */
-    fun toggleGroupExposed(routePrefix: String, checked: Boolean) {
-        val current = engine.modelExposureSettings()
-        val exposed = current.exposed.toMutableSet()
-        val groupIds = _state.value.models.filter { it.routePrefix == routePrefix }.map { it.fullId }
-        if (checked) exposed.addAll(groupIds) else exposed.removeAll(groupIds.toSet())
-        updateModelExposure(current.copy(exposed = exposed))
-    }
+    // ------------------------------------------------------------------ 提示
 
     fun consumeNotice() {
         _state.value = _state.value.copy(notice = "")

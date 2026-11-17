@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 
 /**
  * 模型黑名单（屏蔽）语义：
- * - 屏蔽是「排除」，与开放名单（白名单）正交且优先；
+ * - 屏蔽是「排除」：不对外暴露、不参与路由、不进同名匹配快照；
  * - 批量屏蔽幂等，返回值只统计真正新增的条目；
  * - 被屏蔽的模型不对外暴露、也不能按标签路由；
  * - 落盘后新引擎仍保持屏蔽。
@@ -118,20 +118,6 @@ class ModelBlocklistTest {
     @Test
     fun `被屏蔽的模型不出现在对外目录里`() {
         val engine = engineWith(twoModels())
-        engine.blockModels(listOf("alpha/m1"))
-        assertEquals(
-            listOf("alpha/m2"),
-            engine.exposedModels().filter { it.providerId == "alpha" }.map { it.fullId },
-        )
-    }
-
-    @Test
-    fun `屏蔽优先于开放名单`() {
-        val engine = engineWith(twoModels())
-        // 两个都进白名单，再屏蔽其中一个：白名单里那个也不该对外暴露
-        engine.updateModelExposure(
-            ModelExposureSettings(filterEnabled = true, exposed = setOf("alpha/m1", "alpha/m2")),
-        )
         engine.blockModels(listOf("alpha/m1"))
         assertEquals(
             listOf("alpha/m2"),

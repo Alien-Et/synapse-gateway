@@ -184,7 +184,7 @@ class GatewayHttpServer(
 
     private fun models(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         if (!authorized(session)) return unauthorized(session)
-        // 只对外暴露开放名单内的模型（未启用过滤时等价于全量）
+        // 只对外暴露未被本机屏蔽的模型
         return json(200, OpenAiApi.modelList(engine.exposedModels()))
     }
 

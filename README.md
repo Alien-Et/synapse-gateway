@@ -50,9 +50,9 @@
 **模型信息**
 - 倍率、限时折扣、限免截止时间 —— 全部来自上游实时下发
 - 谷歌模型级剩余额度与重置时刻
-- 模型开放名单：只暴露勾选的模型（默认关 = 对外返回全量）
+- **一键测速**：全部模型并发探测（并发上限 4，避免自己把自己限流成 429）
 - **模型屏蔽名单**：一键测速后把不可用模型一键屏蔽，或逐行 ⊘ 就地屏蔽；
-  被屏蔽的模型不对外暴露、不参与标签路由、不进同名自动匹配快照（屏蔽优先于开放名单）
+  被屏蔽的模型不对外暴露、不参与标签路由、不进同名自动匹配快照
 - **目录变更提示**：刷新时对比上一轮，报出云端新增 / 下架了哪些模型，并写进运行日志
 
 **其他**
@@ -487,7 +487,7 @@ OpenAI 协议没有余额接口，所以余额要在供应商详情页手填一�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | 对话补全（流式 / 非流式 / 多模态） |
-| `GET` | `/v1/models` | 模型列表（按开放名单过滤） |
+| `GET` | `/v1/models` | 模型列表（排除本机屏蔽的模型） |
 | `GET` | `/v1/credits` | 额度查询（别名 `/credits`） |
 | `GET` | `/v1/dashboard/billing/subscription` | 余额（OpenAI 账单格式，`hard_limit_usd`） |
 | `GET` | `/v1/dashboard/billing/credit_grants` | 余额（OpenAI 格式，`total_available`） |
@@ -710,8 +710,7 @@ settings/gateway.json              # 网关设置
 settings/provider/<id>.json        # 供应商设置
 settings/proxy.json                # 代理设置
 settings/custom.json               # 自定义供应商配置
-settings/model_exposure.json       # 模型开放名单（白名单）
-settings/model_blocklist.json      # 模型屏蔽名单（黑名单）
+settings/model_blocklist.json      # 模型屏蔽名单
 logs/calls/<id>                    # 调用记录
 logs/requests.json                 # 运行日志（环形缓冲）
 usage/...                          # 用量统计

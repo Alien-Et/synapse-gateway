@@ -380,11 +380,7 @@ class GatewayEngine(
     @Volatile
     private var proxy: ProxySettings = ProxySettings.fromJson(store.read(ProxySettings.STORE_KEY))
 
-    /** 模型开放名单：独立于 [settings] 存储与保存入口，勾选模型不触发 provider 重载。 */
-    @Volatile
-    private var modelExposure: ModelExposureSettings = ModelExposureSettings.load(store)
-
-    /** 本机屏蔽的模型（黑名单）。与开放名单相反方向，屏蔽优先。 */
+    /** 本机屏蔽的模型。独立于 [settings] 存储与保存入口，屏蔽模型不触发 provider 重载。 */
     private var modelBlocklist: ModelBlocklist = ModelBlocklist.load(store)
 
     /** 当前正在监听的登录回调服务（同一时间只允许一个登录流程）。 */
@@ -501,17 +497,6 @@ class GatewayEngine(
     fun isModelBanned(providerId: String, model: String): Boolean =
         modelBans.isBanned(providerId, model)
 
-    // ------------------------------------------------------------------ 模型开放名单
-
-    fun modelExposureSettings(): ModelExposureSettings = modelExposure
-
-    /** 更新开放名单并落盘；独立入口，不调用 reconfigureProviders。 */
-    fun updateModelExposure(updated: ModelExposureSettings) {
-        modelExposure = updated
-        store.write(ModelExposureSettings.STORE_KEY, updated.toJson().toString())
-        log("模型开放名单已更新（过滤=${if (updated.filterEnabled) "开启" else "关闭"}，已勾选=${updated.exposed.size}）")
-    }
-
     // ------------------------------------------------------------------ 模型黑名单
 
     fun modelBlocklist(): ModelBlocklist = modelBlocklist
@@ -548,22 +533,10 @@ class GatewayEngine(
     }
 
     /**
-     * 对外可见的模型：先去掉本机屏蔽的，再按开放名单过滤。
-     *
-     * 顺序不能反：屏蔽是「这个模型别再用」，开放名单是「只给这些」。
-     * 屏蔽优先，所以先减掉黑名单，再在白名单里挑。
+     * 对外暴露的模型目录：模型页 UI 用 `modelsStreaming`（不过滤，展示全量，供屏蔽/取消屏蔽）；
+     * HTTP `/v1/models` 用本方法（减掉本机屏蔽的模型）。
      */
-    private fun filterVisible(models: List<RoutedModel>): List<RoutedModel> {
-        val notBlocked = models.filterNot { modelBlocklist.blocks(it.fullId) }
-        return if (!modelExposure.filterEnabled) notBlocked
-        else notBlocked.filter { modelExposure.allows(it.fullId) }
-    }
-
-    /**
-     * 对外暴露的模型目录：模型页 UI 用 `modelsStreaming`（不过滤，展示全量，供勾选/屏蔽）；
-     * HTTP `/v1/models` 用本方法（先减屏蔽名单，再按开放名单过滤）。
-     */
-    fun exposedModels(): List<RoutedModel> = filterVisible(models())
+    fun exposedModels(): List<RoutedModel> = models().filterNot { modelBlocklist.blocks(it.fullId) }
 
     // ------------------------------------------------------------------ 代理
 

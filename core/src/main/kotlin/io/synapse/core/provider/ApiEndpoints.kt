@@ -173,7 +173,7 @@ object ApiEndpoints {
     /**
      * 全部端点(对话 + 透传)。
      *
-     * MODELS 也在这里:网关侧 /v1/models 有自己的实现(要返回开放名单、补上路由前缀),
+     * MODELS 也在这里:网关侧 /v1/models 有自己的实现(要排除屏蔽名单、补上路由前缀),
      * 所以路由时它会先被专门分支截住,不会走到通用透传。但 provider 声明能力时仍需要它。
      */
     val ALL: List<ApiEndpoint> = listOf(CHAT) + PASSTHROUGH

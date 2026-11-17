@@ -74,7 +74,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     val clipboard = LocalClipboardManager.current
     // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
     val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
-    val exposure = state.modelExposure
     // 折叠状态：记「被折叠」的分组（默认全展开）。
     //
     // 用不可变 Set + rememberSaveable，而不是 SnapshotStateList：
@@ -127,12 +126,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             title = "模型",
             subtitle = subtitleText,
             actions = {
-                ExposureToggle(
-                    enabled = exposure.filterEnabled,
-                    onClick = {
-                        viewModel.updateModelExposure(exposure.copy(filterEnabled = !exposure.filterEnabled))
-                    },
-                )
                 // 一键测速：并发上限 4，避免自己把自己限流（见 AppViewModel.testAllModels）
                 Icon(
                     Icons.Rounded.Speed,
@@ -253,7 +246,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 // 已加载的模型按组展示
                 for ((routePrefix, models) in grouped) {
                     val title = models.firstOrNull()?.providerName ?: routePrefix
-                    val allExposed = models.isNotEmpty() && models.all { exposure.allows(it.fullId) }
                     // 这一组本轮没拉到上游、用的是上次成功的清单：明确标注，不能让旧清单冒充实时结果
                     val cachedGroup = models.isNotEmpty() && models.all { it.cached }
                     item(key = "header-$routePrefix") {
@@ -302,19 +294,6 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 Box(Modifier.breathingDot(MaterialTheme.colorScheme.tertiary, size = 6.dp))
                             }
                             Box(Modifier.weight(1f))
-                            if (exposure.filterEnabled) {
-                                Text(
-                                    text = if (allExposed) "取消全选" else "全选",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .clickable {
-                                            viewModel.toggleGroupExposed(routePrefix, !allExposed)
-                                        }
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                )
-                            }
                             Box(
                                 modifier = Modifier
                                     .clip(CircleShape)
@@ -336,10 +315,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         ModelRow(
                             model = model,
                             testStatus = testStatus,
-                            exposureEnabled = exposure.filterEnabled,
-                            exposed = exposure.allows(model.fullId),
                             blocked = state.modelBlocklist.blocks(model.fullId),
-                            onToggleExposed = { viewModel.toggleModelExposed(model.fullId, it) },
                             onToggleBlocked = { viewModel.toggleModelBlocked(model.fullId) },
                             onCopy = {
                                 clipboard.setText(AnnotatedString(model.fullId))
@@ -370,58 +346,12 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     }
 }
 
-/**
- * 「开放名单」开关：点击切换是否只对外暴露勾选的模型。
- *
- * 开启时用主色胶囊 + 填充圆点区分，关闭时用描边中性样式。
- */
-@Composable
-private fun ExposureToggle(enabled: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(
-                if (enabled) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surface,
-            )
-            .border(
-                width = 1.dp,
-                color = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                shape = CircleShape,
-            )
-            .bouncyClick(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(
-                    if (enabled) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                ),
-        )
-        Text(
-            text = if (enabled) "开放名单 开" else "开放名单",
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.SemiBold,
-            color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
 /** 单个模型行：左侧模型 id 与信息（点击复制），中部测速状态，右侧测速按钮。 */
 @Composable
 private fun ModelRow(
     model: RoutedModel,
     testStatus: ModelTestStatus?,
-    exposureEnabled: Boolean,
-    exposed: Boolean,
     blocked: Boolean,
-    onToggleExposed: (Boolean) -> Unit,
     onToggleBlocked: () -> Unit,
     onCopy: () -> Unit,
     onTest: () -> Unit,
@@ -436,14 +366,6 @@ private fun ModelRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // 开放名单开启时，左侧显示勾选框决定该模型是否对外暴露
-        if (exposureEnabled) {
-            Checkbox(
-                checked = exposed,
-                onCheckedChange = onToggleExposed,
-                modifier = Modifier.size(22.dp),
-            )
-        }
         // 左侧模型名与信息：点击复制模型名称
         Column(
             modifier = Modifier
@@ -460,8 +382,11 @@ private fun ModelRow(
                     text = model.fullId,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
-                    // 给名字让出「weight 优先、其余固定子项先占位」的测量顺序：
-                    // 不加 weight 时超长名字会占满整行，把后面的「已屏蔽」标签挤出屏幕。
+                    // fill = false：名字短时紧贴复制图标，不把后面的「已屏蔽」标签推到行尾。
+                    // maxLines + Ellipsis 必须有：长名字（如 `字节国内/computer_use_subagent`）
+                    // 被 weight 限制到很窄的宽度后会逐字竖排成一条竖线，截断成省略号才是对的。
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 Icon(
