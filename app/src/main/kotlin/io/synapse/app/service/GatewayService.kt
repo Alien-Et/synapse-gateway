@@ -120,9 +120,9 @@ class GatewayService : Service() {
         active = false
         if (::watchdog.isInitialized) watchdog.cancel()
         watchdogHandler.removeCallbacks(watchdogTick)
-        // 服务都停了就不该还在后台签到
-        runCatching { applicationContext.gatewayEngine.stopAutoCheckinSchedule() }
-        // 网关没跑就不该有「实时状态」通知
+        // 不在这里撤销签到排程：网关服务只负责「让端口活着」，与签到是两件事。
+        // 进程仍在（例如悬浮窗保活）时到点照样签到；真正该停的情况是用户关掉
+        // 「定时签到」开关 —— 那会走 updateAutoCheckinSettings → refresh 自动撤销。
         LiveStatusNotifier.stop()
         FloatingKeepAlive.hide(this)
         releaseLocks()

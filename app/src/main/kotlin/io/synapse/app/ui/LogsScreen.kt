@@ -41,6 +41,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -70,6 +71,7 @@ import io.synapse.app.ui.theme.WarningAmber
 import io.synapse.core.gateway.GatewaySettings
 import io.synapse.core.usage.CallRecord
 import io.synapse.core.usage.CallStatus
+import io.synapse.core.usage.LogLine
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -92,6 +94,8 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     var filter by remember { mutableStateOf(StatusFilter.ALL) }
     var levelFilter by remember { mutableStateOf(LevelFilter.ALL) }
     var detail by remember { mutableStateOf<CallRecord?>(null) }
+    // 请求日志的详情：与调用记录分开（那边是结构化字段，这边是一段自由文本）
+    var detailLog by remember { mutableStateOf<LogLine?>(null) }
     var showLogSettings by remember { mutableStateOf(false) }
 
     // 进入本页先拉一次（历史数据）；之后靠 RequestLog 的推送实时刷新，
@@ -343,13 +347,8 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     // 重复 key 会让 LazyColumn 直接崩溃。
                     itemsIndexed(logs, key = { _, line -> line.seq }) { _, line ->
                         SectionCard {
-                            Text(
-                                text = line.render(),
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                color = levelColor(line.level),
-                                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                            )
+                            // 卡片只放概要（固定一行），完整正文点开浮窗看，避免超长 JSON 把列表撑得忽高忽低
+                            RequestLogRow(line) { detailLog = line }
                         }
                     }
                 }
@@ -361,6 +360,117 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
         ModalBottomSheet(onDismissRequest = { detail = null }) {
             CallDetailSheet(record, viewModel)
         }
+    }
+
+    detailLog?.let { line ->
+        ModalBottomSheet(onDismissRequest = { detailLog = null }) {
+            RequestLogDetailSheet(line)
+        }
+    }
+}
+
+/**
+ * 请求日志卡片：固定高度，只放概要（时间 / 级别 / 首行摘要）。
+ *
+ * 完整正文（多行 JSON、堆栈、超长上游报文）点开 [RequestLogDetailSheet] 查看。
+ * 卡片高度不随内容变化 —— 旧实现直接塞 `line.render()`，一条几十行的日志就能
+ * 把列表撑出一屏高，滚动时忽高忽低，也没法快速扫过。
+ */
+@Composable
+private fun RequestLogRow(line: LogLine, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = TIME_FORMAT.format(Date(line.atMillis)),
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(levelColor(line.level).copy(alpha = 0.14f))
+                .padding(horizontal = 7.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = line.level,
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = FontFamily.Monospace,
+                color = levelColor(line.level),
+            )
+        }
+        Text(
+            // 只取第一行：多行内容在卡片里会撑高，点开才看全文
+            text = line.text.lineSequence().firstOrNull().orEmpty().ifBlank { "（空）" },
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 请求日志详情浮窗：完整正文（保留换行）+ 一键复制。
+ *
+ * 与调用记录的 [CallDetailSheet] 分开：那边是结构化字段（请求/响应/上游报文），
+ * 这边只有一段自由文本。
+ */
+@Composable
+private fun RequestLogDetailSheet(line: LogLine) {
+    val clipboard = LocalClipboardManager.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = TIME_FORMAT.format(Date(line.atMillis)),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(levelColor(line.level).copy(alpha = 0.14f))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    text = line.level,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    color = levelColor(line.level),
+                )
+            }
+            Box(Modifier.weight(1f))
+            TextButton(onClick = { clipboard.setText(AnnotatedString(line.text)) }) {
+                Text("复制")
+            }
+        }
+        Text(
+            text = line.text,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

@@ -37,6 +37,8 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.Checkbox
@@ -61,8 +63,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import io.synapse.core.provider.RoutedModel
 
@@ -82,6 +87,9 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     // 换成纯值 Set 后 save/restore 不碰快照，问题消失；读取仍在组合作用域，
     // 折叠变化会正常触发列表重建。
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    // 一键隐藏被屏蔽的模型：只影响本页展示，不动屏蔽状态本身。
+    // 用 rememberSaveable 记住，退出再进来保持上次的选择。
+    var hideBlocked by rememberSaveable { mutableStateOf(false) }
     // 测试失败原文可能很长，行内只展示截断提示，全文点开弹窗查看
     var failureDetail by remember { mutableStateOf<String?>(null) }
 
@@ -143,6 +151,26 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                         tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier
                             .bouncyClick { viewModel.blockFailedModels() }
+                            .padding(6.dp),
+                    )
+                }
+                // 一键隐藏/显示被屏蔽模型：只在真有屏蔽项时出现（没有屏蔽项时这个按钮没有意义）
+                val blockedTotal = state.models.count { state.modelBlocklist.blocks(it.fullId) }
+                if (blockedTotal > 0) {
+                    Icon(
+                        imageVector = if (hideBlocked) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        contentDescription = if (hideBlocked) {
+                            "显示被屏蔽的模型（$blockedTotal 个）"
+                        } else {
+                            "隐藏被屏蔽的模型（$blockedTotal 个）"
+                        },
+                        tint = if (hideBlocked) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier
+                            .bouncyClick { hideBlocked = !hideBlocked }
                             .padding(6.dp),
                     )
                 }
@@ -293,23 +321,45 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 Box(Modifier.breathingDot(MaterialTheme.colorScheme.tertiary, size = 6.dp))
                             }
                             Box(Modifier.weight(1f))
-                            Box(
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f))
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                            ) {
-                                Text(
-                                    text = "${models.size} 款",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                )
+                            // 分组统计：可用 / 不可用 / 屏蔽 / 总数。
+                            // 屏蔽优先于测试结果 —— 被屏蔽的模型既不对外暴露也不参与路由，
+                            // 它的测试结果没有意义，归到「屏蔽」里更准确。
+                            val groupBlocked = models.count { state.modelBlocklist.blocks(it.fullId) }
+                            val groupUsable = models.count {
+                                !state.modelBlocklist.blocks(it.fullId) &&
+                                    state.modelTestLatencies[it.fullId] is ModelTestStatus.Success
                             }
+                            val groupFailed = models.count {
+                                !state.modelBlocklist.blocks(it.fullId) &&
+                                    state.modelTestLatencies[it.fullId] is ModelTestStatus.Failed
+                            }
+                            GroupStats(
+                                usable = groupUsable,
+                                failed = groupFailed,
+                                blocked = groupBlocked,
+                                total = models.size,
+                            )
                         }
                     }
                     // 折叠的分组跳过其模型行：只渲染分组头，模型行即时收起
                     if (routePrefix in collapsed) continue
-                    items(models, key = { it.fullId }) { model ->
+                    // 一键隐藏被屏蔽：只影响列表展示，屏蔽状态本身不动
+                    val visibleModels = if (hideBlocked) {
+                        models.filterNot { state.modelBlocklist.blocks(it.fullId) }
+                    } else {
+                        models
+                    }
+                    if (visibleModels.isEmpty()) {
+                        item(key = "hidden-all-$routePrefix") {
+                            Text(
+                                text = "该分组的模型全部被屏蔽，点右上角眼睛图标可恢复显示",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                    items(visibleModels, key = { it.fullId }) { model ->
                         val testStatus = state.modelTestLatencies[model.fullId]
                         ModelRow(
                             model = model,
@@ -343,6 +393,29 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             }
         }
     }
+}
+
+/**
+ * 分组统计：`8 可用 · 2 不可用 · 2 屏蔽 · 共 12`。
+ *
+ * 三个计数分别上色（可用=主色、不可用=错误色、屏蔽=中性色），
+ * 一眼能看出这组是「大部分可用」还是「大面积挂了」。
+ */
+@Composable
+private fun GroupStats(usable: Int, failed: Int, blocked: Int, total: Int) {
+    Text(
+        text = buildAnnotatedString {
+            withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary)) { append("$usable 可用") }
+            append(" · ")
+            withStyle(SpanStyle(color = MaterialTheme.colorScheme.error)) { append("$failed 不可用") }
+            append(" · ")
+            withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)) { append("$blocked 屏蔽") }
+            append(" · 共 $total")
+        },
+        style = MaterialTheme.typography.labelSmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 /**

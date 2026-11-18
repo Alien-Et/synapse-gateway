@@ -36,6 +36,11 @@ class AiGatewayApp : Application() {
         )
         engine = created
 
+        // 自动签到排程挂**进程级**，不跟网关服务启停绑定：
+        // 只要进程活着（悬浮窗保活等），即使网关端口没在监听，到点也照样签到。
+        // 幂等：内部先取消旧排程再按当前设置重排，重复调用没有副作用。
+        runCatching { created.refreshAutoCheckinSchedule() }
+
         // 把引擎内部日志同时镜像到 logcat（tag=SynapseGateway）。
         // UI 的「记录」页只保留窗口期内的条目，排查「额度查不出来」这类问题时
         // 用 logcat 就能直接看到上游返回的原始 JSON，不用来回切页面。
