@@ -70,6 +70,15 @@ class DoubaoDeviceAttestation(
     private val cache: AttestationCache = AttestationCache.Memory(),
     /** 主签名密钥别名（上游由调用方传入，这里给本项目的固定值）。 */
     val signingAlias: String = DEFAULT_SIGNING_ALIAS,
+    /**
+     * 诊断日志（详细日志开启时接到 `ProviderHooks.onVerbose`）。
+     *
+     * 之所以必须留这个口子：整条链此前被 `runCatching{}.getOrNull()` 包着，
+     * `prepare()` 一失败就**静默降级成不带 guard 头**，日志里一个字都没有 ——
+     * 排查「为什么 7 个头一个都没发出去」时等于黑盒。这里把每一步的真实结果打出来：
+     * TEE 是否可用、密钥生成是否成功、证书链几片、`get_client_cert` 的 HTTP 状态与 body。
+     */
+    private val verbose: (String) -> Unit = {},
 ) {
 
     companion object {
@@ -103,6 +112,9 @@ class DoubaoDeviceAttestation(
         const val HEADER_ITERATION_VERSION = "bd-ticket-guard-iteration-version"
 
         const val TEE_STATUS_AVAILABLE = "1"
+
+        /** TEE 不可用（软密钥路径）：如实上报 §0§，不谎报 §1§。 */
+        const val TEE_STATUS_UNAVAILABLE = "0"
         const val GUARD_VERSION = "3"
         const val ITERATION_VERSION = "2"
 
@@ -112,6 +124,8 @@ class DoubaoDeviceAttestation(
         const val DEFAULT_SIGNING_ALIAS = "synapse_device_key"
 
         private const val KEY_LAST_CHALLENGE = "attest_challenge"
+        private const val KEY_SOFT_PRIVATE = "soft_signing_private_pkcs8"
+        private const val KEY_SOFT_PUBLIC = "soft_signing_public_x509"
         private const val KEY_REE_PRIVATE = "ree_private_pkcs8"
         private const val KEY_REE_PUBLIC = "ree_public_x509"
         private const val KEY_CLIENT_CERT = "client_cert_pem"
@@ -165,34 +179,104 @@ class DoubaoDeviceAttestation(
      * 生成/复用两把设备密钥，产出上报材料。结果进程内缓存（上游也是启动期一次性加载）。
      */
     fun prepare(force: Boolean = false): Prepared? {
-        if (!tee.isAvailable()) return null
         if (!force) cachedPrepared?.let { return it }
 
         val reePublicKey = reePublicKeyBase64()
-        val signing = tee.ensureSigningKeyPair(signingAlias)
+        verbose("attest: REE 公钥 ${reePublicKey.length} 字符")
+        // ★ 关键：签名密钥**不再强依赖 TEE**。
+        // 服务端接受纯软 CSR（docs/18 `18.12 实测：软 EC P-256 提交 CSR 直接换到 client cert），
+        // 所以 TEE 生成失败时回退软密钥，仍然能把 guard 头带齐 —— 而不是像以前那样
+        // 「TEE 失败 → 静默返回 null → 一个 guard 头都不发」。
+        val signing = signingKeyPair() ?: run {
+            verbose("attest: TEE 与软密钥都不可用，整条设备证明链跳过")
+            return null
+        }
+        verbose("attest: 签名密钥就绪（TEE=${tee.isAvailable()}）")
         val teePublicKey = Base64.getEncoder().encodeToString(tee.ecPoint(signing.public))
         val challenge = computeChallenge(teePublicKey, reePublicKey)
         val challengeBase64 = Base64.getEncoder().encodeToString(challenge)
 
-        // challenge 变了必须重建（沿用旧 challenge 会被判重放）
-        if (cache.get(KEY_LAST_CHALLENGE) != challengeBase64 ||
-            !tee.containsAlias(TeeKeyStore.ATTESTATION_ALIAS)
-        ) {
-            tee.ensureAttestationKeyPair(challenge)
-            cache.put(KEY_LAST_CHALLENGE, challengeBase64)
+        // attestation 密钥（带 challenge 的那把）**只有 TEE 可用时才存在**：
+        // 它的价值是「证书链里带 Key Attestation 扩展」，软密钥给不出来。
+        // 但业务请求（send_code / account/info）本来就不带 attest-certs，
+        // 所以软密钥路径下这里留空是**正确降级**，不是缺陷。
+        var certs = ""
+        var chainSize = 0
+        var hasAttestation = false
+        if (tee.isAvailable()) {
+            val rebuilt = runCatching {
+                if (cache.get(KEY_LAST_CHALLENGE) != challengeBase64 ||
+                    !tee.containsAlias(TeeKeyStore.ATTESTATION_ALIAS)
+                ) {
+                    tee.ensureAttestationKeyPair(challenge)
+                    cache.put(KEY_LAST_CHALLENGE, challengeBase64)
+                    verbose("attest: attestation 密钥已按新 challenge 重建")
+                }
+            }
+            rebuilt.exceptionOrNull()?.let {
+                verbose("attest: attestation 密钥不可用 ${it.javaClass.simpleName}: ${it.message}（继续用软密钥）")
+            }
+            if (rebuilt.isSuccess && tee.containsAlias(TeeKeyStore.ATTESTATION_ALIAS)) {
+                val chain = tee.certificateChain(TeeKeyStore.ATTESTATION_ALIAS)
+                certs = runCatching { tee.certificateChainHeaderValue() }.getOrDefault("")
+                chainSize = chain.size
+                hasAttestation = runCatching { tee.keyAttestationExtension() != null }.getOrDefault(false)
+            }
+        } else {
+            verbose("attest: TEE 不可用 → 使用软件 EC 密钥（服务端接受软 CSR，见 docs/18 `18.12）")
         }
-
-        val chain = tee.certificateChain(TeeKeyStore.ATTESTATION_ALIAS)
-        val certs = tee.certificateChainHeaderValue()
         cache.put(KEY_ATTEST_CERTS, certs)
+        verbose("attest: 证书链 $chainSize 片、attest-certs 头 ${certs.length} 字符、KeyAttestation=$hasAttestation")
 
         return Prepared(
             teePublicKey = teePublicKey,
             attestCerts = certs,
-            certChainSize = chain.size,
-            hasKeyAttestation = tee.keyAttestationExtension() != null,
+            certChainSize = chainSize,
+            hasKeyAttestation = hasAttestation,
             challengeBase64 = challengeBase64,
         ).also { cachedPrepared = it }
+    }
+
+    /**
+     * 签名密钥：优先 TEE，**TEE 不可用/生成失败则回退软件 EC 密钥**。
+     *
+     * 真机侧这把密钥住在 `AndroidKeyStore` 里（私钥不出芯片）；网关侧没有那个约束，
+     * 而服务端也**不强制** TEE —— [豆包抓包/18.12] 实测：纯软 EC P-256 提交 CSR，
+     * 服务端照签 client cert（`Key-Sign-Result: 2`）。
+     *
+     * 所以这里的原则是「能拿 TEE 就拿，拿不到就用软密钥」，而不是「没有 TEE 就整条链放弃」。
+     */
+    private fun signingKeyPair(): KeyPair? {
+        if (tee.isAvailable()) {
+            runCatching { tee.ensureSigningKeyPair(signingAlias) }
+                .onFailure { verbose("attest: TEE 签名密钥生成失败 ${it.javaClass.simpleName}: ${it.message} → 回退软密钥") }
+                .getOrNull()
+                ?.let { return it }
+        }
+        return runCatching { softKeyPair() }
+            .onFailure { verbose("attest: 软密钥生成失败 ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull()
+    }
+
+    /** 软件 EC P-256 密钥对（公/私钥都持久化，等价于上游的 `sp_key_*_ree_*`）。 */
+    private fun softKeyPair(): KeyPair {
+        val priv = cache.get(KEY_SOFT_PRIVATE)
+        val pub = cache.get(KEY_SOFT_PUBLIC)
+        if (priv != null && pub != null) {
+            runCatching {
+                val factory = KeyFactory.getInstance("EC")
+                return KeyPair(
+                    factory.generatePublic(X509EncodedKeySpec(Base64.getDecoder().decode(pub))),
+                    factory.generatePrivate(PKCS8EncodedKeySpec(Base64.getDecoder().decode(priv))),
+                )
+            }
+        }
+        val pair = KeyPairGenerator.getInstance("EC").apply {
+            initialize(ECGenParameterSpec("secp256r1"))
+        }.generateKeyPair()
+        cache.put(KEY_SOFT_PRIVATE, Base64.getEncoder().encodeToString(pair.private.encoded))
+        cache.put(KEY_SOFT_PUBLIC, Base64.getEncoder().encodeToString(pair.public.encoded))
+        return pair
     }
 
     /**
@@ -241,7 +325,7 @@ class DoubaoDeviceAttestation(
      * 字符串是 `add TEE public key instead of cert`（没有证书时用 TEE 公钥顶上）。
      */
     fun teePublicKeyBase64(): String =
-        Base64.getEncoder().encodeToString(tee.ecPoint(tee.ensureSigningKeyPair(signingAlias).public))
+        signingKeyPair()?.let { Base64.getEncoder().encodeToString(tee.ecPoint(it.public)) }.orEmpty()
 
     /**
      * `bd-ticket-guard-display-os-version`：设备侧 `Build.DISPLAY` 原样串。
@@ -266,7 +350,6 @@ class DoubaoDeviceAttestation(
      * 拿到就缓存；任何失败都返回空串（上层就不带这个头）。
      */
     fun enrollClientCert(force: Boolean = false): String {
-        if (!tee.isAvailable()) return ""
         if (!force) {
             val cached = cache.get(KEY_CLIENT_CERT)
             // 证书与 server_sn 是配对的：缺任一就重新登记（否则业务头拿不到 sn）
@@ -274,8 +357,9 @@ class DoubaoDeviceAttestation(
         }
         if (prepare() == null) return ""
 
+        val signing = signingKeyPair() ?: return ""
         val csrPem = runCatching {
-            Pkcs10.toPem(Pkcs10.build(tee.ensureSigningKeyPair(signingAlias)))
+            Pkcs10.toPem(Pkcs10.build(signing))
         }.getOrNull() ?: return ""
 
         val csrB64 = Base64.getEncoder().encodeToString(csrPem.toByteArray(Charsets.UTF_8))
@@ -295,12 +379,18 @@ class DoubaoDeviceAttestation(
             HEADER_CLIENT_CSR to publicBlobHeader(csrPem),
             HEADER_REE_PUBLIC_KEY to reePublicKeyBase64(),
         )
-        val resp = post(PATH_GET_CLIENT_CERT, body, headers) ?: return ""
+        val resp = post(PATH_GET_CLIENT_CERT, body, headers)
+        if (resp == null) {
+            verbose("attest: get_client_cert 无响应（网络/超时）")
+            return ""
+        }
+        verbose("attest: get_client_cert HTTP ${resp.status} body=${resp.body.take(240)}")
         val data = resp.jsonBody?.getAsJsonObject("data")
         val cert = data?.stringOrNull("cert").orEmpty()
         data?.stringOrNull("server_sn")?.takeIf { it.isNotEmpty() }
             ?.let { cache.put(KEY_SERVER_CERT_SN, it) }
         if (cert.isNotEmpty()) cache.put(KEY_CLIENT_CERT, cert)
+        verbose("attest: client-cert ${cert.length} 字符、server_sn=${cache.get(KEY_SERVER_CERT_SN).orEmpty()}")
         return cert
     }
 
@@ -388,12 +478,31 @@ class DoubaoDeviceAttestation(
      * 拿不到真值（TEE 不可用 / 公钥取不出）就返回空 map —— 与接线前的默认实现一致。
      */
     fun asGuardHeaders(): DeviceGuardHeaders = DeviceGuardHeaders {
-        if (runCatching { prepare() }.getOrNull() == null) return@DeviceGuardHeaders emptyMap()
-        val teePoint = runCatching { teePublicKeyBase64() }.getOrNull().orEmpty()
-        if (teePoint.isEmpty()) return@DeviceGuardHeaders emptyMap()
+        val failure = runCatching { prepare() }
+        failure.exceptionOrNull()?.let {
+            verbose("guard: prepare 抛异常 ${it.javaClass.simpleName}: ${it.message}")
+        }
+        val prepared = failure.getOrNull()
+        if (prepared == null) {
+            verbose("guard: prepared 为空 → 本次不带 guard 头（TEE 可用=${available()}）")
+            return@DeviceGuardHeaders emptyMap()
+        }
+        val teePoint = runCatching { teePublicKeyBase64() }
+            .onFailure { verbose("guard: 取 TEE 公钥失败 ${it.javaClass.simpleName}: ${it.message}") }
+            .getOrNull().orEmpty()
+        if (teePoint.isEmpty()) {
+            verbose("guard: TEE 公钥为空 → 本次不带 guard 头")
+            return@DeviceGuardHeaders emptyMap()
+        }
         runCatching { enrollClientCert() } // 触发登记：拿 client-cert 与 server_sn
-        buildMap {
-            put(HEADER_TEE_STATUS, TEE_STATUS_AVAILABLE)
+            .onFailure { verbose("guard: 登记 client-cert 抛异常 ${it.javaClass.simpleName}: ${it.message}") }
+        val built = buildMap {
+            // 如实上报：只有真的拿到带 Key Attestation 的证书链才写 1，
+            // 软密钥路径写 0 —— 声明与实际不符比「降级」更容易被判异常。
+            put(
+                HEADER_TEE_STATUS,
+                if (prepared.hasKeyAttestation) TEE_STATUS_AVAILABLE else TEE_STATUS_UNAVAILABLE,
+            )
             put(HEADER_VERSION, GUARD_VERSION)
             put(HEADER_ITERATION_VERSION, ITERATION_VERSION)
             displayOsVersion().takeIf { it.isNotEmpty() }?.let { put(HEADER_DISPLAY_OS_VERSION, it) }
@@ -402,6 +511,11 @@ class DoubaoDeviceAttestation(
                 ?.let { put(HEADER_REE_PUBLIC_KEY, it) }
             serverCertSn().takeIf { it.isNotEmpty() }?.let { put(HEADER_SERVER_CERT_SN, it) }
         }
+        verbose(
+            "guard: 自建链注入 ${built.size} 个头 → " +
+                built.entries.joinToString(", ") { "${it.key}=${it.value.length}" },
+        )
+        built
     }
 
     // ------------------------------------------------------------------ HTTP

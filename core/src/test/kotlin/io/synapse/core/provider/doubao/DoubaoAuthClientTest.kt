@@ -77,13 +77,58 @@ class DoubaoAuthClientTest {
         assertEquals("2", h["sdk-version"])
         assertEquals("60594", h["passport-sdk-version"])
         assertEquals("x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_0", h["passport-sdk-settings"])
-        assertEquals("x-tt-token,sec_user_id", h["passport-sdk-sign"])
+        // 业务请求的 request-tag 是 t=1;n=1（t=0;n=0 只给 verify_pub_key 用）
+        assertEquals("t=1;n=1", h["x-tt-request-tag"])
+        // passport-sdk-sign 是「实际带了哪些凭据」的清单，不是签名：
+        // 匿名发码两样凭据都没有 ⇒ 必须整个头都不出现，不能照抄真机的 22 字符清单。
+        assertFalse(h.containsKey("passport-sdk-sign"), "没带凭据就不该声明带了凭据")
+        assertEquals("", DoubaoAuthClient().sdkSignValue(hasXttToken = false, hasSecUserId = false))
+        assertEquals("x-tt-token", DoubaoAuthClient().sdkSignValue(hasXttToken = true, hasSecUserId = false))
+        assertEquals("sec_user_id", DoubaoAuthClient().sdkSignValue(hasXttToken = false, hasSecUserId = true))
+        assertEquals(
+            "x-tt-token,sec_user_id",
+            DoubaoAuthClient().sdkSignValue(hasXttToken = true, hasSecUserId = true),
+            "两样都带时才等于真机抓包里的 22 字符",
+        )
         assertEquals("application/x-www-form-urlencoded; charset=UTF-8", h["Content-Type"])
         // 没真值就一个动态 guard 头都不发（写死过期值只会让裁决位更差）
         assertFalse(h.containsKey("bd-ticket-guard-client-cert"))
         assertFalse(h.containsKey("bd-ticket-guard-ree-public-key"))
         assertFalse(h.containsKey("bd-ticket-guard-static-sign"))
         assertFalse(h.containsKey("bd-ticket-guard-server-cert-sn"))
+    }
+
+    @Test
+    fun `记住响应下发的 csrf 后再次发码会带上`() {
+        val client = DoubaoAuthClient()
+        // 首次：没有 csrf，头里不能出现（服务端按新会话处理并下发 csrf）
+        assertFalse(client.buildLoginHeaders().containsKey("x-tt-passport-csrf-token"))
+        assertEquals("", client.currentCsrfToken())
+
+        // 服务端 Set-Cookie（真机实测会同时下发 default 与不带后缀两种）
+        client.rememberCsrfFrom(
+            listOf(
+                "passport_csrf_token=4b15654abff6b6ef10fdb1ec92a0f322; Path=/; Domain=.doubao.com; Secure",
+                "passport_csrf_token_default=4b15654abff6b6ef10fdb1ec92a0f322; Path=/; Domain=.doubao.com",
+                "reg-store-region=cn; Path=/",
+            ),
+        )
+        assertEquals("4b15654abff6b6ef10fdb1ec92a0f322", client.currentCsrfToken())
+        assertEquals(
+            "4b15654abff6b6ef10fdb1ec92a0f322",
+            client.buildLoginHeaders()["x-tt-passport-csrf-token"],
+            "第二次请求必须复用服务端下发的 csrf",
+        )
+    }
+
+    @Test
+    fun `空 csrf 不覆盖已记住的值`() {
+        val client = DoubaoAuthClient()
+        client.rememberCsrfFrom(listOf("passport_csrf_token=abc123; Path=/"))
+        // 个别响应会下发清空指令（同名空值），不能把已有状态打坏
+        client.rememberCsrfFrom(listOf("passport_csrf_token=; Max-Age=0", "other=xyz"))
+        assertEquals("abc123", client.currentCsrfToken())
+        assertEquals("abc123", client.buildLoginHeaders()["x-tt-passport-csrf-token"])
     }
 
     @Test

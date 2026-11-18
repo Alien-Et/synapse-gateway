@@ -68,17 +68,21 @@ class DoubaoProvider(
     private val line: () -> String = { LINE_FAST },
     /** 是否固定在一个对话窗口。 */
     private val fixedWindow: () -> Boolean = { true },
+    private val hooks: ProviderHooks = ProviderHooks(),
     /**
      * 登录/发码客户端。
      *
      * `guardHeaders` 接的是设备证明链（TEE Key Attestation）——对应上游「启动期
      * `loadTee()` 备密钥、请求期把产物作为头注入」的引用方式（见 [DoubaoDeviceAttestation]）。
      * 拿不到真值（无 TEE / 证书链为空）时它返回空 map，发码行为与接线前完全一致。
+     *
+     * `verbose` 把发码/登录的**真实请求与响应**接到详细日志：排查 `error_code=7`
+     * 时唯一能和真机抓包逐项对照的就是它。
      */
     private val authClient: DoubaoAuthClient = DoubaoAuthClient(
-        guardHeaders = DoubaoDeviceAttestation().asGuardHeaders(),
+        guardHeaders = doubaoGuardHeaders(hooks),
+        verbose = { message -> hooks.onVerbose("豆包登录", message) },
     ),
-    private val hooks: ProviderHooks = ProviderHooks(),
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) : Provider, io.synapse.core.provider.SmsLoginSupport {
 
@@ -653,5 +657,43 @@ class DoubaoProvider(
         private const val READ_TIMEOUT_MS = 300_000
 
         private const val USER_AGENT = "com.larus.nova/15070040 (Linux; U; Android 16; zh_CN)"
+    }
+}
+
+/**
+ * 发码用的 `bd-ticket-guard-*` 头来源：**真机票据优先，自建 TEE 链兜底**。
+ *
+ * ## 两条路的边界
+ *
+ * - **真机票据**（[DoubaoGuardTicket]）：从豆包 SP 导出的一次性静态值
+ *   （TEE 公钥 / REE 公钥 / 服务端证书 SN），能 1:1 复刻真机 `send_code/v1` 的 6 个头。
+ *   缺点：属于「借用真机设备身份」，服务端证书轮换后 SN 会失效，需要重新导出。
+ * - **自建 TEE 链**（[DoubaoDeviceAttestation]）：本项目自己在 AndroidKeyStore 里生成 TEE 密钥、
+ *   走 `get_client_cert` + `verify_pub_key` 登记，产物同样是一套 guard 头。
+ *   缺点：每一步都可能失败（此前的静默降级就是它），失败时退回「不带 guard 头」。
+ *
+ * 票据文件存在就用票据（实验/对照场景，值可控），不存在就走自建链。
+ * 两条路的失败原因都会经 [ProviderHooks.onVerbose] 打进「详细日志」，不再静默。
+ */
+private fun doubaoGuardHeaders(hooks: ProviderHooks): DeviceGuardHeaders {
+    val attestation = DoubaoDeviceAttestation(verbose = { hooks.onVerbose("豆包登录", it) })
+    val selfBuilt = attestation.asGuardHeaders()
+    return DeviceGuardHeaders {
+        val ticket = DoubaoGuardTicket.read()
+        if (ticket != null) {
+            val headers = DoubaoGuardTicket.headers(ticket)
+            hooks.onVerbose(
+                "豆包登录",
+                "guard: 使用真机票据 ${headers.size} 个头 → " +
+                    headers.entries.joinToString(", ") { "${it.key}=${it.value.length}" },
+            )
+            headers
+        } else {
+            hooks.onVerbose(
+                "豆包登录",
+                "guard: 没有真机票据文件（${DoubaoGuardTicket.DEFAULT_PATH}），回退自建 TEE 链",
+            )
+            selfBuilt.headers()
+        }
     }
 }

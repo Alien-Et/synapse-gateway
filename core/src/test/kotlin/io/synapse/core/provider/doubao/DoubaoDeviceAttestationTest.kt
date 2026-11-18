@@ -272,7 +272,7 @@ class DoubaoDeviceAttestationTest {
     // ------------------------------------------------------------------ 降级纪律
 
     @Test
-    fun `JVM 上没有 AndroidKeyStore 时必须安静降级成空头`() {
+    fun `JVM 上没有 AndroidKeyStore 时降级成软密钥而不是空头`() {
         val tee = TeeKeyStore()
         assertFalse(tee.isAvailable(), "纯 JVM 不该有 AndroidKeyStore")
         assertFailsWith<TeeUnavailableException> { tee.containsAlias("x") }
@@ -280,9 +280,19 @@ class DoubaoDeviceAttestationTest {
 
         val client = DoubaoDeviceAttestation(tee = tee)
         assertFalse(client.available())
-        assertNull(client.prepare())
-        // 关键纪律：拿不到真值就返回空头，绝不发假 guard 头
-        assertTrue(client.asGuardHeaders().headers().isEmpty())
+
+        // 新纪律（docs/18 `18.12）：服务端接受纯软 CSR，所以 TEE 不可用时**降级成软密钥**，
+        // 而不是像以前那样整条链放弃、一个 guard 头都不发。
+        val prepared = assertNotNull(client.prepare(), "TEE 不可用也要产出软密钥材料")
+        assertEquals(88, prepared.teePublicKey.length)
+        assertTrue(prepared.attestCerts.isEmpty(), "软密钥给不出 attest-certs，不能编造")
+
+        // 头必须带齐，且 tee-status 如实写 0（不谎报 1）
+        val headers = client.asGuardHeaders().headers()
+        assertTrue(headers.isNotEmpty(), "软密钥路径也要带 guard 头")
+        assertEquals("0", headers["bd-ticket-guard-tee-status"])
+        assertTrue(headers.containsKey("bd-ticket-guard-client-cert"))
+        assertTrue(headers.containsKey("bd-ticket-guard-ree-public-key"))
     }
 
     // ------------------------------------------------------------------ 工具

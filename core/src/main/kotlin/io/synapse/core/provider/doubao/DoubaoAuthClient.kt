@@ -52,6 +52,33 @@ class DoubaoAuthClient(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     /** 设备票据注入口；默认空实现 = 不带 guard 头（见 [DeviceGuardHeaders]）。 */
     private val guardHeaders: DeviceGuardHeaders = DeviceGuardHeaders { emptyMap() },
+    /**
+     * 会话 Cookie 罐（匿名会话 `odin_tt` / `ttwid` / `passport_csrf_token` …）。
+     *
+     * 真机发码请求**一定带 `Cookie`**；不带 Cookie 的请求在服务端看来是
+     * 「从没打过交道的陌生客户端直接要验证码」，这是 403 / 频控的首要诱因。
+     * 见 [DoubaoSessionCookieJar] 的类注释。
+     */
+    private val cookies: DoubaoSessionCookieJar = DoubaoSessionCookieJar(),
+    /**
+     * 真机设备会话参数 `klink_egdi`（每台设备一份，由豆包 App 在设备注册时生成）。
+     *
+     * 网关无法凭空生成（服务端会校验它与 `cdid/iid/device_id` 是否同源），
+     * 所以这里**默认空串 = 不发这个参数**，而不是照抄一个别人设备的假值。
+     * 需要对齐时由调用方从真机取真值注入。
+     */
+    private val klinkEgdi: String = "",
+    /**
+     * 登录链路调试日志（发码 / 校验各自的真实请求与响应摘要）。
+     *
+     * 只在「详细日志」开启时才会被上层接出来（[io.synapse.core.provider.ProviderHooks.onVerbose]）。
+     * 之所以必须留这个口子：排查 `error_code=7` 这类问题时，「我们到底发了什么头」是唯一
+     * 能和真机抓包逐项对照的东西 —— 没有它只能靠猜。
+     *
+     * Cookie 与签名头**只打 key + 长度**，不打值：对比关心的是「有没有带、带了哪些」，
+     * 值本身属于凭证，没必要落进日志。
+     */
+    private val verbose: (String) -> Unit = {},
 ) {
 
     /** 「选中账号」的 token 前缀：`sel:<sec_uid>`。 */
@@ -61,16 +88,6 @@ class DoubaoAuthClient(
         private const val XOR_KEY = 0x05
         private const val APP_NAME = "nova_ai"
         private const val PASSPORT_SUPPORT_FLOW = "captcha,passport_user_ban,verify"
-
-        /**
-         * 发码请求**不带 csrf**。
-         *
-         * 真机埋点实测 `request_csrf_token=0`（发码请求不带 csrf）、
-         * `response_csrf_token=1`（csrf 是响应才下发的，存进 CsrfTokenManager_sp.xml）。
-         * 早期这里写死一个 hex 值，等于「带了不该带的头」，与抓包相反 —— 已被实测推翻，
-         * 改成空串（空串时整个头省略，服务端按未登录会话处理，才是正确起点）。
-         */
-        private const val CSRF = ""
 
         /**
          * 固定设备身份三件套。
@@ -169,6 +186,9 @@ class DoubaoAuthClient(
      * 返回 [SendResult]，其中的 `encodedMobile` 就是登录时的 `msgid` 载体。
      */
     fun sendSmsCode(phone: String, ccode: String = "86"): SendResult {
+        // 先建匿名会话（真机启动期就会做）：把「陌生客户端」变成「有 odin_tt 的客户端」。
+        // 失败不阻断 —— 拿不到会话就按裸请求继续，行为与接线前一致。
+        runCatching { bootstrapSession() }
         val normalized = normalizePhone(phone, ccode)
         val encodedMobile = xorEncode(normalized)
         val body = form(
@@ -207,7 +227,10 @@ class DoubaoAuthClient(
         if (bizCode != null && bizCode != 0) {
             val desc = json?.objOrNull("data")?.stringOrNull("description")
                 ?: json?.stringOrNull("description").orEmpty()
-            throw DoubaoLoginException("发码失败（error_code=$bizCode）：${desc.ifEmpty { "上游拒绝发送" }}")
+            throw DoubaoLoginException(
+                "发码失败（error_code=$bizCode）：${desc.ifEmpty { "上游拒绝发送" }}" +
+                    guardVerdicts(resp.headers).let { if (it.isEmpty()) "" else "；$it" },
+            )
         }
         return SendResult(encodedMobile = encodedMobile)
     }
@@ -319,15 +342,100 @@ class DoubaoAuthClient(
     ): LoginOutcome = loginBySmsCode(phone, code = "", msgid = msgid, ccode = ccode,
         mobileTicket = mobileTicket, smsCodeKey = smsCodeKey)
 
+    // ------------------------------------------------------------------ csrf
+
+    /**
+     * 服务端下发的 csrf（`passport_csrf_token` / `passport_csrf_token_default`）。
+     *
+     * ## 为什么是「记住上一次响应」而不是写死
+     *
+     * 真机埋点：`request_csrf_token=0` / `response_csrf_token=1` —— 发码请求**首次不带**，
+     * csrf 是**响应**才下发的（真机存进 `CsrfTokenManager_sp.xml`）。所以正确的模型是：
+     *
+     * 1. 第一次发码：`csrfToken` 为空 → 不发 `x-tt-passport-csrf-token`（服务端按新会话处理，
+     *    并顺手下发 csrf）；
+     * 2. 响应回来后从 `Set-Cookie` 里取出 csrf 记住（[rememberCsrfFrom]）；
+     * 3. 后续请求（再次发码 / 校验）自动带上 —— 与上游 `c0#a(cookieHeader, list)`
+     *    的取值顺序完全一致：`passport_csrf_token` → `passport_csrf_token_default` → 内存缓存 → 空。
+     *
+     * 早期代码写死过一个 hex 值，等于「带了不属于本会话的 csrf」，容易被裁决位拉低；
+     * 改成实例级缓存后，值来源与真机同源。
+     */
+    @Volatile
+    private var csrfToken: String = ""
+
+    /**
+     * 从响应的 `Set-Cookie` 里记住 csrf。
+     *
+     * 只认这两个 key（顺序即优先级），值非空才覆盖：空值不擦掉已有的 csrf，
+     * 避免个别响应下发 `passport_csrf_token=; Max-Age=0` 这类清空指令时把状态打坏。
+     */
+    internal fun rememberCsrfFrom(setCookie: List<String>) {
+        for (raw in setCookie) {
+            val first = raw.split(';').firstOrNull()?.trim() ?: continue
+            val eq = first.indexOf('=')
+            if (eq <= 0) continue
+            val name = first.substring(0, eq).trim()
+            val value = first.substring(eq + 1).trim()
+            if (value.isEmpty()) continue
+            if (name == "passport_csrf_token" || name == "passport_csrf_token_default") {
+                csrfToken = value
+            }
+        }
+    }
+
+    /** 当前持有的 csrf（单测用；空串表示还没有）。 */
+    internal fun currentCsrfToken(): String = csrfToken
+
     // ------------------------------------------------------------------ HTTP
 
-    private data class Resp(val status: Int, val data: String, val setCookie: List<String>)
+    private data class Resp(
+        val status: Int,
+        val data: String,
+        val setCookie: List<String>,
+        /** 响应头（小写 key），用于把 `bd-ticket-guard-*` 裁决位带进错误信息。 */
+        val headers: Map<String, String> = emptyMap(),
+    )
 
-    private fun post(path: String, body: String, headers: Map<String, String>): Resp {
+    /** 带上 Cookie 罐后的真实请求头（罐为空时原样返回，不塞空 Cookie）。 */
+    private fun wireHeaders(headers: Map<String, String>): Map<String, String> {
+        val jar = cookies.header()
+        return if (jar.isEmpty()) headers else headers + ("Cookie" to jar)
+    }
+
+    private fun post(
+        path: String,
+        body: String,
+        headers: Map<String, String>,
+        queryExtra: String = "",
+    ): Resp = exchange(path, body, headers, queryExtra)
+
+    /** 匿名会话初始化用的 GET（真机启动期就是先 `GET account/info/v2/` 拿 `odin_tt`）。 */
+    private fun get(path: String, headers: Map<String, String>, queryExtra: String = ""): Resp =
+        exchange(path, body = null, headers = headers, queryExtra = queryExtra)
+
+    private fun exchange(
+        path: String,
+        body: String?,
+        headers: Map<String, String>,
+        queryExtra: String = "",
+    ): Resp {
+        val url = "$BASE/$path?${commonQuery()}$queryExtra"
+        val headers = wireHeaders(headers)
+        // 先记请求：URL / 头（只打 key 与长度）/ body 全文。
+        // body 是明文 form（235B），逐字对齐真机抓包才有对比意义，所以不打码。
+        verbose(
+            buildString {
+                append(if (body == null) "→ GET $url\n" else "→ POST $url\n")
+                append("   headers: ")
+                append(headers.entries.joinToString(", ") { (k, v) -> "$k=${v.length}" })
+                append("\n   body: $body")
+            },
+        )
         val conn = try {
             io.synapse.core.util.HttpSupport.open(
-                url = "$BASE/$path?${commonQuery()}",
-                method = "POST",
+                url = url,
+                method = if (body == null) "GET" else "POST",
                 headers = headers,
                 body = body,
                 connectTimeoutMs = 15_000,
@@ -347,9 +455,60 @@ class DoubaoAuthClient(
             ?.map { it.toString() }
             ?: conn.headerFields?.get("Set-Cookie")?.map { it.toString() }
             ?: emptyList()
+        // 响应头全量留下：`bd-ticket-guard-*` 的裁决位只在头里，
+        // 失败时把它带进错误信息，比「访问太频繁」四个字有用得多。
+        val respHeaders = LinkedHashMap<String, String>()
+        runCatching {
+            conn.headerFields?.forEach { (k, v) ->
+                if (k != null && v.isNotEmpty()) respHeaders[k.lowercase()] = v.joinToString(", ")
+            }
+        }
         conn.disconnect()
+        // 响应侧的 csrf 是**后续请求**唯一的来源（首次发码不带、响应才下发），
+        // 必须在返回前记住，否则第二次发码/校验仍然不带 csrf。
+        rememberCsrfFrom(setCookie)
+        // Cookie 罐同理：匿名会话（odin_tt / ttwid / passport_csrf_token）就是靠
+        // 一次次的 Set-Cookie 攒出来的，不合并的话下个请求还是「陌生客户端」。
+        cookies.merge(setCookie)
+
+        // 响应侧同样记下来：状态码 + 下发了哪些 Cookie（key）+ body 前 600 字。
+        // `error_code=7` 这类业务错误只在 body 里，不记下来就只剩一句「发码失败」。
+        verbose(
+            buildString {
+                append("← $status ")
+                append("setCookie=[")
+                append(setCookie.joinToString(", ") { it.substringBefore('=').trim() })
+                append("] body=")
+                append(bodyText.take(600))
+            },
+        )
         return Resp(status, bodyText, setCookie)
     }
+
+    /**
+     * 匿名会话初始化：真机启动期先 `GET /passport/account/info/v2/?scene=normal`，
+     * 服务端据此下发 `odin_tt`（设备会话 Cookie），**之后所有请求都带着它**。
+     *
+     * 这一步失败**不阻断发码**（返回 false 即可）：它只是把「陌生客户端」变成
+     * 「有会话的客户端」，拿不到就按原来的裸请求继续，绝不因为初始化失败就拒绝服务。
+     */
+    fun bootstrapSession(): Boolean {
+        if (!cookies.isEmpty()) return true
+        val resp = runCatching {
+            get(
+                path = "passport/account/info/v2/",
+                headers = buildLoginHeaders(),
+                queryExtra = "&scene=normal",
+            )
+        }.getOrNull() ?: return false
+        verbose("session: account/info/v2 HTTP ${resp.status} cookies=${cookies.size}")
+        // error_code=13「会话过期」是**预期内**的：匿名态本来就没有登录会话，
+        // 我们要的只是 Set-Cookie 里的 odin_tt，所以这里不看 body。
+        return !cookies.isEmpty()
+    }
+
+    /** 当前会话 Cookie 快照（单测/诊断用）。 */
+    internal fun sessionCookieHeader(): String = cookies.header()
 
     /** 登录时的公共 query（实测：user_is_login=0 & uid=0）。 */
     private fun commonQuery(): String {
@@ -396,7 +555,11 @@ class DoubaoAuthClient(
             "iid" to DEVICE_IID,
             "device_id" to DEVICE_ID,
             "doubao_account_sdk_version" to "1.0.3-alpha.0",
-        )
+        ).apply {
+            // 真机 query 里有 `klink_egdi`（设备会话参数），没有真值就不发 ——
+            // 见构造参数 [klinkEgdi] 的注释。
+            if (klinkEgdi.isNotEmpty()) put("klink_egdi", klinkEgdi)
+        }
         return params.entries.joinToString("&") { (k, v) ->
             "$k=${URLEncoder.encode(v, "UTF-8")}"
         }
@@ -406,16 +569,24 @@ class DoubaoAuthClient(
      * 通用登录头（发码 / 换 token 共用）。
      *
      * - 实测**不需要** `X-SS-STUB`（只在开发者平台出现）；
-     * - `x-tt-passport-csrf-token`：发码请求 `request_csrf_token=0` ⇒ **不带**，
-     *   csrf 是响应才下发的。CSRF 为空串时整个头省略，不发空值骗自己；
+     * - `x-tt-passport-csrf-token`：首次发码 `request_csrf_token=0` ⇒ **不带**；
+     *   响应下发 csrf 后由 [rememberCsrfFrom] 记住，后续请求再带上（空值不发，不骗自己）；
      * - `bd-ticket-guard-version: 3` 只是协议版本声明，**不等于**六件套齐了。
      *   真正决定 403→200 的是 [guardHeaders] 注入的动态票据。
      */
     private fun anonymousHeaders(): Map<String, String> = buildMap {
         put("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
         put("User-Agent", "com.larus.nova/15070040 (Linux; U; Android 16; zh_CN)")
-        put("x-tt-request-tag", "t=0;n=0")
-        if (CSRF.isNotEmpty()) put("x-tt-passport-csrf-token", CSRF)
+        // `x-tt-request-tag` 是「本次请求带了哪些可选块」的存在性标记：
+        // **业务请求（send_code / account/info / one_login）是 `t=1;n=1`**，
+        // `t=0;n=0` 只在 `verify_pub_key` 出现（见 docs/17 §真机头表）。
+        // 之前这里写的是 t=0;n=0，属于把专用值套到业务请求上，本轮按真机对齐。
+        put("x-tt-request-tag", "t=1;n=1")
+        // `x-tt-passport-csrf-token`：**首次发码不带**（真机埋点 request_csrf_token=0），
+        // 响应下发 csrf 后由 [rememberCsrfFrom] 记住，后续请求自动带上 ——
+        // 与上游 `c0#a(cookieHeader, list)` 的两级兜底（passport_csrf_token →
+        // passport_csrf_token_default → 内存缓存 → 空）同一套取值语义。
+        if (csrfToken.isNotEmpty()) put("x-tt-passport-csrf-token", csrfToken)
         put("X-SS-REQ-TICKET", nowMillis().toString())
         put("x-vc-bdturing-sdk-version", "4.1.1.cn")
         put("agent-version", "old")
@@ -426,8 +597,32 @@ class DoubaoAuthClient(
         put("sdk-version", "2")
         put("passport-sdk-version", "60594")
         put("passport-sdk-settings", "x-tt-token,sec_user_id,device_transfer_s_0,device_transfer_ab_0")
-        put("passport-sdk-sign", "x-tt-token,sec_user_id")
+        // `passport-sdk-sign` **不是签名**，是「本次请求实际带了哪些凭据」的逗号清单。
+        // 上游生成点：`com.ss.android.token.TokenFactory`（classes32.dex）——
+        //   有 x-tt-token  → append("x-tt-token,")
+        //   有 sec_user_id → append("sec_user_id,")
+        //   非空则去掉最后一个逗号写进头；空则整个词条不写。
+        // 所以它必须和**实际发出的头**自洽：匿名发码阶段两样凭据都没有，
+        // 就不能声称带了 —— 「声明与实际不符」比「不声明」更容易被判异常。
+        // 依据见 docs/18.20 与《豆包分析/10.passport-sdk-sign定案》。
+        sdkSignValue(hasXttToken = false, hasSecUserId = false)
+            .takeIf { it.isNotEmpty() }
+            ?.let { put("passport-sdk-sign", it) }
     }
+
+    /**
+     * 按**实际携带的凭据**拼 `passport-sdk-sign`（逗号清单，去尾逗号）。
+     *
+     * 取值只有四种：空串 / `x-tt-token` / `sec_user_id` / `x-tt-token,sec_user_id`（22 字符）。
+     * 抓包里真机发码是 22 字符那档 —— 因为真机确实带着 x-tt-token 与 sec_user_id。
+     * 我们匿名发码两样都没有，正确做法是**空串 = 不发这个头**，
+     * 而不是照抄一个 22 字符的假清单。
+     */
+    internal fun sdkSignValue(hasXttToken: Boolean, hasSecUserId: Boolean): String =
+        buildList {
+            if (hasXttToken) add("x-tt-token")
+            if (hasSecUserId) add("sec_user_id")
+        }.joinToString(",")
 
     /**
      * 发码头 = 通用头 + 设备票据注入。
@@ -456,6 +651,19 @@ class DoubaoAuthClient(
     internal fun md5Upper(text: String): String =
         MessageDigest.getInstance("MD5").digest(text.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02X".format(it) }
+
+    /**
+     * 从响应头里挑出 `bd-ticket-guard-*` 的**裁决位**，拼成一行诊断。
+     *
+     * 上游对 guard 材料（TEE 证书 / 静态签名 / key-sign）的判定只出现在响应头里：
+     * `key-sign-result` / `sign-res-static-sign` / `sign-res-static-ts-sign`。
+     * 实测值语义：`2` = 通过、`3`/`4` = 校验失败、`1102`/`1103`/`1104` = 静态签名位。
+     * 把这三项带进错误信息，排查「到底是频控还是 guard 材料被拒」时不用再抓包。
+     */
+    internal fun guardVerdicts(headers: Map<String, String>): String =
+        headers.entries
+            .filter { (k, _) -> k.startsWith("bd-ticket-guard-") && (k.contains("result") || k.contains("sign-res")) }
+            .joinToString(", ") { (k, v) -> "$k=${v}" }
 
     private fun form(vararg pairs: Pair<String, String>): String =
         pairs.joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
