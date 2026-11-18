@@ -187,6 +187,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
         ) {
+            Text(
+                text = "测速结果是最近一次测试记录（重启后保留），不是实时可用性；失败和未测均计入待测。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+
             // 顶部细条流式进度指示
             AnimatedVisibility(
                 visible = state.modelsLoading,
@@ -464,8 +471,12 @@ private fun ModelRow(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
+                    // 列表里只显示模型本名，不显示「供应商/」前缀——那是给下游客户端
+                    // 路由用的标签（`讯飞/xxx模型`），自己看列表时前缀纯属噪音，
+                    // 且分组标题已经标明供应商。复制时仍给完整 fullId，路由不受影响。
+                    val displayName = model.model.name.ifBlank { model.model.id }
                     Text(
-                        text = model.fullId,
+                        text = displayName,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         // fill = false：名字短时紧贴复制图标，不把后面的「已屏蔽」标签推到行尾。
@@ -496,20 +507,18 @@ private fun ModelRow(
                         }
                     }
                 }
-                // 副标题：同样必须单行截断。它是上游给的模型名，长度不可控
-                // （`computer_use_subagent` 这种），不截断就会逐字竖排。
-                Text(
-                    text = buildString {
-                        append(model.model.name)
-                        if (model.model.contextWindow > 0) {
-                            append(" · 上下文 ${model.model.contextWindow}")
-                        }
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                // 副标题：模型本名已上移为标题，这里只补附加信息（上下文窗口等）。
+                // 同样必须单行截断——上游给的值长度不可控，不截断会逐字竖排。
+                // 没有附加信息时整行不渲染，保持列表紧凑（「简化显示」）。
+                if (model.model.contextWindow > 0) {
+                    Text(
+                        text = "上下文 ${model.model.contextWindow}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 // 能力标记：只有上游/供应商明确给了才显示，缺就不渲染（不猜）。
                 // 各家写 extra 的口径不统一（CodeBuddy 写 tools/vision="true"，Loomy 写
                 // tool_call/attachment="1"），这里把同义 key 与两种真假写法都认下，
@@ -608,13 +617,29 @@ private fun ModelRow(
                 }
                 is ModelTestStatus.Success -> {
                     val isFast = testStatus.latencyMs < 5000
-                    Text(
-                        text = "${testStatus.latencyMs}ms",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isFast) Color(0xFF2E7D32) else Color(0xFFEF6C00),
-                        maxLines = 1,
-                    )
+                    // 上下两层：上层延迟数字（一眼可比），下层测速时间（判断这结果有多旧）。
+                    // 时间来自持久化的 testedAtMs，跨重启仍有值；老数据为 0 时不显示下层。
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(1.dp),
+                    ) {
+                        Text(
+                            text = "${testStatus.latencyMs}ms",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isFast) Color(0xFF2E7D32) else Color(0xFFEF6C00),
+                            maxLines = 1,
+                        )
+                        val ago = relativeTestedAgo(testStatus.testedAtMs)
+                        if (ago.isNotEmpty()) {
+                            Text(
+                                text = ago,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
                 is ModelTestStatus.Failed, null -> Unit
             }
@@ -662,7 +687,7 @@ private fun ModelRow(
         // 失败原因：整行宽度、最多两行、超出省略，点开弹窗看完整原文。
         (testStatus as? ModelTestStatus.Failed)?.let { failed ->
             Text(
-                text = "失败：${failed.reason}",
+                text = "最近一次测速失败：${failed.reason}",
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.error,
@@ -754,3 +779,21 @@ private fun ModelSkeletonCard(
  * 会变成「限免至10月31日 0×（至 10月31日 23:59）」，同一日期出现两遍。
  */
 private val DATE_IN_TEXT = Regex("""\d{1,4}\s*[月/-]\s*\d{1,2}\s*[日号]?|\d{4}-\d{2}-\d{2}""")
+
+/**
+ * 测速时间的相对文案（`刚刚` / `12分钟前` / `3小时前` / `2天前`）。
+ *
+ * 传 0 或未来时间返回空串——老数据没有测试时间，不显示比瞎猜「刚刚」诚实。
+ * 只是展示层换算，不参与任何可用性判断。
+ */
+private fun relativeTestedAgo(testedAtMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    if (testedAtMs <= 0L) return ""
+    val delta = nowMs - testedAtMs
+    if (delta < 0L) return "刚刚"
+    return when {
+        delta < 60_000L -> "刚刚"
+        delta < 3_600_000L -> "${delta / 60_000L}分钟前"
+        delta < 86_400_000L -> "${delta / 3_600_000L}小时前"
+        else -> "${delta / 86_400_000L}天前"
+    }
+}

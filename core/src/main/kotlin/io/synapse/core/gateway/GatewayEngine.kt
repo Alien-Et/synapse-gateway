@@ -318,6 +318,15 @@ class GatewayEngine(
         private set
 
     /**
+     * 模型目录与测速结果的持久化层（借鉴 Magpie 的 last-known-good 思路）：
+     * 拉取成功后覆盖落盘，失败绝不覆盖；拉取失败时用本机副本兜底，
+     * 避免一次上游抖动让用户的模型列表突然清空。
+     */
+    private val catalogStore: io.synapse.core.store.ModelCatalogStore by lazy {
+        io.synapse.core.store.ModelCatalogStore(store())
+    }
+
+    /**
      * 共享 I/O 线程池：模型目录、额度查询等会阻塞在网络上的并行任务都走这里。
      * 之前每次请求都 new 一个线程池再 shutdown，短连接 + 线程反复创建销毁纯属浪费；
      * 这里常驻复用，空闲线程 60 秒自行回收，不常占资源。
@@ -2049,7 +2058,23 @@ class GatewayEngine(
 
         val futures = enabledProviders.map { provider ->
             provider.id to ioPool.submit<ProviderModelsChunk> {
-                val chunk = fetchProviderModels(provider)
+                var chunk = fetchProviderModels(provider)
+                // 拉取失败但有账号：顶上「上一次成功目录」的持久化副本（Magpie 的
+                // last-known-good 思路）。没有这一层，一次上游抖动/超时就会让用户列表
+                // 突然清空，表现为「配好的模型全没了」。错误原因仍保留：界面显示
+                // 「拉取失败 + 缓存列表（缓存徽标）」，而不是假装一切都好。
+                if (chunk.error != null && pool.accounts(provider.id).isNotEmpty()) {
+                    val cached = catalogStore.loadCatalog(provider.id)
+                    if (!cached.isNullOrEmpty()) {
+                        logWarn("拉取模型目录失败，回退本机上次成功副本（${provider.id}，${cached.size} 条）")
+                        chunk = ProviderModelsChunk(chunk.providerId, cached, chunk.error)
+                    }
+                }
+                // 本轮真实拉取成功才覆盖落盘；失败绝不覆盖，保住上次成功副本
+                if (chunk.error == null) {
+                    // 成功返回空目录也覆盖旧副本，避免缓存里残留已清空的模型。
+                    catalogStore.saveCatalog(chunk.providerId, chunk.models)
+                }
                 onChunk(chunk)
                 chunk
             }
@@ -2087,6 +2112,11 @@ class GatewayEngine(
         // 屏蔽的模型必须在这里就排掉，否则同名匹配会把它当成可用落点。
         if (aggregated.isNotEmpty()) {
             modelCatalogSnapshot = aggregated.filterNot { modelBlocklist.blocks(it.fullId) }
+        }
+        if (failures.isEmpty()) {
+            // 聚合没有真实失败（无账号不算失败）才刷新成功时间；部分失败保留旧时间，
+            // 让 UI 能在短退避结束后重试，而不会把一次失败伪装成新鲜目录。
+            catalogStore.setLastFetchedAt(System.currentTimeMillis())
         }
         return ModelsCatalog(aggregated, failures)
     }

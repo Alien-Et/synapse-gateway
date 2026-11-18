@@ -505,6 +505,7 @@ private fun MainTabs(
                 state = state,
                 viewModel = viewModel,
                 openTaskCenter = { onSubPage(SubPage.TaskCenter) },
+                onOpenApiSettings = { onSubPage(SubPage.ApiSettings) },
             )
             Tab.Providers -> ProviderListScreen(
                 state = state,

@@ -140,6 +140,7 @@ fun HomeScreen(
     state: AppUiState,
     viewModel: AppViewModel,
     openTaskCenter: () -> Unit,
+    onOpenApiSettings: () -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -179,6 +180,7 @@ fun HomeScreen(
                 clipboard.setText(AnnotatedString(text))
                 SystemPrompt.toast(message)
             },
+            onOpenApiSettings = onOpenApiSettings,
         )
 
         LiveRoutingTopologyCard(state, Modifier.staggeredAppear(1))
@@ -247,6 +249,7 @@ private fun ConsoleCard(
     onStop: () -> Unit,
     onRefreshCredits: () -> Unit,
     onCopy: (String, String) -> Unit,
+    onOpenApiSettings: () -> Unit,
 ) {
     val gold = LocalAppColors.current.goldStart
     SectionCard(modifier = Modifier.staggeredAppear(0)) {
@@ -282,11 +285,21 @@ private fun ConsoleCard(
         }
 
         val localUrl = state.localUrl.ifEmpty { "http://127.0.0.1:${state.port}/v1" }
-        AddressRow("本机", localUrl) { onCopy(localUrl, "已复制本机地址") }
+        AddressRow("本机", localUrl, onCopy = { onCopy(localUrl, "已复制本机地址") })
+        // 局域网有两种「不可用」：开关没开 / 开了但没连 Wi-Fi。
+        // 前者是用户能自己解决的设置问题，必须给出「去哪开」的指引并支持点击直达；
+        // 后者是网络环境问题，照实说未连 Wi-Fi 就行。混成一句会让人白等。
+        val lanExposed = state.settings.exposeLan
         AddressRow(
             label = "局域网",
-            value = lanUrl ?: "未连接 Wi-Fi（局域网不可用）",
+            value = when {
+                !lanExposed -> "监听未开启 · 点此到设置打开"
+                lanUrl == null -> "未连接 Wi-Fi（局域网不可用）"
+                else -> lanUrl
+            },
             onCopy = lanUrl?.let { url -> { onCopy(url, "已复制局域网地址") } },
+            onClick = if (!lanExposed) onOpenApiSettings else null,
+            valueTint = if (!lanExposed) MaterialTheme.colorScheme.primary else null,
         )
 
         Row(
@@ -1923,13 +1936,22 @@ private fun StatusDot(running: Boolean) {
 
 /** 一行接入地址：浅灰底 8dp 圆角 + 等宽地址 + 黑色复制小块。 */
 @Composable
-private fun AddressRow(label: String, value: String, onCopy: (() -> Unit)?) {
+private fun AddressRow(
+    label: String,
+    value: String,
+    onCopy: (() -> Unit)?,
+    /** 整行可点击（如「局域网监听未开启」时点击直达设置页）；为空表示纯展示。 */
+    onClick: (() -> Unit)? = null,
+    /** 值文本的自定义颜色；null 用默认前景色。 */
+    valueTint: Color? = null,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .border(1.dp, MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.shapes.small)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1943,7 +1965,7 @@ private fun AddressRow(label: String, value: String, onCopy: (() -> Unit)?) {
         Text(
             text = value,
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            color = MaterialTheme.colorScheme.onSurface,
+            color = valueTint ?: MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),

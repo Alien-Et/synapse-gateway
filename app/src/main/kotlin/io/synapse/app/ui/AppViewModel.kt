@@ -56,6 +56,8 @@ import io.synapse.core.provider.custom.CustomProvider
 import io.synapse.core.provider.RoutedModel
 import io.synapse.core.provider.trae.TraeProvider
 import io.synapse.core.store.KeyValueStore
+import io.synapse.core.store.ModelCatalogStore
+import io.synapse.core.store.PersistedTestResult
 import io.synapse.core.update.ApkDownloader
 import io.synapse.core.update.MirrorSpeedTest
 import io.synapse.core.update.UpdateRepository
@@ -99,6 +101,15 @@ private const val MODEL_TEST_PARALLELISM = 4
 
 /** 模型页隐藏屏蔽项的持久化偏好键。 */
 private const val KEY_HIDE_BLOCKED_MODELS = "settings/models.hideBlocked"
+
+/**
+ * 模型目录「过期后台刷新」的 TTL：距上次成功聚合超过 30 分钟后，
+ * 回到前台 / 进入模型页才静默重拉（Magpie 同款策略——平时不打上游，过期了才补一次）。
+ */
+private const val MODEL_CATALOG_TTL_MS = 30 * 60_000L
+
+/** 拉取失败后的重试退避：至少等 5 分钟再后台重试，避免每次回前台都打上游。 */
+private const val MODEL_CATALOG_RETRY_MS = 5 * 60_000L
 
 /** 金色渐变落盘去抖：取色拖动每帧都调 setGoldColors，攒一小段再写加密存储。 */
 private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
@@ -228,8 +239,8 @@ sealed interface UpdateDownload {
 
 sealed interface ModelTestStatus {
     data object Testing : ModelTestStatus
-    data class Success(val latencyMs: Long) : ModelTestStatus
-    data class Failed(val reason: String) : ModelTestStatus
+    data class Success(val latencyMs: Long, val testedAtMs: Long = 0L) : ModelTestStatus
+    data class Failed(val reason: String, val testedAtMs: Long = 0L) : ModelTestStatus
 }
 
 /**
@@ -429,6 +440,9 @@ class AppViewModel(
     private val appearance = AppearanceStore(engine.store())
     private val updateStore = UpdateStore(engine.store())
 
+    /** 模型目录 / 测速结果的持久化层（last-known-good 副本 + 跨重启测速结果）。 */
+    private val catalogStore = ModelCatalogStore(engine.store())
+
     private val _state = MutableStateFlow(
         AppUiState(
             dynamicColor = appearance.dynamicColor(),
@@ -465,9 +479,16 @@ class AppViewModel(
     @Volatile
     private var modelsGeneration = 0
 
-    /** 上次发起模型目录刷新的时刻；为 0 表示本次进程内还没拉过。 */
+    /** 上次成功刷新目录的时刻；从加密存储恢复，作为 30 分钟 TTL 基准。 */
     @Volatile
     private var modelsFetchedAt = 0L
+
+    /** 最近一次刷新尝试时刻；失败时按 5 分钟退避，跨重启保留。 */
+    @Volatile
+    private var modelsRefreshAttemptAt = 0L
+
+    /** 串行化加密存储的全量测速结果写入，避免并发完成时旧快照覆盖新快照。 */
+    private val testResultPersistenceLock = Any()
 
     /**
      * 请求日志的实时监听器（声明位置必须在 init 之前：init 里要注册它）。
@@ -532,6 +553,29 @@ class AppViewModel(
         }
         // 调用记录与统计改在引擎后台预载（冷启动不阻塞主线程），就绪后补一次刷新
         engine.setStartupDataReadyListener { refresh() }
+        // 冷启动恢复（借鉴 Magpie 的 last-known-good）：
+        // ① 先展示上一次成功目录的持久化副本（整组带「缓存」徽标，不是冒充实时数据）；
+        // ② 跨重启恢复测速结果（成功延迟 / 失败原因），分组统计（可用/待测）不因重启清零。
+        // 两者都在 IO 线程读加密存储；时间戳用于 TTL 与失败重试退避判断。
+        viewModelScope.launch(Dispatchers.IO) {
+            val cached = runCatching { catalogStore.loadAll().values.flatten() }
+                .getOrDefault(emptyList())
+            val persistedTests = runCatching { catalogStore.loadTestResults() }.getOrDefault(emptyMap())
+            val tests = persistedTests.mapValues { (_, v) ->
+                if (v.success) ModelTestStatus.Success(v.latencyMs, v.testedAt)
+                else ModelTestStatus.Failed(v.reason.ifEmpty { "连接失败" }, v.testedAt)
+            }
+            val fetchedAt = catalogStore.lastFetchedAt()
+            val attemptAt = catalogStore.lastAttemptAt()
+            withContext(Dispatchers.Main) {
+                modelsFetchedAt = maxOf(modelsFetchedAt, fetchedAt)
+                // 若恢复缓存与前台触发刷新并发，旧的持久化尝试时刻不能覆盖本进程新尝试。
+                modelsRefreshAttemptAt = maxOf(modelsRefreshAttemptAt, attemptAt)
+                if (cached.isNotEmpty() || tests.isNotEmpty()) {
+                    _state.value = _state.value.copy(models = cached, modelTestLatencies = tests)
+                }
+            }
+        }
         refresh()
         // 自动检查更新：默认开启，每天最多一次，失败静默
         maybeAutoCheckUpdate()
@@ -663,12 +707,14 @@ class AppViewModel(
 
     fun refreshModels(silent: Boolean = false, forceRefresh: Boolean = false) {
         val gen = ++modelsGeneration
-        modelsFetchedAt = System.currentTimeMillis()
+        val attemptAt = System.currentTimeMillis()
+        modelsRefreshAttemptAt = attemptAt
         viewModelScope.launch {
             // 已有目录可展示时降级为静默：旧数据立即可见，新数据分批到货逐组替换，不弹全屏 busy
             val quiet = silent || _state.value.models.isNotEmpty()
             if (!quiet) _state.value = _state.value.copy(busy = "正在拉取模型目录")
             val participants = withContext(Dispatchers.IO) {
+                catalogStore.setLastAttemptAt(attemptAt)
                 engine.providers().filter { it.enabled }.map { it.id }
             }
             if (gen != modelsGeneration) return@launch
@@ -686,24 +732,41 @@ class AppViewModel(
                     }
                 }.fold(
                     { it to "" },
-                    { ModelsCatalog(emptyList()) to (it.message ?: "拉取失败") },
+                    { error ->
+                        val reason = error.message ?: "拉取失败"
+                        ModelsCatalog(emptyList(), participants.associateWith { reason }) to reason
+                    },
                 )
             }
             if (gen != modelsGeneration) return@launch
+            modelsRefreshAttemptAt = attemptAt
+            modelsFetchedAt = withContext(Dispatchers.IO) { catalogStore.lastFetchedAt() }
             // 变更对比要在**覆盖 models 之前**做：上一轮目录就是此刻 state 里的 models。
-            // 只有「本轮真的拉到了目录」的供应商参与比较（拉取失败 ≠ 已下架，见 ModelCatalogChanges）。
+            // 只有「本轮真的拉到有效目录」的供应商参与比较（拉取失败 ≠ 已下架）。
             val previous = _state.value.models
-            val refreshed = participants.toSet() - catalog.failures.keys
+            val failedProviders = catalog.failures.keys
+            val refreshed = participants.toSet() - failedProviders
+            // Engine 的失败供应商通常已用持久化副本回退；这里再对超时/意外异常兜底，
+            // 优先保留当前界面旧列表，其次读取磁盘 LKG，绝不因整体异常覆盖成空列表。
+            val retained = withContext(Dispatchers.IO) {
+                failedProviders.flatMap { providerId ->
+                    val returned = catalog.models.filter { it.providerId == providerId }
+                    if (returned.isNotEmpty()) returned
+                    else previous.filter { it.providerId == providerId }
+                        .ifEmpty { catalogStore.loadCatalog(providerId).orEmpty() }
+                }
+            }
+            val finalModels = catalog.models.filterNot { it.providerId in failedProviders } + retained
             val changes = ModelCatalogChanges.of(
                 previous = previous,
-                current = catalog.models,
+                current = finalModels,
                 refreshedProviders = refreshed,
                 firstLoad = previous.isEmpty(),
             )
-            // 全部完成后用最终聚合覆盖：失败供应商的旧条目随之清除（与整体刷新语义一致）
+            // 成功供应商替换为本轮结果，失败供应商保留 last-known-good 目录副本。
             val providerError = catalog.failures.entries.joinToString("；") { "${it.key}：${it.value}" }
             _state.value = _state.value.copy(
-                models = catalog.models,
+                models = finalModels,
                 modelsLoading = false,
                 modelsError = listOf(error, providerError).filter { it.isNotEmpty() }.joinToString("；"),
                 busy = if (quiet) _state.value.busy else "",
@@ -711,16 +774,37 @@ class AppViewModel(
             )
             // 变更摘要同时进运行日志：模型页的提示是一闪而过的，日志能回看「哪天少了什么」
             changes.summary().takeIf { it.isNotEmpty() }?.let { engine.noteForUser(it) }
+            // 本轮真正拉到目录的供应商：已下架模型的旧测速结果一并清掉（内存 + 落盘），
+            // 让「可用/待测」统计跟着真实目录走。拉取失败（含缓存兜底）的供应商不动——
+            // 它的列表不代表真实下架，删了结果反而丢信息。
+            if (refreshed.isNotEmpty()) {
+                val ownerOf = previous.associate { it.fullId to it.providerId }
+                val liveByProvider = finalModels.groupBy({ it.providerId }, { it.fullId })
+                val stale = _state.value.modelTestLatencies.keys.filter { fullId ->
+                    val owner = ownerOf[fullId] ?: return@filter false
+                    owner in refreshed && fullId !in (liveByProvider[owner] ?: emptySet())
+                }
+                if (stale.isNotEmpty()) {
+                    _state.update { it.copy(modelTestLatencies = it.modelTestLatencies - stale.toSet()) }
+                    persistTestResults()
+                }
+            }
         }
     }
 
     /**
-     * 进入模型页时首次拉取：本次进程内还没拉过才拉，之后进入不再自动重拉。
+     * 进入模型页 / 回到前台时检查：本次进程内还没拉过才拉；已有目录但超过
+     * [MODEL_CATALOG_TTL_MS]（30 分钟）时静默后台刷新。
      *
-     * 模型目录只在「首次进入模型页」与「手动刷新」时更新，避免每次切页都打上游。
+     * 过期刷新不阻塞用户浏览：旧列表（含冷启动恢复的缓存副本）先可见，
+     * 新数据逐组到货替换；某家拉取失败时引擎层会用「本机上次成功副本」兜底，
+     * 列表不会突然清空。
      */
     fun ensureModelsLoaded() {
-        if (modelsFetchedAt == 0L) refreshModels()
+        val now = System.currentTimeMillis()
+        val stale = modelsFetchedAt == 0L || now - modelsFetchedAt > MODEL_CATALOG_TTL_MS
+        val retryReady = modelsRefreshAttemptAt == 0L || now - modelsRefreshAttemptAt >= MODEL_CATALOG_RETRY_MS
+        if (stale && retryReady) refreshModels(silent = _state.value.models.isNotEmpty())
     }
 
     /** 流式增量：把一个供应商就绪的目录合并进 state（已在主线程串行执行，替换该供应商旧条目）。 */
@@ -747,12 +831,15 @@ class AppViewModel(
             val result = withContext(Dispatchers.IO) {
                 engine.probeModelLatency(routedModel.providerId, routedModel.model.id, routedModel.region)
             }
+            val testedAt = System.currentTimeMillis()
             val status = if (result.latencyMs > 0) {
-                ModelTestStatus.Success(result.latencyMs)
+                ModelTestStatus.Success(result.latencyMs, testedAt)
             } else {
-                ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" })
+                ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" }, testedAt)
             }
             _state.update { it.copy(modelTestLatencies = it.modelTestLatencies + (fullId to status)) }
+            // 终态落盘：重启后仍能看到这条模型的最近一次测速结果
+            persistTestResults()
         }
     }
 
@@ -779,10 +866,11 @@ class AppViewModel(
                 async(Dispatchers.IO) {
                     gate.withPermit {
                         val result = engine.probeModelLatency(model.providerId, model.model.id, model.region)
+                        val testedAt = System.currentTimeMillis()
                         val status = if (result.latencyMs > 0) {
-                            ModelTestStatus.Success(result.latencyMs)
+                            ModelTestStatus.Success(result.latencyMs, testedAt)
                         } else {
-                            ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" })
+                            ModelTestStatus.Failed(result.error.ifEmpty { "连接失败" }, testedAt)
                         }
                         // 逐个回写：界面能看到结果一条条亮起来，而不是最后一次性刷新。
                         // 必须走 update 的 CAS 合并，不能「读 map → 改 → 整体写回」：
@@ -792,10 +880,44 @@ class AppViewModel(
                 }
             }
             jobs.awaitAll()
+            // 一键测速整轮结束后统一落盘：逐条写会让几十个并发结果触发几十次同步加密 commit
+            persistTestResults()
             val failed = _state.value.modelTestLatencies.values.count { it is ModelTestStatus.Failed }
             _state.value = _state.value.copy(
                 notice = "测速完成：${targets.size} 个模型，其中 $failed 个失败",
             )
+        }
+    }
+
+    /**
+     * 把当前内存里的测速结果落盘（加密存储）。
+     *
+     * 只存 Success / Failed 两种终态，「测试中」不入盘——重启后它没有任何意义。
+     * 全量覆盖写：单条结果几十字节，几百个模型也就十几 KB，比逐条键值写简单且原子。
+     * 每次「测速状态发生终态变化」后调用（单条测完 / 一键测速整轮结束 / 屏蔽清理）。
+     */
+    private fun persistTestResults() {
+        viewModelScope.launch(Dispatchers.IO) {
+            synchronized(testResultPersistenceLock) {
+                runCatching {
+                    val persisted = _state.value.modelTestLatencies.mapNotNull { (fullId, status) ->
+                    when (status) {
+                        is ModelTestStatus.Success -> fullId to PersistedTestResult(
+                            success = true,
+                            latencyMs = status.latencyMs,
+                            testedAt = status.testedAtMs,
+                        )
+                        is ModelTestStatus.Failed -> fullId to PersistedTestResult(
+                            success = false,
+                            reason = status.reason,
+                            testedAt = status.testedAtMs,
+                        )
+                        else -> null
+                    }
+                }.toMap()
+                    catalogStore.saveTestResults(persisted)
+                }
+            }
         }
     }
 
@@ -820,6 +942,8 @@ class AppViewModel(
                     notice = if (added == 0) "这些模型已经在屏蔽名单里了" else "已屏蔽 $added 个不可用模型",
                 )
             }
+            // 屏蔽后这些失败结果已无保留价值，落盘时同步移除
+            persistTestResults()
         }
     }
 
@@ -2344,6 +2468,10 @@ class AppViewModel(
             val ran = withContext(Dispatchers.IO) { engine.maybeRunAutoCheckinOnLaunch() }
             if (ran) refresh()
         }
+        // 模型目录过期检查（Magpie 同款）：距上次成功聚合超过 30 分钟时静默后台刷新。
+        // 冷启动时 modelsFetchedAt 由持久化层恢复，因此「隔天再打开」也会在这里触发刷新，
+        // 而刷新失败时引擎用本机副本兜底——列表永远先可见、不清空。
+        ensureModelsLoaded()
         val pending = pendingVerification ?: return
         pendingVerification = null
         refreshCredits(pending.first, pending.second)
