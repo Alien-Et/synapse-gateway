@@ -97,6 +97,9 @@ private const val SMS_RESEND_INTERVAL_MS = 60_000L
 /** 「一键测速」的并发上限：每次探测都是一次真实上游请求，并发过高会自己把自己限流。 */
 private const val MODEL_TEST_PARALLELISM = 4
 
+/** 模型页隐藏屏蔽项的持久化偏好键。 */
+private const val KEY_HIDE_BLOCKED_MODELS = "settings/models.hideBlocked"
+
 /** 金色渐变落盘去抖：取色拖动每帧都调 setGoldColors，攒一小段再写加密存储。 */
 private const val GOLD_PERSIST_DEBOUNCE_MS = 300L
 
@@ -326,6 +329,8 @@ data class AppUiState(
     val modelLoadStates: Map<String, ModelLoadState> = emptyMap(),
     /** 模型测速状态，键为 `model.fullId`。 */
     val modelTestLatencies: Map<String, ModelTestStatus> = emptyMap(),
+    /** 模型页「隐藏被屏蔽模型」的本地持久化偏好。 */
+    val hideBlockedModels: Boolean = false,
     val calls: List<CallRecord> = emptyList(),
     /** 存储中的记录条数（含未载入内存的）。 */
     val storedCalls: Int = 0,
@@ -433,6 +438,7 @@ class AppViewModel(
             backgroundOverride = appearance.backgroundHex()?.let { parseHexColor(it) },
             goldStart = parseHexColor(appearance.goldStartHex()) ?: defaultAppColors.goldStart,
             goldEnd = parseHexColor(appearance.goldEndHex()) ?: defaultAppColors.goldEnd,
+            hideBlockedModels = engine.store().read(KEY_HIDE_BLOCKED_MODELS) == "1",
         ),
     )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
@@ -813,6 +819,18 @@ class AppViewModel(
                     modelTestLatencies = it.modelTestLatencies - failed.toSet(),
                     notice = if (added == 0) "这些模型已经在屏蔽名单里了" else "已屏蔽 $added 个不可用模型",
                 )
+            }
+        }
+    }
+
+    /** 更新并持久化模型页「隐藏被屏蔽模型」偏好。 */
+    fun setHideBlockedModels(hidden: Boolean) {
+        _state.update { it.copy(hideBlockedModels = hidden) }
+        // 这是轻量的用户偏好，使用现有加密 KeyValueStore；IO 线程同步落盘，
+        // 确保切换后即使立即退出/重启，状态也能恢复。
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                engine.store().write(KEY_HIDE_BLOCKED_MODELS, if (hidden) "1" else "0")
             }
         }
     }

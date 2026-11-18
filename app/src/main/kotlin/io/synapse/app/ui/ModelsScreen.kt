@@ -87,9 +87,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     // 换成纯值 Set 后 save/restore 不碰快照，问题消失；读取仍在组合作用域，
     // 折叠变化会正常触发列表重建。
     var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
-    // 一键隐藏被屏蔽的模型：只影响本页展示，不动屏蔽状态本身。
-    // 用 rememberSaveable 记住，退出再进来保持上次的选择。
-    var hideBlocked by rememberSaveable { mutableStateOf(false) }
+    // 隐藏被屏蔽状态来自 AppUiState，并由 ViewModel 写入加密本地设置，跨进程重启持久保留。
     // 测试失败原文可能很长，行内只展示截断提示，全文点开弹窗查看
     var failureDetail by remember { mutableStateOf<String?>(null) }
 
@@ -158,19 +156,19 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                 val blockedTotal = state.models.count { state.modelBlocklist.blocks(it.fullId) }
                 if (blockedTotal > 0) {
                     Icon(
-                        imageVector = if (hideBlocked) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                        contentDescription = if (hideBlocked) {
+                        imageVector = if (state.hideBlockedModels) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        contentDescription = if (state.hideBlockedModels) {
                             "显示被屏蔽的模型（$blockedTotal 个）"
                         } else {
                             "隐藏被屏蔽的模型（$blockedTotal 个）"
                         },
-                        tint = if (hideBlocked) {
+                        tint = if (state.hideBlockedModels) {
                             MaterialTheme.colorScheme.primary
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
                         modifier = Modifier
-                            .bouncyClick { hideBlocked = !hideBlocked }
+                            .bouncyClick { viewModel.setHideBlockedModels(!state.hideBlockedModels) }
                             .padding(6.dp),
                     )
                 }
@@ -276,7 +274,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     // 这一组本轮没拉到上游、用的是上次成功的清单：明确标注，不能让旧清单冒充实时结果
                     val cachedGroup = models.isNotEmpty() && models.all { it.cached }
                     item(key = "header-$routePrefix") {
-                        Row(
+                        // 标题与统计分两行；总数已放在可用比例分母中，不再重复显示。
+                        val groupBlocked = models.count { state.modelBlocklist.blocks(it.fullId) }
+                        val groupUsable = models.count {
+                            !state.modelBlocklist.blocks(it.fullId) &&
+                                state.modelTestLatencies[it.fullId] is ModelTestStatus.Success
+                        }
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(MaterialTheme.shapes.large)
@@ -289,62 +293,55 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                     }
                                 }
                                 .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Icon(
-                                imageVector = if (routePrefix in collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                                contentDescription = if (routePrefix in collapsed) "展开" else "折叠",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            SectionLabel(title)
-                            if (cachedGroup) {
-                                Row(
-                                    modifier = Modifier
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
-                                        .padding(start = 6.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    Box(
-                                        Modifier.breathingDot(MaterialTheme.colorScheme.error, size = 6.dp),
-                                    )
-                                    Text(
-                                        text = "缓存",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
-                                    )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(
+                                    imageVector = if (routePrefix in collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                    contentDescription = if (routePrefix in collapsed) "展开" else "折叠",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                                SectionLabel(title)
+                                if (cachedGroup) {
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
+                                            .padding(start = 6.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Box(
+                                            Modifier.breathingDot(MaterialTheme.colorScheme.error, size = 6.dp),
+                                        )
+                                        Text(
+                                            text = "缓存",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                        )
+                                    }
+                                } else {
+                                    Box(Modifier.breathingDot(MaterialTheme.colorScheme.tertiary, size = 6.dp))
                                 }
-                            } else {
-                                Box(Modifier.breathingDot(MaterialTheme.colorScheme.tertiary, size = 6.dp))
+                                Box(Modifier.weight(1f))
                             }
-                            Box(Modifier.weight(1f))
-                            // 分组统计：可用 / 不可用 / 屏蔽 / 总数。
-                            // 屏蔽优先于测试结果 —— 被屏蔽的模型既不对外暴露也不参与路由，
-                            // 它的测试结果没有意义，归到「屏蔽」里更准确。
-                            val groupBlocked = models.count { state.modelBlocklist.blocks(it.fullId) }
-                            val groupUsable = models.count {
-                                !state.modelBlocklist.blocks(it.fullId) &&
-                                    state.modelTestLatencies[it.fullId] is ModelTestStatus.Success
-                            }
-                            val groupFailed = models.count {
-                                !state.modelBlocklist.blocks(it.fullId) &&
-                                    state.modelTestLatencies[it.fullId] is ModelTestStatus.Failed
-                            }
+                            // 可用比例分母使用该组全部模型；屏蔽数独立显示。
                             GroupStats(
                                 usable = groupUsable,
-                                failed = groupFailed,
-                                blocked = groupBlocked,
                                 total = models.size,
+                                blocked = groupBlocked,
                             )
                         }
                     }
                     // 折叠的分组跳过其模型行：只渲染分组头，模型行即时收起
                     if (routePrefix in collapsed) continue
                     // 一键隐藏被屏蔽：只影响列表展示，屏蔽状态本身不动
-                    val visibleModels = if (hideBlocked) {
+                    val visibleModels = if (state.hideBlockedModels) {
                         models.filterNot { state.modelBlocklist.blocks(it.fullId) }
                     } else {
                         models
@@ -396,21 +393,22 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
 }
 
 /**
- * 分组统计：`8 可用 · 2 不可用 · 2 屏蔽 · 共 12`。
+ * 分组统计第二行：`2/10 可用 · 屏蔽 3`。
  *
- * 三个计数分别上色（可用=主色、不可用=错误色、屏蔽=中性色），
- * 一眼能看出这组是「大部分可用」还是「大面积挂了」。
+ * 只显示测速成功数 / 总模型数与屏蔽数；不单列失败数，避免把尚未测速、临时限流或网络故障
+ * 混成一个看似确定的「不可用」结论。屏蔽数独立显示且不从总数分母中剔除。
  */
 @Composable
-private fun GroupStats(usable: Int, failed: Int, blocked: Int, total: Int) {
+private fun GroupStats(usable: Int, total: Int, blocked: Int) {
     Text(
         text = buildAnnotatedString {
-            withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary)) { append("$usable 可用") }
+            withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary)) {
+                append("$usable/$total 可用")
+            }
             append(" · ")
-            withStyle(SpanStyle(color = MaterialTheme.colorScheme.error)) { append("$failed 不可用") }
-            append(" · ")
-            withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)) { append("$blocked 屏蔽") }
-            append(" · 共 $total")
+            withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)) {
+                append("屏蔽 $blocked")
+            }
         },
         style = MaterialTheme.typography.labelSmall,
         maxLines = 1,
