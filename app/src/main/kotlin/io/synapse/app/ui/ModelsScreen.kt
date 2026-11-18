@@ -274,12 +274,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     // 这一组本轮没拉到上游、用的是上次成功的清单：明确标注，不能让旧清单冒充实时结果
                     val cachedGroup = models.isNotEmpty() && models.all { it.cached }
                     item(key = "header-$routePrefix") {
-                        // 标题与统计分两行；总数已放在可用比例分母中，不再重复显示。
+                        // 标题与统计分两行；测速成功数、待测数、屏蔽数三个数相加正好等于总数。
                         val groupBlocked = models.count { state.modelBlocklist.blocks(it.fullId) }
                         val groupUsable = models.count {
                             !state.modelBlocklist.blocks(it.fullId) &&
                                 state.modelTestLatencies[it.fullId] is ModelTestStatus.Success
                         }
+                        val groupUntested = models.size - groupBlocked - groupUsable
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -330,9 +331,10 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 }
                                 Box(Modifier.weight(1f))
                             }
-                            // 可用比例分母使用该组全部模型；屏蔽数独立显示。
+                            // 三个计数口径统一：测速成功 + 待测 + 屏蔽 = 该组模型总数，不存在分子分母错配。
                             GroupStats(
-                                usable = groupUsable,
+                                tested = groupUsable,
+                                untested = groupUntested,
                                 total = models.size,
                                 blocked = groupBlocked,
                             )
@@ -393,17 +395,22 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
 }
 
 /**
- * 分组统计第二行：`2/10 可用 · 屏蔽 3`。
+ * 分组统计第二行：`3/10 测速成功 · 待测 5 · 屏蔽 2`。
  *
- * 只显示测速成功数 / 总模型数与屏蔽数；不单列失败数，避免把尚未测速、临时限流或网络故障
- * 混成一个看似确定的「不可用」结论。屏蔽数独立显示且不从总数分母中剔除。
+ * 三个计数口径统一：测速成功数 + 待测数 + 屏蔽数 = 该组模型总数，不存在分子分母错配。
+ * 待测数用减法得出（总数 − 测速成功 − 屏蔽），不替用户下「未测即可用」的结论；
+ * 「测速成功」也刻意不写成「可用」，避免把未测模型误读成可用。
  */
 @Composable
-private fun GroupStats(usable: Int, total: Int, blocked: Int) {
+private fun GroupStats(tested: Int, untested: Int, total: Int, blocked: Int) {
     Text(
         text = buildAnnotatedString {
             withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary)) {
-                append("$usable/$total 可用")
+                append("$tested/$total 测速成功")
+            }
+            append(" · ")
+            withStyle(SpanStyle(color = MaterialTheme.colorScheme.tertiary)) {
+                append("待测 $untested")
             }
             append(" · ")
             withStyle(SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)) {
