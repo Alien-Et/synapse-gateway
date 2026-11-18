@@ -1,15 +1,14 @@
 name: Android Release
 
-# 打标签即发版：push 一个 v* 标签 → 自动构建、跑测试、发布 Release、上传 APK，
-# 并把标签版本同步回 main。
+# 打标签即发版：push 一个 v* 标签 → 校验版本号 → 构建、跑测试、发布 Release、上传 APK。
 #
-# 版本号规则（标签即版本，无需先改文件）：
-#   - 标签必须是 v<主>.<次>.<修订>，例如 v3.0.0
-#   - 打标签时工作流直接把这个版本号写进 app/build.gradle.kts 再构建，
-#     所以只要推标签，包里的版本号必然与标签一致
-#   - versionCode 取「当前值 + 1」与「主*10000 + 次*100 + 修订」中的较大者，
-#     保证单调递增且不会重复
-#   - 发布成功后把该版本号提交回 main，下次打标签直接覆盖即可
+# 版本号规则（源码是唯一来源，标签必须与源码完全对称）：
+#   - 标签必须是 v<主>.<次>.<修订>，例如 v3.1.0
+#   - 打标签前必须先在本地改好 app/build.gradle.kts：
+#       versionName = "<主>.<次>.<修订>"
+#       versionCode = 主*10000 + 次*100 + 修订
+#   - 工作流只做校验：标签与源码不一致、或 versionCode 不符合换算规则，直接失败，
+#     绝不静默改写文件，也绝不回写 main
 #
 # 也支持手动触发（workflow_dispatch）：用当前 build.gradle.kts 里的版本号直接发版。
 on:
@@ -36,59 +35,44 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          # 生成 changelog 需要上一个 tag 到本次的完整历史；
-          # 递增版本号后要 push 回 main，需要完整分支信息
+          # 生成 changelog 需要上一个 tag 到本次的完整历史与全部标签
           fetch-depth: 0
-          # 用内置 token，后续 push 提交才有权限
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 按标签写入版本号
+      - name: 校验标签与源码版本一致
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF_NAME#v}"
 
-          # 只接受纯 主.次.修订 三段数字：v2.23.0 可以，v2.23.0-beta / v2.23 不行。
-          # 通配符 v[0-9]+.[0-9]+.[0-9]+ 会把 v2.23.0-beta 也带进来，所以这里再卡一次。
+          # 只接受纯 主.次.修订 三段数字：v3.1.0 可以，v3.1.0-beta / v3.1 不行。
+          # 通配符 v[0-9]+.[0-9]+.[0-9]+ 会把 v3.1.0-beta 也带进来，所以这里再卡一次。
           if ! echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::标签格式不对：$GITHUB_REF_NAME"
-            echo "::error::只接受 v<主>.<次>.<修订> 三段数字，例如 v2.23.0"
+            echo "::error::只接受 v<主>.<次>.<修订> 三段数字，例如 v3.1.0"
             exit 1
           fi
 
-          # 标签即版本：以标签为准，直接写进 build.gradle.kts。
-          # 这样只需要 push 一个 vX.Y.Z 标签，不必先手动改文件，版本号永远与标签一致。
+          # 版本号的唯一来源是源码。工作流不再改写文件、不再回写 main，
+          # 标签与 app/build.gradle.kts 必须完全对称，否则直接失败。
           GRADLE_VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
-          echo "标签版本：$TAG"
-          echo "build.gradle.kts 原值：$GRADLE_VERSION"
+          GRADLE_CODE=$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          EXPECT_CODE=$(echo "$TAG" | awk -F. '{print $1 * 10000 + $2 * 100 + $3}')
+
+          echo "标签版本：$TAG（换算 versionCode = $EXPECT_CODE）"
+          echo "源码版本：$GRADLE_VERSION（versionCode = $GRADLE_CODE）"
 
           if [ "$TAG" != "$GRADLE_VERSION" ]; then
-            echo "版本号不一致，按标签 $TAG 写入 build.gradle.kts"
-
-            # versionName 直接取标签值
-            sed -i -E "s/^(\s*versionName = )\"[^\"]*\"\s*$/\1\"$TAG\"/" app/build.gradle.kts
-
-            # versionCode 不能倒退，也不能重复：取「当前值 + 1」与「按语义化换算值」中的较大者。
-            # 换算规则：主 * 10000 + 次 * 100 + 修订，保证 versionCode 随版本单调递增。
-            CUR_CODE=$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
-            CALC_CODE=$(echo "$TAG" | awk -F. '{print $1 * 10000 + $2 * 100 + $3}')
-            if [ "$CALC_CODE" -gt "$CUR_CODE" ]; then
-              NEXT_CODE=$CALC_CODE
-            else
-              NEXT_CODE=$((CUR_CODE + 1))
-            fi
-            sed -i -E "s/^(\s*versionCode = )[0-9]+\s*$/\1$NEXT_CODE/" app/build.gradle.kts
-
-            # 校验替换真的生效，否则中断
-            NEW_NAME=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"(.*)".*/\1/')
-            NEW_CODE=$(grep -m1 'versionCode' app/build.gradle.kts | sed -E 's/[^0-9]*([0-9]+).*/\1/')
-            if [ "$NEW_NAME" != "$TAG" ] || [ "$NEW_CODE" != "$NEXT_CODE" ]; then
-              echo "::error::版本号写入失败（期望 $TAG/$NEXT_CODE，实际 $NEW_NAME/$NEW_CODE）"
-              exit 1
-            fi
-            echo "已写入：versionName=$TAG versionCode=$NEXT_CODE"
-          else
-            echo "标签与 build.gradle.kts 版本一致，无需改写"
+            echo "::error::标签与源码版本不一致：标签是 v$TAG，但 app/build.gradle.kts 里写的是 $GRADLE_VERSION"
+            echo "::error::请先在本地把 versionName 改成 \"$TAG\" 并提交，再打标签"
+            exit 1
           fi
+
+          if [ "$GRADLE_CODE" != "$EXPECT_CODE" ]; then
+            echo "::error::versionCode 不符合换算规则：应为 $EXPECT_CODE（主*10000 + 次*100 + 修订），实际是 $GRADLE_CODE"
+            exit 1
+          fi
+
+          echo "校验通过：v$TAG / versionCode $GRADLE_CODE"
 
       - uses: actions/setup-java@v5
         with:
@@ -165,28 +149,4 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           body: ${{ steps.changelog.outputs.body }}
           files: synapse-${{ steps.version.outputs.version }}-release.apk
-
-      - name: 把标签版本写回 main
-        run: |
-          set -e
-          CUR_VERSION="${{ steps.version.outputs.version }}"
-          CUR_CODE="${{ steps.version.outputs.code }}"
-
-          echo "标签版本：$CUR_VERSION ($CUR_CODE)"
-
-          # 标签即版本：不再自动递增，直接把标签对应的版本号写回 main。
-          # 这样 main 上的 versionName 始终等于最近一次发版的标签，下次打标签直接覆盖即可。
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app/build.gradle.kts
-          if git diff --cached --quiet; then
-            echo "版本号与标签一致，无需提交"
-          else
-            # 多行提交信息用多个 -m 拼接（YAML 里直接写多行字符串会破坏缩进解析）
-            git commit \
-              -m "chore(release): 同步版本号 $CUR_VERSION (versionCode $CUR_CODE)" \
-              -m "由 Android Release 工作流在发布 v$CUR_VERSION 后同步标签版本。下次发版直接打标签即可，工作流会按标签写版本号。"
-            # 标签触发时 HEAD 是游离头，必须显式推回 main 分支
-            git push origin HEAD:main
-          fi
 

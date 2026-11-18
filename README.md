@@ -754,32 +754,38 @@ Android 端凭证经 Android Keystore 加密后存入应用私有目录；命令
 
 本地 debug 与云端 release 使用**同一套 keystore**，可互相覆盖升级，配置不丢。
 
-### 发版：打标签即完成
+### 发版：先改版本号，再打标签
 
-版本号由标签决定，**不需要先改文件**：
+**版本号只有一个来源：`app/build.gradle.kts`。** 工作流只校验，不改写文件、不回写 main。
 
 ```sh
-# 标签按**仓库已有序列**递增，打之前先查一遍：
-#   git ls-remote --tags origin
-git tag -a v3.0.9 -m "v3.0.9"
-git push origin v3.0.9
+# 1. 改版本号（versionName 与标签一致，versionCode 按换算规则）
+#    versionName = "3.1.0"
+#    versionCode = 30100          # 主*10000 + 次*100 + 修订
+git commit -am "chore(release): 同步版本号 3.1.0 (versionCode 30100)"
+
+# 2. 标签按**仓库已有序列**递增，打之前先查一遍：
+#      git ls-remote --tags origin
+git tag -a v3.1.0 -m "v3.1.0"
+git push origin main v3.1.0
 ```
 
 工作流自动完成：
 
-1. 把标签版本写进 `build.gradle.kts`（`versionName` 取标签，`versionCode` 自动递增）
+1. 校验 `标签 == versionName` 且 `versionCode == 主*10000 + 次*100 + 修订`，不一致**直接失败**
 2. 跑单元测试
 3. 打签名 release 包
 4. 创建 GitHub Release，上传 `synapse-<版本>-release.apk`
-5. 把版本号同步回 main
 
-标签必须是纯 `v<主>.<次>.<修订>` 三段数字，`v3.0.1-beta` 会被拒绝。
+**不会再往 main 推提交**，本地、远端、标签三者始终一致。
+
+标签必须是纯 `v<主>.<次>.<修订>` 三段数字，`v3.1.0-beta` 会被拒绝。
 
 ### 工作流
 
 | 工作流 | 触发 | 作用 |
 |---|---|---|
-| `android-release.yml` | push `v*` 标签 / 手动 | 测试 → 打包 → 发 Release → 同步版本号 |
+| `android-release.yml` | push `v*` 标签 / 手动 | 校验版本号 → 测试 → 打包 → 发 Release |
 | `build-release.yml` | 手动 | 只测试 + 打包，产物作为 artifact |
 
 ### Secrets
