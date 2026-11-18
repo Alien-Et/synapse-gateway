@@ -15,10 +15,11 @@ class DoubaoAuthClientTest {
 
     @Test
     fun `XOR 编码与真实抓包一致`() {
-        // 实测：+8613600000001 → 2e3d3334363d3030363030303031
+        // 占位测试号（非真实号码）：+8613800138000 → 2e3d3334363d353534363d353535
+        // XOR 0x05 的编码规则与真机抓包验证过；样本值已脱敏，密文随之重算。
         assertEquals(
-            "2e3d3334363d3030363030303031",
-            DoubaoAuthClient.xorEncode("+8613600000001"),
+            "2e3d3334363d353534363d353535",
+            DoubaoAuthClient.xorEncode("+8613800138000"),
         )
         // 实测：验证码 259670 → 37303c333235
         assertEquals("37303c333235", DoubaoAuthClient.xorEncode("259670"))
@@ -172,7 +173,8 @@ class DoubaoAuthClientTest {
         // 真机 send_code 抓包：body(235B) → STUB 逐字节一致（不是随机值）
         val body = "terminal_type=3&app_name=nova_ai&auto_read=0&account_sdk_source=app&" +
             "passport_support_flow=captcha%2Cpassport_user_ban%2Cverify&unbind_exist=35&" +
-            "mix_mode=1&os_type=4&mobile=2e3d3334363d3030363030303031&is6Digits=1&" +
+            // 占位测试号（非真实号码）的 XOR 密文，MD5 随之重算
+            "mix_mode=1&os_type=4&mobile=2e3d3334363d353534363d353535&is6Digits=1&" +
             "multi_login=1&type=3731"
         assertEquals("D1E29E3416F5007C8002FAD64452DCA4", DoubaoAuthClient().md5Upper(body))
     }

@@ -205,8 +205,8 @@ class DoubaoAuthClient(
             "multi_login" to "1",
             "type" to xorEncode("24"),
         )
-        // X-SS-STUB = MD5(body).upper()。抓包逐字节验证过（不是随机值）：
-        //   body(235B) → D1E29E3416F5007C8002FAD64452DCA4 == 抓包的 STUB。
+        // X-SS-STUB = MD5(body).upper()。抓包逐字节验证过：它是 body 的 MD5 大写，
+        // 不是随机值；样本值已脱敏，此处不再写死具体抓包摘要。
         // 之前注释写「实测不需要 STUB」是被坏抓包脚本骗了，已推翻。
         val headers = buildLoginHeaders() + ("X-SS-STUB" to md5Upper(body))
         val resp = post("passport/mobile/send_code/v1/", body, headers)
