@@ -344,6 +344,15 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 // 反而失去「扫视」的意义。
                                 expanded = expandedCallId == record.id,
                                 compact = compactWhileScrolling,
+                                // 最终账号动态解析：改名后列表立刻跟着变
+                                accountLabel = { rec ->
+                                    state.accounts
+                                        .firstOrNull { it.providerId == rec.providerId && it.uid == rec.accountUid }
+                                        ?.displayName
+                                        ?: rec.finalAccount.ifEmpty {
+                                            rec.accountNickname.ifEmpty { rec.accountUid }
+                                        }
+                                },
                                 onToggleExpand = {
                                     expandedCallId = if (expandedCallId == record.id) null else record.id
                                 },
@@ -529,6 +538,14 @@ private fun CallRow(
     expanded: Boolean,
     /** 滚动中的紧凑模式：只留「色条 + 模型名 + 耗时 + 时间」一行。 */
     compact: Boolean,
+    /**
+     * 最终账号的展示名解析（按 providerId + uid 查当前账号）。
+     *
+     * 记录里存的是**历史快照**（`finalAccount` / `accountNickname`），
+     * 用户改名后不会跟着变——所以要动态解析，只有查不到（账号已删/老记录无 uid）
+     * 时才回落到快照。
+     */
+    accountLabel: (CallRecord) -> String,
     onToggleExpand: () -> Unit,
     onLongClick: () -> Unit,
     /** 展开时按需加载完整原文（与浮窗共用同一条加载路径）。 */
@@ -536,10 +553,9 @@ private fun CallRow(
 ) {
     val ok = record.status == CallStatus.SUCCESS
     val tone = statusColor(record.status)
-    // 最终落在哪个账号：老记录没有 finalAccount，回落到 accountNickname / uid
-    val finalName = record.finalAccount.ifEmpty {
-        record.accountNickname.ifEmpty { record.accountUid }
-    }
+    // 最终落在哪个账号：优先按 uid 查当前账号（改名后立刻生效），
+    // 查不到才回落到记录里的历史快照
+    val finalName = accountLabel(record)
     // 区域不同 = 故障转移；两边都有值时才比较（非区域型供应商两个都是空串 → 路由）
     val crossRegion = record.routeRegion.isNotEmpty() &&
         record.finalAccountRegion.isNotEmpty() &&
@@ -721,10 +737,12 @@ private fun CallRow(
                 )
             }
 
-            // ---- 错误摘要：折叠时最多 1 行，展开看全文 ----
+            // ---- 错误摘要：折叠时只给一行，展开看全文 ----
+            // ⚠️ 必须按字符截断，不能只给 maxLines：Compose 会为整段文本做换行测量，
+            // 上游错误原文可能几千字符（整段 HTML / JSON），只靠 maxLines 照样卡主线程。
             if (record.error.isNotEmpty() && !expanded) {
                 Text(
-                    text = record.error,
+                    text = record.error.take(ERROR_PREVIEW_CHARS),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     maxLines = 1,
@@ -782,7 +800,9 @@ private fun CallExpandedDetail(
     ) {
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
 
-        // 账号链路：成功时给「最终账号 + 路上折了谁」，失败时给全部试过的
+        // 账号链路：成功时给「最终账号 + 路上折了谁」，失败时给全部试过的。
+        // ⚠️ 这一行是**历史快照**（attemptedAccounts 只存昵称、不存 uid），
+        // 账号改名后不会跟着变；改名只影响「最终账号」那一行（按 uid 实时解析）。
         if (record.attemptedAccounts.isNotEmpty()) {
             DetailKv(
                 "账号链路",
@@ -815,8 +835,15 @@ private fun CallExpandedDetail(
             )
         }
 
+        // 错误全文用可折叠块，而不是普通 DetailKv：
+        // 上游错误原文可能几千字符，直接塞进 Text 会拖死换行测量。
         if (record.error.isNotEmpty()) {
-            DetailKv("错误", record.error, MaterialTheme.colorScheme.error)
+            ExpandableTextBlock(
+                title = "错误",
+                body = record.error,
+                note = null,
+                onCopy = { clipboard.setText(AnnotatedString(record.error)) },
+            )
         }
 
         // 三段原文：与浮窗一致，按需加载，可复制
@@ -868,6 +895,23 @@ private fun DetailKv(key: String, value: String, valueColor: Color? = null) {
  * 默认只显示前几行（原文动辄几万字符，直接铺开会把卡片撑成一屏高），
  * 点标题展开全文。复制按钮始终可用，不需要先展开。
  */
+/**
+ * 展开区里可折叠的原文块。
+ *
+ * ## ⚠️ 必须按字符截断，不能只靠 maxLines
+ *
+ * 曾经用 `maxLines = 6` 限制显示行数，以为这样就只测量 6 行。**错**：
+ * Compose 的 `Text` 会为**整段文本**做换行测量（`minikin::breakLineGreedy`），
+ * `maxLines` 只是把测量结果裁掉，计算量一点没省。请求原文动辄几万到几十万字符，
+ * 一展开就把主线程卡死 → ANR（崩溃栈全在 `libminikin.so` 的换行计算里）。
+ *
+ * 所以这里**先按字符数截断**，再交给 `Text`：
+ * - 收起：只渲染前 [COLLAPSED_CHARS] 个字符
+ * - 展开：每次多加载 [PAGE_CHARS] 个字符，用户点「继续加载」才继续
+ *
+ * 这样任何一次测量都只面对几万字符以内的文本，主线程不会被拖死。
+ * 复制按钮始终拿**完整原文**（`body` 本身没有被截断）。
+ */
 @Composable
 private fun ExpandableTextBlock(
     title: String,
@@ -875,7 +919,10 @@ private fun ExpandableTextBlock(
     note: String?,
     onCopy: () -> Unit,
 ) {
-    var open by remember(body) { mutableStateOf(false) }
+    // 当前渲染到多少字符。key 用 body 保证换了记录就重置。
+    var shownChars by remember(body) { mutableStateOf(COLLAPSED_CHARS) }
+    val visible = body.take(shownChars)
+    val hasMore = shownChars < body.length
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -883,17 +930,13 @@ private fun ExpandableTextBlock(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = if (open) "$title ▾" else "$title ▸",
+                text = title,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .clip(MaterialTheme.shapes.extraSmall)
-                    .clickable { open = !open }
-                    .padding(vertical = 2.dp),
             )
             Text(
-                text = "${body.length} 字符",
+                text = if (hasMore) "${body.length} 字符" else "${body.length} 字符 · 全部",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
             )
@@ -909,13 +952,26 @@ private fun ExpandableTextBlock(
             )
         }
         Text(
-            text = body,
+            text = visible,
             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            // 收起时最多 6 行；展开后不限行（外层 Column 在 LazyColumn 里，会自然撑开）
-            maxLines = if (open) Int.MAX_VALUE else 6,
-            overflow = TextOverflow.Ellipsis,
         )
+        if (hasMore) {
+            val remaining = body.length - shownChars
+            Text(
+                text = if (remaining > PAGE_CHARS) {
+                    "继续加载 $PAGE_CHARS 字符（还有 $remaining）▾"
+                } else {
+                    "展开剩余 $remaining 字符 ▾"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.extraSmall)
+                    .clickable { shownChars += PAGE_CHARS }
+                    .padding(vertical = 3.dp),
+            )
+        }
         note?.let {
             Text(
                 text = it,
@@ -925,6 +981,25 @@ private fun ExpandableTextBlock(
         }
     }
 }
+
+/**
+ * 收起时渲染的字符数。
+ *
+ * 取 2000：与旧 `DetailBlock` 的 `PREVIEW_CHARS` 一致，是实测在手机上
+ * 既不卡（测量量可控）又能看到足够上下文的量级。
+ */
+private const val COLLAPSED_CHARS = 2_000
+
+/** 每次「继续加载」新增的字符数。分页而不是一次全给，避免一次测量几十万字符。 */
+private const val PAGE_CHARS = 20_000
+
+/**
+ * 概览层错误摘要的截断长度。
+ *
+ * 只显示一行，但**必须先截断**：`maxLines` 不会减少换行测量的计算量，
+ * 一段几千字符的上游错误原文照样能把主线程拖到 ANR。
+ */
+private const val ERROR_PREVIEW_CHARS = 300
 
 /**
  * 相对时间文案（`刚刚` / `3分钟前` / `2小时前` / `昨天` / `3天前`）。

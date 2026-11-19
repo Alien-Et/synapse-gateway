@@ -705,7 +705,21 @@ private fun LiveRoutingTopologyCard(state: AppUiState, modifier: Modifier = Modi
         )
 
         // 块 2：最近一个请求的路由流水
-        RecentCallRoutingFlow(state.calls.firstOrNull()) { id -> state.providerOf(id)?.displayName ?: id }
+        // 账号名与供应商名一样**动态解析**，不直接用记录里的历史快照：
+        // 用户改了账号名之后，历史记录里的 accountNickname 还是旧昵称，
+        // 首页就会显示「改了名但这里没变」——这正是曾经的问题。
+        RecentCallRoutingFlow(
+            call = state.calls.firstOrNull(),
+            providerLabel = { id -> state.providerOf(id)?.displayName ?: id },
+            accountLabel = { record ->
+                // 优先按 providerId + uid 查当前账号（displayName 已实现「自定义名 > 昵称 > uid」）；
+                // 账号已被删除/记录里没有 uid 时，才回落到历史快照。
+                state.accounts
+                    .firstOrNull { it.providerId == record.providerId && it.uid == record.accountUid }
+                    ?.displayName
+                    ?: record.accountNickname.ifEmpty { record.accountUid.ifEmpty { "默认账号" } }
+            },
+        )
 
         HorizontalDivider(
             color = MaterialTheme.colorScheme.outlineVariant,
@@ -1531,7 +1545,20 @@ private fun GatewayHubNode(
  * 3. 结果 <成功/失败/中断> · HTTP <httpStatus> · 耗时 <x.x s> · tokens <in>→<out>
  */
 @Composable
-private fun RecentCallRoutingFlow(call: CallRecord?, providerLabel: (String) -> String = { it }) {
+private fun RecentCallRoutingFlow(
+    call: CallRecord?,
+    providerLabel: (String) -> String = { it },
+    /**
+     * 账号展示名解析。
+     *
+     * 默认用记录里的历史快照，但首页会传一个「查当前账号」的实现——
+     * 账号改名后历史记录里的 `accountNickname` 不会跟着变，
+     * 直接显示快照就会出现「改了名这里还是老名字」。
+     */
+    accountLabel: (CallRecord) -> String = {
+        it.accountNickname.ifEmpty { it.accountUid.ifEmpty { "默认账号" } }
+    },
+) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = "最近路由记录 · LATEST DISPATCH",
@@ -1564,7 +1591,7 @@ private fun RecentCallRoutingFlow(call: CallRecord?, providerLabel: (String) -> 
         }
 
         val modelName = call.model.ifEmpty { "未记录" }
-        val accountDisplay = call.accountNickname.ifEmpty { call.accountUid.ifEmpty { "默认账号" } }
+        val accountDisplay = accountLabel(call)
         val durationText = formatDuration(call.durationMillis)
         val promptTokensStr = formatTokens(call.promptTokens)
         val completionTokensStr = formatTokens(call.completionTokens)
