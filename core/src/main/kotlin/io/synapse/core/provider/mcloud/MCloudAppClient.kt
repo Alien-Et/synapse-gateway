@@ -508,6 +508,33 @@ data class MCloudDevice(
             "(KHTML, like Gecko) Version/4.0 Chrome/158.0.8127.2 Mobile Safari/537.36 " +
             "MCloudApp/13.2.5 AppLanguage/zh-CN"
 
+    /**
+     * `chat/config/get`（模型能力配置）用的两个设备头。
+     *
+     * 抓包实测（`移动云盘Ai接口抓包数据.har`）两个头形态不同，**必须分开**：
+     * - `x-DeviceInfo`：`||36|13.2.5||机型|uuid||android 16|||||`（第二段是 WebView 内核版本）
+     * - `x-yun-client-info`：`||1|13.2.5||机型|uuid||android 16|||||`
+     *
+     * 设备标识是 **UUID 形态**（`9a685a0e-dbf5-44ac-951d-49113aae3de3`），
+     * 不是 [info] 里的 32 位 hex。发错形态上游不报参数错误，而是回
+     * 「资源不存在」（`01000005`）——看起来像接口不存在，极难排查。
+     */
+    val webviewClientInfo: String
+        get() = "||1|13.2.5||$model|$uuidDeviceId||android 16|||||"
+
+    /** 同上，`x-DeviceInfo` 专用：第二段是 WebView 内核版本 36。 */
+    val webviewDeviceInfo: String
+        get() = "||36|13.2.5||$model|$uuidDeviceId||android 16|||||"
+
+    /** 设备标识的 UUID 形态：把 32 位 hex 按 8-4-4-4-12 切开。 */
+    private val uuidDeviceId: String
+        get() {
+            val hex = deviceId.lowercase().replace("-", "")
+            if (hex.length < 32) return hex
+            return "${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-" +
+                "${hex.substring(16, 20)}-${hex.substring(20, 32)}"
+        }
+
     private fun deviceIdLower(): String = deviceId.lowercase()
 
     /** `UEpFMTEw` == base64("PJE110")，H5 侧把机型名 base64 了。 */

@@ -71,6 +71,15 @@ object MCloudConstants {
     /** 用 Basic 凭证换长期 apikey + modelUrl + 模型清单。 */
     const val PATH_APIKEY_GET = "/api/llm/apikey/get"
 
+    /**
+     * 模型能力配置（上下文长度 / 联网 / 思考）。
+     *
+     * `apikey/get` 只给倍率，不给上下文；这个接口的 `modelList[].maxInputLength`
+     * 才是权威的输入上限，`enableNetworkSearch` / `enableSetThinking` 还能顺带补能力标记。
+     * 与 `apikey/get` 共用同一套 Basic 凭证。
+     */
+    const val PATH_CHAT_CONFIG_GET = "/api/outer/assistant/chat/config/get"
+
     /** 对话（拼在 modelUrl 上，兜底用）。 */
     const val PATH_CHAT_COMPLETIONS = "/v1/chat/completions"
 

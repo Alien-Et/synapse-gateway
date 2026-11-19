@@ -2,6 +2,7 @@ package io.synapse.core.provider.mcloud
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import io.synapse.core.util.bool
 import io.synapse.core.util.long
 import io.synapse.core.util.str
 
@@ -117,6 +118,17 @@ data class MCloudModelInfo(
     val tokenRatio: String = "",
     /** 图标地址，界面可选展示。 */
     val iconUrl: String = "",
+    /**
+     * 输入上限（上下文窗口，token 数）。
+     *
+     * 来自 `chat/config/get` 的 `maxInputLength`，`apikey/get` 不提供。
+     * 0 表示上游没给（或拉取失败），界面按「无上下文信息」处理，不拿常量猜。
+     */
+    val maxInputLength: Long = 0L,
+    /** 是否支持联网搜索（`chat/config/get` 的 `enableNetworkSearch`）。 */
+    val enableNetworkSearch: Boolean = false,
+    /** 是否支持思考模式（`chat/config/get` 的 `enableSetThinking`）。 */
+    val enableSetThinking: Boolean = false,
 ) {
     fun toJson(): JsonObject = JsonObject().apply {
         addProperty("code", code)
@@ -124,6 +136,9 @@ data class MCloudModelInfo(
         addProperty("ability", ability)
         addProperty("tokenRatio", tokenRatio)
         addProperty("iconUrl", iconUrl)
+        addProperty("maxInputLength", maxInputLength)
+        addProperty("enableNetworkSearch", enableNetworkSearch)
+        addProperty("enableSetThinking", enableSetThinking)
     }
 
     companion object {
@@ -133,6 +148,10 @@ data class MCloudModelInfo(
             ability = obj.str("ability"),
             tokenRatio = obj.str("tokenRatio"),
             iconUrl = obj.str("iconUrl"),
+            // 旧版本落盘的账号没有这三个字段：缺省即「未知/不支持」，不报错。
+            maxInputLength = obj.long("maxInputLength"),
+            enableNetworkSearch = obj.bool("enableNetworkSearch"),
+            enableSetThinking = obj.bool("enableSetThinking"),
         )
     }
 }

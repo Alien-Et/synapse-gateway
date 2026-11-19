@@ -51,13 +51,27 @@ class MCloudProvider(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val hooks: ProviderHooks = ProviderHooks(),
     private val authClient: MCloudAuthClient = MCloudAuthClient(),
-    private val keyClient: MCloudKeyClient = MCloudKeyClient(),
+    /**
+     * 换 Key / 补模型能力的客户端。
+     *
+     * 设备指纹必须与登录链路用同一个（`MCloudProvider.device()`）：上游按设备做风控，
+     * 换一个设备串去补拉能力，轻则拿不到数据，重则被判定异常。
+     */
+    keyClientOverride: MCloudKeyClient? = null,
     private val chatClient: MCloudChatClient = MCloudChatClient(),
     /** App 端国密接口；会员中心的发码接口已废弃，登录实际走这条。 */
     private val appClient: MCloudAppClient = MCloudAppClient(),
     /** 额度查询（AI tokens 权益）。 */
     private val creditClient: MCloudCreditClient = MCloudCreditClient(),
 ) : Provider, SmsLoginSupport, HumanCheckSupport {
+
+    /** 换 Key 客户端：默认复用本 Provider 的稳定设备号，失败原因进运行日志。 */
+    private val keyClient: MCloudKeyClient by lazy {
+        keyClientOverride ?: MCloudKeyClient(
+            device = device(),
+            onConfigError = { hooks.onLog("灵犀 $it") },
+        )
+    }
 
     init {
         // 把详细日志接到 provider 的 hooks 上，排查 thirdlogin 这类「上游拒绝」问题时
@@ -68,6 +82,15 @@ class MCloudProvider(
     override val id: String = ID
     override val displayName: String = "灵犀"
     override val authKind: AuthKind = AuthKind.SMS_CODE
+
+    /**
+     * 补拉模型能力信息的失败冷却（epoch ms）。
+     *
+     * 补拉是「老账号升级」的一次性动作，但上游长期失败时不能每次刷新目录都重试一遍——
+     * 那会让刷新凭空多等一个超时。失败后 30 分钟内不再尝试，用户点刷新时若已过冷却会再试。
+     */
+    @Volatile
+    private var modelMetaRetryAfterMs = 0L
     override val capabilities: Set<ProviderCapability> = setOf(
         ProviderCapability.CREDIT_REFRESH,
         // 消耗明细：上游 getAiTokenConsumptionRecords 能给出逐条 tokens 记录
@@ -121,24 +144,80 @@ class MCloudProvider(
         if (mcloud.models.isEmpty()) {
             return ProviderModelCatalogView(emptyList(), fromFallback = true, error = "这个账号还没拉到模型清单，请点刷新")
         }
+        // 老版本落盘的账号只有倍率、没有上下文/能力（那时 apikey/get 还没并上
+        // chat/config/get）。这里补拉一次并落盘，用户不必重新登录。
+        //
+        // ⚠️ 补拉依赖 Basic 凭证，而 Basic 只有 4 小时有效期：
+        // - Basic 还新鲜 → 直接补拉；
+        // - Basic 已过期但理论上还能续 → 先走 refreshAccount 换新 Basic（新 Basic 才能补拉）；
+        // - 续不上（Basic 也彻底过期）→ 不白等超时，记一条日志说明「需重新登录才能补上下文」。
+        // 判据用「全都没有上下文」：只要有任意一条带上来了，说明已经补过，不再打上游。
+        val now = nowMillis()
+        val needMeta = mcloud.models.none { it.maxInputLength > 0 }
+        val enriched = if (needMeta && now >= modelMetaRetryAfterMs) {
+            val usable = ensureFreshBasic(mcloud, now) ?: mcloud
+            if (usable !== mcloud) {
+                // 续期成功：新 Basic 才允许补拉
+                keyClient.enrichModelMeta(usable)?.also { fresh ->
+                    modelMetaRetryAfterMs = 0L
+                    hooks.onAccountUpdated(toProviderAccount(fresh))
+                    hooks.onLog("灵犀 已补充模型上下文与能力信息（${fresh.phone}）")
+                } ?: usable.also { modelMetaRetryAfterMs = now + MODEL_META_RETRY_MS }
+            } else if (mcloud.canAutoRefresh(now)) {
+                keyClient.enrichModelMeta(mcloud)?.also { fresh ->
+                    modelMetaRetryAfterMs = 0L
+                    hooks.onAccountUpdated(toProviderAccount(fresh))
+                    hooks.onLog("灵犀 已补充模型上下文与能力信息（${fresh.phone}）")
+                } ?: mcloud.also { modelMetaRetryAfterMs = now + MODEL_META_RETRY_MS }
+            } else {
+                // Basic 已过期且无法自动续：补拉必然失败，不浪费一次超时。
+                // 用户下次自动续期/重新登录时会顺带补上（refreshKey 走 fetchKey 已含补拉）。
+                modelMetaRetryAfterMs = now + MODEL_META_RETRY_MS
+                hooks.onLog("灵犀 模型缺少上下文信息：Basic 凭证已过期，续期或重新登录后自动补齐")
+                mcloud
+            }
+        } else {
+            mcloud
+        }
         return ProviderModelCatalogView(
-            models = mcloud.models.map { m ->
+            models = enriched.models.map { m ->
                 ProviderModel(
                     id = m.code,
                     name = m.name.ifEmpty { m.code },
-                    contextWindow = 0,
+                    // 上下文窗口来自 chat/config/get 的 maxInputLength；上游没给就是 0，
+                    // 界面按「无上下文信息」处理，不拿常量猜。
+                    contextWindow = m.maxInputLength,
                     extra = buildMap {
                         if (m.ability.isNotEmpty()) put("ability", m.ability)
                         // 倍率与腾讯/字节/讯飞共用同一套 extra 字段名，界面渲染逻辑才能复用
                         val rate = formatRate(m.tokenRatio)
                         if (rate.isNotEmpty()) put("rate", rate + "×")
                         if (m.iconUrl.isNotEmpty()) put("iconUrl", m.iconUrl)
+                        // 能力标记：模型页的 tags 认 search / reasoning 两个 key
+                        if (m.enableNetworkSearch) put("search", "true")
+                        if (m.enableSetThinking) put("reasoning", "true")
                     },
                 )
             },
             fromFallback = false,
             error = "",
         )
+    }
+
+    /**
+     * 保证 Basic 凭证可用：临期或已过期时尝试续期，成功返回新账号，失败返回 null。
+     *
+     * 与 [refreshAccount] 的分工：那个是给引擎的「按需保鲜」入口（有 skew 判断），
+     * 这个是补拉上下文前的**强制**前置条件——补拉没有可用 Basic 就必然失败，
+     * 所以这里不看 skew，只要快到期就换。
+     */
+    private fun ensureFreshBasic(account: MCloudAccount, nowMillis: Long): MCloudAccount? {
+        if (account.basicCredential.isEmpty()) return null
+        // 还剩 10 分钟以上就够用，不必换
+        if (account.basicExpiresAtMillis - nowMillis > 10 * 60_000L) return null
+        return runCatching { keyClient.refreshKey(account, nowMillis) }
+            .onFailure { hooks.onLog("灵犀 Basic 凭证续期失败（${account.phone}）：${it.message}") }
+            .getOrNull()
     }
 
     /** 把上游给的倍率字符串规整成展示用（`0.18` → `0.18`，`1.0` → `1`）。 */
@@ -607,5 +686,8 @@ class MCloudProvider(
 
         /** 消耗明细最大条数（与商汤积分流水保持一致）。 */
         private const val POINTS_BILLS_LIMIT = 20
+
+        /** 补拉模型能力失败后的冷却：5 分钟（够避免刷新风暴，又不至于让用户以为改动没生效）。 */
+        private const val MODEL_META_RETRY_MS = 5 * 60_000L
     }
 }

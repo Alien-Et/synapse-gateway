@@ -95,7 +95,7 @@ class MCloudLoginFlowTest {
     private fun provider() = MCloudProvider(
         nowMillis = { 1_000_000L },
         authClient = MCloudAuthClient(vipBase = "http://127.0.0.1:${server.address.port}"),
-        keyClient = MCloudKeyClient(aiBase = "http://127.0.0.1:${server.address.port}"),
+        keyClientOverride = MCloudKeyClient(aiBase = "http://127.0.0.1:${server.address.port}"),
         appClient = MCloudAppClient(
             userBase = "http://127.0.0.1:${server.address.port}",
             orchesBase = "http://127.0.0.1:${server.address.port}",
