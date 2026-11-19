@@ -36,8 +36,8 @@ android {
         applicationId = "io.synapse.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 30100
-        versionName = "3.1.0"
+        versionCode = 30101
+        versionName = "3.1.1"
     }
 
     buildFeatures {
