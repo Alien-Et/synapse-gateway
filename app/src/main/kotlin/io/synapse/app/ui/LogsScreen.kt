@@ -93,10 +93,15 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
     var tab by remember { mutableStateOf(LogTab.Calls) }
     var filter by remember { mutableStateOf(StatusFilter.ALL) }
     var levelFilter by remember { mutableStateOf(LevelFilter.ALL) }
-    var detail by remember { mutableStateOf<CallRecord?>(null) }
     // 请求日志的详情：与调用记录分开（那边是结构化字段，这边是一段自由文本）
     var detailLog by remember { mutableStateOf<LogLine?>(null) }
     var showLogSettings by remember { mutableStateOf(false) }
+    // 就地展开的那条记录（null = 全部收起）。只允许一条，避免列表被撑成几屏。
+    var expandedCallId by remember { mutableStateOf<String?>(null) }
+    // 滚动时自动切紧凑：手指在滚时列表变单行，一屏能扫更多条；停手 500ms 后恢复。
+    // 用 isScrollInProgress 而不是算速度——速度阈值在不同机型上手感差异大，
+    // 「在滚就紧凑」是最不容易出错的口径，而且用户停手后立刻能看到详情。
+    var compactWhileScrolling by remember { mutableStateOf(false) }
 
     // 进入本页先拉一次（历史数据）；之后靠 RequestLog 的推送实时刷新，
     // 不再做 5 秒轮询——日志写入时 ViewModel 会主动推 state。
@@ -158,6 +163,20 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                 StatusFilter.SUCCESS -> it.status == CallStatus.SUCCESS
                 StatusFilter.FAILED -> it.status == CallStatus.FAILED
                 StatusFilter.ABORTED -> it.status == CallStatus.ABORTED
+            }
+        }
+    }
+
+    // 滚动时自动切紧凑：手指一滚就收成单行，停手 500ms 后恢复舒适模式。
+    // 500ms 是实测手感值——太短会在惯性滚动中来回跳，太长则停手后还卡在紧凑态。
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) {
+                compactWhileScrolling = true
+            } else {
+                delay(500)
+                // 二次确认：这 500ms 内如果又滚起来了，就别切回去
+                if (!listState.isScrollInProgress) compactWhileScrolling = false
             }
         }
     }
@@ -317,12 +336,20 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                         var confirmDelete by remember { mutableStateOf(false) }
                         SectionCard {
                             CallRow(
-                                record,
+                                record = record,
                                 providerName = state.providerOf(record.providerId)?.displayName
                                     ?: record.providerId,
-                                onClick = { detail = record },
+                                // 展开态按记录 id 保存在列表层级：滚动出屏再回来仍然展开。
+                                // 只允许同时展开一条——多条全展开会把列表撑成几屏，
+                                // 反而失去「扫视」的意义。
+                                expanded = expandedCallId == record.id,
+                                compact = compactWhileScrolling,
+                                onToggleExpand = {
+                                    expandedCallId = if (expandedCallId == record.id) null else record.id
+                                },
                                 // 长按只开确认框：删的是一条带完整原文的记录，误触代价太高
                                 onLongClick = { confirmDelete = true },
+                                loadFullText = { field -> viewModel.engineFullText(record.id, field) },
                             )
                         }
                         if (confirmDelete) {
@@ -353,12 +380,6 @@ fun LogsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             }
-        }
-    }
-
-    detail?.let { record ->
-        ModalBottomSheet(onDismissRequest = { detail = null }) {
-            CallDetailSheet(record, viewModel)
         }
     }
 
@@ -422,7 +443,7 @@ private fun RequestLogRow(line: LogLine, onClick: () -> Unit) {
 /**
  * 请求日志详情浮窗：完整正文（保留换行）+ 一键复制。
  *
- * 与调用记录的 [CallDetailSheet] 分开：那边是结构化字段（请求/响应/上游报文），
+ * 与调用记录的卡片展开区分开：那边是结构化字段（请求/响应/上游报文），
  * 这边只有一段自由文本。
  */
 @Composable
@@ -474,179 +495,452 @@ private fun RequestLogDetailSheet(line: LogLine) {
     }
 }
 
+/**
+ * 一条调用记录的卡片（方案 B：左侧竖色条 + 信息分层 + 就地展开）。
+ *
+ * ## 为什么改成这个样子
+ *
+ * 旧实现一张卡最多 8 个垂直块（模型行 / 路由标签行 / 时间行 / 指标行 /
+ * 故障账号行 / 禁用行 / 模型重写行 / 错误行），一屏只能看 3~4 条，
+ * 而其中大部分信息日常扫视根本用不上：
+ *
+ * - 「路由」是常态（几乎每次都是），每张卡都挂一枚纯属噪音；
+ * - 失败的账号会重复渲染「故障」标签 N 次（`故障 账号A 故障 账号B …`）；
+ * - 绝对时间（`11-19 04:28:20`）难以快速判断「多久以前」；
+ * - 「流式」是常态，只有「非流式」才值得提一句。
+ *
+ * ## 现在的分层
+ *
+ * **概览层**（永远可见，扫视用）：状态色条 + 模型名 + 结果标签 + 关键指标 + 相对时间。
+ * **展开层**（点击卡片就地展开）：完整账号链路、上游模型名、错误全文、各字段原文。
+ *
+ * 关键信息（失败账号、模型重写）不再默认占版面，但一点就能看到——
+ * 折叠不等于隐藏。
+ *
+ * @param expanded 是否展开（由调用方持有，保证列表滚动时展开态不丢）
+ * @param onToggleExpand 点击卡片：切换展开
+ */
 @OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun CallRow(
     record: CallRecord,
     /** 供应商展示名（渲染时从供应商表解析；找不到就退回 id，不落库）。 */
     providerName: String,
-    onClick: () -> Unit,
+    expanded: Boolean,
+    /** 滚动中的紧凑模式：只留「色条 + 模型名 + 耗时 + 时间」一行。 */
+    compact: Boolean,
+    onToggleExpand: () -> Unit,
     onLongClick: () -> Unit,
+    /** 展开时按需加载完整原文（与浮窗共用同一条加载路径）。 */
+    loadFullText: suspend (io.synapse.core.usage.CallTextField) -> String?,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        // 第一行：模型名 + 状态徽章（这是卡片的主标题，必须放在最上面）
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    val ok = record.status == CallStatus.SUCCESS
+    val tone = statusColor(record.status)
+    // 最终落在哪个账号：老记录没有 finalAccount，回落到 accountNickname / uid
+    val finalName = record.finalAccount.ifEmpty {
+        record.accountNickname.ifEmpty { record.accountUid }
+    }
+    // 区域不同 = 故障转移；两边都有值时才比较（非区域型供应商两个都是空串 → 路由）
+    val crossRegion = record.routeRegion.isNotEmpty() &&
+        record.finalAccountRegion.isNotEmpty() &&
+        record.routeRegion != record.finalAccountRegion
+    // 试过但没成的账号。成功时排除最终那个；中断不算故障（只是打到一半被掐了）；
+    // 失败时全列（全部都不行，区分「哪个成功了」毫无意义）。
+    val failedAccounts = when {
+        record.status == CallStatus.SUCCESS ->
+            record.attemptedAccounts.filter { it != finalName && it.isNotEmpty() }
+        record.status == CallStatus.ABORTED -> emptyList()
+        record.attemptedAccounts.isNotEmpty() ->
+            record.attemptedAccounts.filter { it.isNotEmpty() }
+        finalName.isNotEmpty() -> listOf(finalName)
+        else -> emptyList()
+    }
+
+    // ---- 紧凑模式：滚动中只留一行（色条 + 模型 + 耗时 + 时间）----
+    // 目的是一屏能扫过更多条记录；停手后自动恢复完整卡片。
+    // 展开中的那条永远不走紧凑，否则用户点了展开却看到一行会很困惑。
+    if (compact && !expanded) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(onClick = onToggleExpand, onLongClick = onLongClick),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(tone),
+            )
             Text(
-                // 模型名缺失（旧记录或异常写入路径）时给明确占位；纯空白串同样回落，
-                // 否则头部会出现「看着像什么都没渲染」的空白。
                 text = record.model.ifBlank { "未指定模型" },
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            StatusBadge(record.status)
-        }
-        // 第二行：只有**成功**的请求才显示 `路由🏷️ 账号🏷️` 或 `故障转移🏷️ 账号🏷️`。
-        //
-        // 判定口径（主人定的）：**看区域，不看换了几个号**。
-        // - 请求指定国内、最终跑在国内号上 → 路由（哪怕中途换过几个国内号）；
-        // - 请求指定国内、最终跑在国外号上 → 故障转移。
-        //
-        // 失败时不显示这一行：结论是「都不行」，没有「最终账号」可言，
-        // 所有试过的账号统一由下方「故障🏷️ 账号🏷️」列表呈现——两处都列会重复。
-        val ok = record.status == CallStatus.SUCCESS
-        val finalName = record.finalAccount.ifEmpty { record.accountNickname.ifEmpty { record.accountUid } }
-        if (ok && finalName.isNotEmpty()) {
-            val tone = MaterialTheme.colorScheme.primary
-            // 区域不同 = 故障转移；两边都有值时才比较（非区域型供应商两个都是空串 → 路由）
-            val crossRegion = record.routeRegion.isNotEmpty() &&
-                record.finalAccountRegion.isNotEmpty() &&
-                record.routeRegion != record.finalAccountRegion
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                TagPill(
-                    text = if (crossRegion) "故障转移" else "路由",
-                    tone = if (crossRegion) MaterialTheme.colorScheme.tertiary else tone,
-                    dot = false,
+            if (!ok) {
+                Text(
+                    text = if (record.httpStatus > 0) "${record.httpStatus}" else statusLabel(record.status),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = tone,
+                    maxLines = 1,
                 )
-                // 供应商名 + 账号名一起给：同一个账号体系可能横跨两个站（腾讯国内/国外），
-                // 只看账号名分不出这次走的哪个站。
-                TagPill(text = "$providerName · $finalName", tone = tone, dot = true)
-                // 「禁用」是长期状态（24 小时），与「冷却」不同：
-                // 看到它就知道该换模型了，等一会儿也没用。
+            }
+            Text(
+                text = formatDuration(record.durationMillis),
+                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            if (record.totalTokens > 0) {
+                Text(
+                    text = formatTokens(record.totalTokens),
+                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            Text(
+                text = relativeAgo(record.startedAtMillis),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                maxLines = 1,
+            )
+        }
+        return
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = onToggleExpand, onLongClick = onLongClick),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // 左侧竖色条：替代右上角状态徽章。省横向空间（徽章要占 40~50dp），
+        // 而且竖条在列表里连成一片时，成功/失败的分布一眼可见。
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .heightIn(min = 44.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(tone),
+        )
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            // ---- 第一行：模型名 + 结果标签 ----
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    // 模型名缺失（旧记录或异常写入路径）时给明确占位；纯空白串同样回落，
+                    // 否则头部会出现「看着像什么都没渲染」的空白。
+                    text = record.model.ifBlank { "未指定模型" },
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                // 成功不挂标签（左侧绿条已经说明了）；失败挂状态码，中断挂「中断」。
+                // 「上游 0」表示压根没打到上游，不显示——别让人以为上游回了 0。
+                if (!ok) {
+                    val label = when {
+                        record.status == CallStatus.ABORTED -> "中断"
+                        record.httpStatus > 0 -> "HTTP ${record.httpStatus}"
+                        else -> statusLabel(record.status)
+                    }
+                    TagPill(text = label, tone = tone, dot = false)
+                }
                 if (record.modelBanned) {
                     TagPill(text = "禁用", tone = MaterialTheme.colorScheme.error, dot = false)
                 }
             }
-        }
-        Text(
-            text = buildString {
-                append(TIME_FORMAT.format(Date(record.startedAtMillis)))
-                append(" · ")
-                append(if (record.streaming) "流式" else "非流式")
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        // 胶囊行用 FlowRow：横向放不下时整块换行，任何宽度下每个胶囊都保持自然宽度，
-        // 不会被压到「剩余宽度」里把文字折成多行（旧实现里最后的「积分」胶囊因此变成
-        // 近似圆形的徽章，标签折成两行，看起来像「积 / 19 / 分」上下堆叠）。
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            MetricChip("耗时", formatDuration(record.durationMillis), MaterialTheme.colorScheme.onSurfaceVariant)
-            // 失败时把上游状态码摆出来：判断根因最快的一条线索（402/403/429/5xx 一眼分清）。
-            // 0 表示压根没打到上游（如模型被禁用、并发闸门挡回），那就不显示，别显示成「上游 0」。
-            if (record.status != CallStatus.SUCCESS && record.httpStatus > 0) {
-                MetricChip(
-                    "上游",
-                    record.httpStatus.toString(),
-                    MaterialTheme.colorScheme.error,
-                )
-            }
-            if (record.totalTokens > 0) {
-                MetricChip("tokens", formatTokens(record.totalTokens), MaterialTheme.colorScheme.primary)
-            }
-            if (record.cachedTokens > 0 && record.promptTokens > 0) {
-                val hitPercent = String.format(Locale.US, "%.0f", record.cachedTokens * 100.0 / record.promptTokens)
-                MetricChip("命中", "$hitPercent%", MaterialTheme.colorScheme.tertiary)
-            }
-            if (record.pointsConsumed > 0) {
-                MetricChip("积分", record.pointsConsumed.toString(), MaterialTheme.colorScheme.secondary)
-            }
-        }
-        // 出过故障的账号：试过但没成的那些（可能多个），单独一行标红。
-        // 与上方「最终账号」互补 —— 上方的标签告诉你这次落在谁身上，
-        // 这里告诉你路上折了谁，排查「为什么被限流」时一眼就能对上。
-        // 失败时把**所有**尝试过的账号都列成故障（包括最后那个）：
-        // 全部都不行的时候，「哪个成功了」根本不存在，区分它反而让人困惑。
-        val failedAccounts = when {
-            // 成功：只列出「试过但没成」的（不含最终成功的那个）
-            record.status == CallStatus.SUCCESS ->
-                record.attemptedAccounts.filter { it != finalName && it.isNotEmpty() }
-            // 中断（客户端取消 / 连接断了）：**既不是成功也不是失败**，不打「故障」。
-            // 这里的账号只是「正在打的时候被中断了」，把它标红会让人以为账号有问题。
-            record.status == CallStatus.ABORTED -> emptyList()
-            // 失败：列出所有试过的账号
-            record.attemptedAccounts.isNotEmpty() ->
-                record.attemptedAccounts.filter { it.isNotEmpty() }
-            // 兜底：老记录没有 attemptedAccounts，退回单个账号，别让失败卡片一片空白
-            finalName.isNotEmpty() -> listOf(finalName)
-            else -> emptyList()
-        }
-        // 失败卡片没有上面的「路由/故障转移」行，禁用标签要在这里单独补，
-        // 否则只有成功转移的记录才能看到「这个模型被禁用了」。
-        if (!ok && record.modelBanned) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                TagPill(text = "禁用", tone = MaterialTheme.colorScheme.error, dot = false)
-            }
-        }
-        if (failedAccounts.isNotEmpty()) {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                failedAccounts.forEach { name ->
-                    // 「故障🏷️ 账号🏷️」：两个标签紧挨着，读起来是一句话
-                    TagPill(text = "故障", tone = MaterialTheme.colorScheme.error, dot = false)
-                    TagPill(text = name, tone = MaterialTheme.colorScheme.error, dot = true)
+
+            // ---- 第二行：账号 / 路由 / 故障摘要（一行讲完，不再重复 N 次「故障」）----
+            val accountLine = buildString {
+                if (ok) {
+                    if (crossRegion) append("故障转移 · ")
+                    append(providerName)
+                    if (finalName.isNotEmpty()) append(" · ").append(finalName)
+                } else if (failedAccounts.isNotEmpty()) {
+                    // 失败时把账号压成一行：`3 个账号均失败`，具体是谁在展开区
+                    if (failedAccounts.size == 1) {
+                        append("故障 · ").append(failedAccounts.first())
+                    } else {
+                        append(failedAccounts.size).append(" 个账号均失败")
+                    }
                 }
             }
-        }
-        // 模型行：只在「上游实际收到的模型」与「客户端请求的」**不同**时才显示 ——
-        // 相同就是废话（绝大多数情况就是去掉标签），不占版面。
-        // 自定义供应商的短名、上游重写模型名等场景才会不同，那时这行是排查关键。
-        if (record.resolvedModel.isNotEmpty() && record.resolvedModel != record.model) {
+            if (accountLine.isNotEmpty()) {
+                Text(
+                    text = accountLine,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (ok) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // ---- 第三行：指标 + 相对时间（时间靠右，扫视时成列）----
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                // 耗时放最前：它是「这次顺不顺」的第一直觉
+                MetricChip("耗时", formatDuration(record.durationMillis), MaterialTheme.colorScheme.onSurfaceVariant)
+                if (record.totalTokens > 0) {
+                    MetricChip("tokens", formatTokens(record.totalTokens), MaterialTheme.colorScheme.primary)
+                }
+                if (record.cachedTokens > 0 && record.promptTokens > 0) {
+                    val hitPercent = String.format(
+                        Locale.US, "%.0f",
+                        record.cachedTokens * 100.0 / record.promptTokens,
+                    )
+                    MetricChip("命中", "$hitPercent%", MaterialTheme.colorScheme.tertiary)
+                }
+                if (record.pointsConsumed > 0) {
+                    MetricChip("积分", record.pointsConsumed.toString(), MaterialTheme.colorScheme.secondary)
+                }
+                // 「流式」是常态不显示；只有非流式才提一句——那才是异常情况
+                if (!record.streaming) {
+                    MetricChip("非流式", "", MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                // 相对时间：绝对时间在展开区，这里只要「多久以前」
                 Text(
-                    text = "模型",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = relativeAgo(record.startedAtMillis),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    modifier = Modifier.align(Alignment.CenterVertically),
                 )
-                TagPill(text = record.resolvedModel, tone = MaterialTheme.colorScheme.onSurfaceVariant, dot = false)
+            }
+
+            // ---- 错误摘要：折叠时最多 1 行，展开看全文 ----
+            if (record.error.isNotEmpty() && !expanded) {
+                Text(
+                    text = record.error,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // ---- 展开区：完整信息 + 原文（按需加载）----
+            if (expanded) {
+                CallExpandedDetail(record, providerName, failedAccounts, finalName, loadFullText)
             }
         }
-        if (record.error.isNotEmpty()) {
-            Text(
-                text = record.error,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+    }
+}
+
+/**
+ * 展开后的详情区：完整账号链路、上游模型、错误全文、请求/响应/上游报文原文。
+ *
+ * 原文走 [loadFullText] 按需加载：概览卡片只持有截断摘要，
+ * 完整原文可能几十万字符，不展开就不该读盘。
+ */
+@Composable
+private fun CallExpandedDetail(
+    record: CallRecord,
+    providerName: String,
+    failedAccounts: List<String>,
+    finalName: String,
+    loadFullText: suspend (io.synapse.core.usage.CallTextField) -> String?,
+) {
+    val clipboard = LocalClipboardManager.current
+    var fullRequest by remember(record.id) { mutableStateOf<String?>(null) }
+    var fullResponse by remember(record.id) { mutableStateOf<String?>(null) }
+    var fullRaw by remember(record.id) { mutableStateOf<String?>(null) }
+    var loaded by remember(record.id) { mutableStateOf(false) }
+
+    // 展开时才加载；收起后再展开会复用已加载的内容（remember(record.id) 保活）
+    LaunchedEffect(record.id) {
+        if (loaded) return@LaunchedEffect
+        val (rq, rs, raw) = withContext(Dispatchers.IO) {
+            Triple(
+                loadFullText(io.synapse.core.usage.CallTextField.REQUEST),
+                loadFullText(io.synapse.core.usage.CallTextField.RESPONSE),
+                loadFullText(io.synapse.core.usage.CallTextField.RAW),
             )
         }
+        fullRequest = rq
+        fullResponse = rs
+        fullRaw = raw
+        loaded = true
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+        // 账号链路：成功时给「最终账号 + 路上折了谁」，失败时给全部试过的
+        if (record.attemptedAccounts.isNotEmpty()) {
+            DetailKv(
+                "账号链路",
+                record.attemptedAccounts.joinToString(" → "),
+            )
+        }
+        if (record.status == CallStatus.SUCCESS && failedAccounts.isNotEmpty()) {
+            DetailKv("失败过", failedAccounts.joinToString(" · "), MaterialTheme.colorScheme.error)
+        }
+        // 上游实际收到的模型名：只有与请求的不同才说（相同就是废话）
+        if (record.resolvedModel.isNotEmpty() && record.resolvedModel != record.model) {
+            DetailKv("上游模型", record.resolvedModel)
+        }
+        DetailKv("请求模型", record.model)
+        DetailKv("供应商", providerName)
+        if (finalName.isNotEmpty()) DetailKv("最终账号", finalName)
+        DetailKv(
+            "时间",
+            buildString {
+                append(TIME_FORMAT.format(Date(record.startedAtMillis)))
+                append(if (record.streaming) " · 流式" else " · 非流式")
+                append(" · HTTP ").append(record.httpStatus)
+            },
+        )
+        if (record.promptTokens > 0 || record.completionTokens > 0) {
+            DetailKv(
+                "token",
+                "输入 ${formatTokens(record.promptTokens)} / 输出 ${formatTokens(record.completionTokens)}" +
+                    if (record.cachedTokens > 0) " / 命中 ${formatTokens(record.cachedTokens)}" else "",
+            )
+        }
+
+        if (record.error.isNotEmpty()) {
+            DetailKv("错误", record.error, MaterialTheme.colorScheme.error)
+        }
+
+        // 三段原文：与浮窗一致，按需加载，可复制
+        ExpandableTextBlock(
+            title = "请求原文",
+            body = fullRequest ?: record.requestBody,
+            note = truncatedNote(fullRequest == null, record.requestBody),
+            onCopy = { clipboard.setText(AnnotatedString(fullRequest ?: record.requestBody)) },
+        )
+        ExpandableTextBlock(
+            title = "响应原文",
+            body = fullResponse ?: record.responseBody,
+            note = truncatedNote(fullResponse == null, record.responseBody),
+            onCopy = { clipboard.setText(AnnotatedString(fullResponse ?: record.responseBody)) },
+        )
+        if (record.rawResponse.isNotEmpty() || fullRaw != null) {
+            ExpandableTextBlock(
+                title = "上游报文",
+                body = fullRaw ?: record.rawResponse,
+                note = truncatedNote(fullRaw == null, record.rawResponse),
+                onCopy = { clipboard.setText(AnnotatedString(fullRaw ?: record.rawResponse)) },
+            )
+        }
+    }
+}
+
+/** 展开区的一行「键：值」。 */
+@Composable
+private fun DetailKv(key: String, value: String, valueColor: Color? = null) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = key,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(56.dp),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelSmall,
+            color = valueColor ?: MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
+ * 展开区里可折叠的原文块。
+ *
+ * 默认只显示前几行（原文动辄几万字符，直接铺开会把卡片撑成一屏高），
+ * 点标题展开全文。复制按钮始终可用，不需要先展开。
+ */
+@Composable
+private fun ExpandableTextBlock(
+    title: String,
+    body: String,
+    note: String?,
+    onCopy: () -> Unit,
+) {
+    var open by remember(body) { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = if (open) "$title ▾" else "$title ▸",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.extraSmall)
+                    .clickable { open = !open }
+                    .padding(vertical = 2.dp),
+            )
+            Text(
+                text = "${body.length} 字符",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            )
+            Box(Modifier.weight(1f))
+            Text(
+                text = "复制",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .clip(MaterialTheme.shapes.extraSmall)
+                    .clickable(onClick = onCopy)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
+        Text(
+            text = body,
+            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            // 收起时最多 6 行；展开后不限行（外层 Column 在 LazyColumn 里，会自然撑开）
+            maxLines = if (open) Int.MAX_VALUE else 6,
+            overflow = TextOverflow.Ellipsis,
+        )
+        note?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            )
+        }
+    }
+}
+
+/**
+ * 相对时间文案（`刚刚` / `3分钟前` / `2小时前` / `昨天` / `3天前`）。
+ *
+ * 列表里绝对时间（`11-19 04:28:20`）没法快速判断新旧，扫视时相对时间更有用；
+ * 需要精确时刻时展开卡片就有。
+ */
+private fun relativeAgo(atMillis: Long, nowMillis: Long = System.currentTimeMillis()): String {
+    val delta = nowMillis - atMillis
+    if (delta < 0L) return "刚刚"
+    return when {
+        delta < 60_000L -> "刚刚"
+        delta < 3_600_000L -> "${delta / 60_000L}分钟前"
+        delta < 86_400_000L -> "${delta / 3_600_000L}小时前"
+        delta < 172_800_000L -> "昨天"
+        else -> "${delta / 86_400_000L}天前"
     }
 }
 
@@ -741,58 +1035,6 @@ private fun StatusBadge(status: CallStatus) {
     )
 }
 
-@Composable
-private fun CallDetailSheet(record: CallRecord, viewModel: AppViewModel) {
-    val clipboard = LocalClipboardManager.current
-
-    // 打开抽屉时后台加载各字段完整原文：没溢出文件（未超摘要长度或已被清理）时回落用记录内摘要。
-    var fullRequest by remember(record.id) { mutableStateOf<String?>(null) }
-    var fullResponse by remember(record.id) { mutableStateOf<String?>(null) }
-    var fullRaw by remember(record.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(record.id) {
-        val loaded = withContext(Dispatchers.IO) {
-            Triple(
-                viewModel.engineFullText(record.id, io.synapse.core.usage.CallTextField.REQUEST),
-                viewModel.engineFullText(record.id, io.synapse.core.usage.CallTextField.RESPONSE),
-                viewModel.engineFullText(record.id, io.synapse.core.usage.CallTextField.RAW),
-            )
-        }
-        fullRequest = loaded.first
-        fullResponse = loaded.second
-        fullRaw = loaded.third
-    }
-
-    // 抽屉内容可达几十万字符，必须自身可滚动（ModalBottomSheet 默认不可滚）。
-    Column(
-        modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(record.id, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text(
-            text = "${TIME_FORMAT.format(Date(record.startedAtMillis))} · ${statusLabel(record.status)} · HTTP ${record.httpStatus}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        DetailBlock(
-            "请求原文",
-            fullRequest ?: record.requestBody,
-            truncatedNote(fullRequest == null, record.requestBody),
-        ) { clipboard.setText(AnnotatedString(fullRequest ?: record.requestBody)) }
-        DetailBlock(
-            "响应原文",
-            fullResponse ?: record.responseBody,
-            truncatedNote(fullResponse == null, record.responseBody),
-        ) { clipboard.setText(AnnotatedString(fullResponse ?: record.responseBody)) }
-        if (record.rawResponse.isNotEmpty() || fullRaw != null) {
-            DetailBlock(
-                "返回原文（上游报文）",
-                fullRaw ?: record.rawResponse,
-                truncatedNote(fullRaw == null, record.rawResponse),
-            ) { clipboard.setText(AnnotatedString(fullRaw ?: record.rawResponse)) }
-        }
-        if (record.error.isNotEmpty()) DetailBlock("错误", record.error, null) { clipboard.setText(AnnotatedString(record.error)) }
-    }
-}
 
 /**
  * 字段是否被截断的说明行：溢出文件缺失时，长度超过摘要阈值即视为「存储中为摘要」。
@@ -974,64 +1216,6 @@ private fun RequestLogSettings(state: AppUiState, viewModel: AppViewModel) {
     }
 }
 
-@Composable
-private fun DetailBlock(title: String, body: String, note: String?, onCopy: () -> Unit) {
-    // 大文本折叠：全文可达 512K 字符，一次性组合进 Text 会让抽屉首帧明显卡顿；
-    // 默认只渲染预览，点「展开全文」后再渲染完整内容。
-    // 折叠用弹性高度过渡（借鉴 open-claude-ui 的 0fr↔1fr 思路，在 Compose 里对应
-    // animateContentSize + 与思考折叠相同的 200ms 曲线），避免瞬间跳变。
-    var expanded by remember(body) { mutableStateOf(body.length <= PREVIEW_CHARS) }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            if (!expanded && body.length > PREVIEW_CHARS) {
-                Text(
-                    text = "展开全文",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable { expanded = true }
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
-                )
-            }
-            Text(
-                text = "复制",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .clickable(onClick = onCopy)
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
-            )
-        }
-        if (note != null) {
-            Text(
-                text = note,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-        val visible = if (expanded) body else body.take(PREVIEW_CHARS) + "\n…（点击「展开全文」查看剩余部分）"
-        Text(
-            text = visible.ifEmpty { "（空）" },
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(MaterialTheme.shapes.medium)
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .animateContentSize(
-                    animationSpec = tween(200, easing = CubicBezierEasing(0.19f, 1f, 0.22f, 1f)),
-                )
-                .padding(12.dp),
-        )
-    }
-}
-
-private const val PREVIEW_CHARS = 2_000
 
 private fun statusLabel(status: CallStatus): String = when (status) {
     CallStatus.SUCCESS -> "成功"
