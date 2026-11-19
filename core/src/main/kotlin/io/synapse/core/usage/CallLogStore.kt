@@ -37,6 +37,13 @@ data class CallRecord(
     val accountUid: String,
     val accountNickname: String,
     /**
+     * 下游客户端标识（从请求头 User-Agent 解析，如 `Cursor`、`Cline`、`Android`）。
+     *
+     * 首页「实时调度拓扑」用它画出「谁在打网关」这一层。
+     * 旧记录没有这个字段 → 读回空串，界面归入「未知客户端」，不编造名字。
+     */
+    val clientName: String = "",
+    /**
      * 本次请求**尝试过的所有账号**（按尝试顺序，去重）。
      *
      * 换号是本网关的核心能力，一次失败请求往往试过好几个号：
@@ -480,6 +487,7 @@ class CallLogStore(
                     resolvedModel = obj.get("resolvedModel")?.asString.orEmpty(),
                     accountUid = obj.get("accountUid")?.asString.orEmpty(),
                     accountNickname = obj.get("accountNickname")?.asString.orEmpty(),
+                    clientName = obj.get("clientName")?.asString.orEmpty(),
                     finalAccount = obj.get("finalAccount")?.asString.orEmpty(),
                     didFailover = obj.get("didFailover")?.asBoolean ?: false,
                     routeRegion = obj.get("routeRegion")?.asString.orEmpty(),
@@ -657,6 +665,7 @@ private fun CallRecord.toJson(): JsonObject = JsonObject().apply {
     if (resolvedModel.isNotEmpty()) addProperty("resolvedModel", resolvedModel)
     addProperty("accountUid", accountUid)
     addProperty("accountNickname", accountNickname)
+    if (clientName.isNotEmpty()) addProperty("clientName", clientName)
     if (finalAccount.isNotEmpty()) addProperty("finalAccount", finalAccount)
     if (didFailover) addProperty("didFailover", true)
     if (routeRegion.isNotEmpty()) addProperty("routeRegion", routeRegion)

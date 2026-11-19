@@ -587,6 +587,8 @@ class GatewayHttpServer(
             )
 
         val startedAt = System.currentTimeMillis()
+        // 下游客户端标识：UA 解析一次，透传给所有调用记录
+        val clientName = clientNameOf(session)
         // 最后一次上游响应的 HTTP 状态：成功/上游失败填 call.status，网络层失败填 0，
         // 供最终 503 的调用记录如实展示（原先 recordCall 硬编码 200，失败永远显示 200）。
         var lastHttpStatus = 0
@@ -1047,6 +1049,7 @@ class GatewayHttpServer(
                     account.uid,
                     account.nickname,
                     engine.pool.displayNameOf(currentRoute.providerId, account.uid),
+                    clientName,
                 )
                 activeRequestId = activeId
 
@@ -1087,6 +1090,7 @@ class GatewayHttpServer(
                             newCompletionId(), currentRoute.providerId, requestedModel, account.uid, account.nickname,
                             streaming, CallStatus.FAILED, call.status, null, 0L, failure.message, call.errorBody, body, startedAt,
                             resolvedModel = resolvedModel,
+                            clientName = clientName,
                         )
                         finishActiveRequest()
                         gateHandle.release()
@@ -1227,6 +1231,7 @@ class GatewayHttpServer(
                             newCompletionId(), currentRoute.providerId, requestedModel, account.uid, account.nickname,
                             streaming, CallStatus.FAILED, call.status, null, 0L, error.message, call.errorBody, body, startedAt,
                             resolvedModel = resolvedModel,
+                            clientName = clientName,
                         )
                         finishActiveRequest()
                         gateHandle.release()
@@ -1405,6 +1410,7 @@ class GatewayHttpServer(
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
                         resolvedModel = resolvedModel,
+                        clientName = clientName,
                     )
                 }
 
@@ -1441,6 +1447,7 @@ class GatewayHttpServer(
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
                         resolvedModel = resolvedModel,
+                        clientName = clientName,
                     )
                 }
 
@@ -1458,6 +1465,7 @@ class GatewayHttpServer(
                         finalAccountRegion = finalAccountRegion,
                         attemptedAccounts = attemptedAccountNames.toList(),
                         resolvedModel = resolvedModel,
+                        clientName = clientName,
                     )
                 }
 
@@ -1541,6 +1549,7 @@ class GatewayHttpServer(
                 attemptedAccounts = attemptedAccountNames.toList(),
                 finalAccount = lastAccountNickname.ifEmpty { lastAccountUid },
                 didFailover = attemptedAccountNames.size > 1,
+                clientName = clientName,
                 routeRegion = routeRegion,
                 finalAccountRegion = finalAccountRegion,
                 // 禁用表用的 key 是「providerId | 上游模型名」（见 recordModelLimitFailure），
@@ -1580,6 +1589,8 @@ class GatewayHttpServer(
         finalAccountRegion: String = "",
         // 上游实际收到的模型名（剥掉标签后）；与请求名不同时界面才单独说一句
         resolvedModel: String = "",
+        /** 下游客户端标识（UA 解析结果）。 */
+        clientName: String = "",
     ): NanoHTTPD.Response {
         val id = newCompletionId()
         // 转发结果快照：由 produce 在结束时写入。header 写出失败时 produce 不执行，
@@ -1600,6 +1611,7 @@ class GatewayHttpServer(
                     routeRegion = routeRegion,
                     finalAccountRegion = finalAccountRegion,
                     resolvedModel = resolvedModel,
+                    clientName = clientName,
                 )
                 } else {
                     recordCall(
@@ -1614,6 +1626,7 @@ class GatewayHttpServer(
                         routeRegion = routeRegion,
                         finalAccountRegion = finalAccountRegion,
                         resolvedModel = resolvedModel,
+                        clientName = clientName,
                     )
                 }
             },
@@ -1778,6 +1791,8 @@ class GatewayHttpServer(
         attemptedAccounts: List<String> = emptyList(),
         // 上游实际收到的模型名（剥掉标签后）
         resolvedModel: String = "",
+        /** 下游客户端标识（UA 解析结果）。 */
+        clientName: String = "",
     ): NanoHTTPD.Response {
         val payload = runCatching { JsonParser.parseString(aggregated).asJsonObject }.getOrNull()
         // 对调用方透明：将响应中的 model 归一化为客户端请求的逻辑模型
@@ -1797,6 +1812,7 @@ class GatewayHttpServer(
             routeRegion = routeRegion,
             finalAccountRegion = finalAccountRegion,
             resolvedModel = resolvedModel,
+            clientName = clientName,
         )
         // 同上：对话成功即证明有额度，先摘掉可能残留的「额度耗尽」标记
         engine.pool.clearExhaustedMark(providerId, uid)
@@ -2216,6 +2232,16 @@ class GatewayHttpServer(
             "共 ${avail.total} 个账号，全部被手动停用，去「供应商」页启用即可恢复"
     }
 
+    /**
+     * 从请求头 User-Agent 解析下游客户端标识。
+     *
+     * 网关只有一个 API Key，没法像多 Key 那样按 Key 命名区分调用方，
+     * 所以「谁在打网关」只能从 UA 认。认不出就返回空串（界面归入「未知客户端」），
+     * 绝不编造名字。
+     */
+    private fun clientNameOf(session: NanoHTTPD.IHTTPSession): String =
+        ClientNames.fromUserAgent(session.headers["user-agent"].orEmpty())
+
     private fun recordCall(
         id: String,
         providerId: String,
@@ -2241,6 +2267,8 @@ class GatewayHttpServer(
         modelBanned: Boolean = false,
         /** 上游实际收到的模型名（剥掉标签后）；与 model 相同时界面不显示。 */
         resolvedModel: String = "",
+        /** 下游客户端标识（User-Agent 解析结果）；拿不到时为空串。 */
+        clientName: String = "",
     ) {
         // 调用记录开关：关闭时不写任何记录（原文动辄几 KB，是存储的主要来源）；
         // 记录一 failover 链路的语义不变，只是不留痕。
@@ -2256,6 +2284,7 @@ class GatewayHttpServer(
                 model = model,
                 accountUid = uid,
                 accountNickname = nickname,
+                clientName = clientName,
                 attemptedAccounts = attemptedAccounts,
                 finalAccount = finalAccount,
                 didFailover = didFailover,

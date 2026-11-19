@@ -18,6 +18,8 @@ data class ActiveRequest(
     val nickname: String,
     /** 界面显示名（自定义名 > 上游昵称 > uid）；展示一律用它，别自己再拼。 */
     val displayName: String = nickname,
+    /** 下游客户端标识（UA 解析结果）；空串表示认不出来。 */
+    val clientName: String = "",
     val startedAtMillis: Long,
     val phase: Phase,
 ) {
@@ -56,6 +58,7 @@ class ActiveRequests(private val nowMillis: () -> Long = System::currentTimeMill
         uid: String,
         nickname: String,
         displayName: String = nickname,
+        clientName: String = "",
     ): String {
         val id = "req-${seq.incrementAndGet()}"
         entries[id] = ActiveRequest(
@@ -65,6 +68,7 @@ class ActiveRequests(private val nowMillis: () -> Long = System::currentTimeMill
             uid = uid,
             nickname = nickname,
             displayName = displayName,
+            clientName = clientName,
             startedAtMillis = nowMillis(),
             phase = ActiveRequest.Phase.CONNECTING,
         )
