@@ -56,150 +56,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReferenceArray
 
-/** 登录状态。 */
-enum class LoginState { SUCCESS, FAILED }
-
-/** 一次登录/导入的结果。 */
-data class LoginOutcome(
-    val state: LoginState,
-    val uid: String = "",
-    val nickname: String = "",
-    val error: String = "",
-) {
-    val ok: Boolean get() = state == LoginState.SUCCESS
-}
-
-/** 额度刷新结果。 */
-data class CreditRefreshResult(
-    val providerId: String,
-    val uid: String,
-    val nickname: String,
-    val balance: Long,
-    val known: Boolean,
-    val error: String,
-)
-
-/** 批量动作的目标账号（providerId + uid）。 */
-data class BatchTarget(val providerId: String, val uid: String)
-
-/**
- * 批量动作中单个账号的结果。
- *
- * 用结构化对象逐个带回，调用方才能「成功 N 个 / 失败 M 个 + 失败逐条原因」地展示，
- * 而不是把整批失败拼成一条读不完的异常字符串。
- */
-data class BatchActionResult(
-    val providerId: String,
-    val uid: String,
-    val nickname: String,
-    val ok: Boolean,
-    val message: String,
-)
-
-/**
- * 批量任务进行中的进度事件（在后台线程发出，调用方自行切回 UI 线程）。
- * [done] 为已完成个数、[total] 为总个数，[nickname]/[uid] 是刚完成的那一个账号。
- *
- * [stage] 说明这一拍属于哪个阶段：批量签到这类动作是「执行动作 → 补刷额度」两段，
- * 不区分阶段的话用户会看到「已完成 3/3」之后进度卡住不动（其实在刷额度），以为程序挂了。
- */
-data class BatchProgress(
-    val done: Int,
-    val total: Int,
-    val providerId: String,
-    val uid: String,
-    val nickname: String,
-    val stage: BatchStage = BatchStage.ACTION,
-    /**
-     * true 表示这一拍是「开始处理某账号」，false 表示「某账号已完成」。
-     *
-     * 两种事件共用同一个回调：UI 据此把 [nickname] 显示成「当前：X」还是「刚完成：X」。
-     * [done] 在 started=true 时是**已完成的个数**（不是下标），否则进度条会随并发乱序倒退。
-     */
-    val started: Boolean = false,
-)
-
-/** 批量动作的阶段。 */
-enum class BatchStage {
-    /** 正在对账号执行动作本身（签到/领任务）。 */
-    ACTION,
-
-    /** 动作已完成，正在补刷额度。 */
-    REFRESH,
-}
-
-/** 流式拉取模型目录时，单个供应商的就绪事件（成功带 models，失败带 error）。 */
-data class ProviderModelsChunk(
-    val providerId: String,
-    val models: List<RoutedModel>,
-    /** 非空表示该供应商拉取失败（异常消息或供应商自报的目录错误），此时 models 为空。 */
-    val error: String? = null,
-)
-
-/** 全部供应商模型目录的最终聚合结果。 */
-data class ModelsCatalog(
-    val models: List<RoutedModel>,
-    /** 拉取失败的供应商与原因，键为 providerId。 */
-    val failures: Map<String, String> = emptyMap(),
-)
-
-/** 供应商概览，供「供应商」列表展示。 */
-data class ProviderInfo(
-    val id: String,
-    val displayName: String,
-    val authKind: AuthKind,
-    val capabilities: Set<ProviderCapability>,
-    val enabled: Boolean,
-    val accountCount: Int,
-    val usableCount: Int,
-    /** 用户手动导入的供应商（可编辑/删除）。 */
-    val custom: Boolean,
-)
-
-/** 服务运行状态，供「首页」展示。 */
-data class GatewayStatus(
-    val running: Boolean,
-    val port: Int,
-    val localUrl: String,
-    val lanUrls: List<String>,
-    val pool: PoolSummary,
-    val today: UsageStats,
-    val missingApiKey: Boolean,
-    val providerCount: Int,
-    /**
-     * 积分 ↔ token 的实测换算关系。
-     *
-     * 池子里的余额是混合量纲（灵犀报 token、其余报积分），
-     * 首页「已知额度」靠它把积分折成 token 才能加在一起。
-     */
-    val creditReport: CreditReport = CreditReport(),
-)
-
-/**
- * 模型路由结果：哪个供应商的哪个模型。
- *
- * [region] 非空时（区域型前缀，如 `codebuddy-cn/xxx`）选号只在该区域的账号中进行。
- */
-data class Route(val providerId: String, val model: String, val region: String? = null)
-
-/**
- * 浏览器登录入口的返回值。
- *
- * [loginUrl] 交给系统浏览器打开；[pollState] 非空表示该供应商靠轮询换取 token
- * （WorkBuddy），调用方需要在打开浏览器后启动轮询。
- *
- * [region] 是创建本次授权所用的区域（区域型供应商）：轮询必须用同一个区域，
- * 否则会打到另一个站点、永远查不到这个 state。
- */
-data class BrowserLoginTicket(val loginUrl: String, val pollState: String = "", val region: String = "")
-
-/** 模型探测结果：延迟（毫秒）与失败原因。 */
-data class ProbeResult(val latencyMs: Long, val error: String = "")
-
-/** 局域网地址来源。Android 侧用系统 API 提供，命令行/测试用默认实现。 */
-fun interface LanAddressProvider {
-    fun lanAddresses(): List<String>
-}
 
 /**
  * 网关引擎：把账号池、各供应商、HTTP 服务、日志与设置串起来。
@@ -353,7 +209,7 @@ class GatewayEngine(
     }
     private val lastAutoCreditRefresh = ConcurrentHashMap<String, Long>()
 
-    private var server: GatewayHttpServer? = null
+    internal var server: GatewayHttpServer? = null
 
     /** 串行化 start/stop：startForegroundService 与 UI 协程可能同时调 start()，无锁会出现双建 server 或假失败。 */
     private val lifecycleLock = Any()
@@ -393,7 +249,7 @@ class GatewayEngine(
     private var modelBlocklist: ModelBlocklist = ModelBlocklist.load(store)
 
     /** 当前正在监听的登录回调服务（同一时间只允许一个登录流程）。 */
-    private var callbackServer: LoopbackCallbackServer? = null
+    internal var callbackServer: LoopbackCallbackServer? = null
 
     /** 首屏数据（调用记录与统计、过期清理）是否已在后台就绪。 */
     @Volatile
@@ -1532,321 +1388,6 @@ class GatewayEngine(
         return (0 until targets.size).map { index -> results.get(index) }
     }
 
-    // ------------------------------------------------------------------ 登录
-
-    /**
-     * 打开系统浏览器完成登录，返回要打开的 URL。
-     *
-     * - **Trae**：临时监听 51120 接住 `/authorize` 回调；
-     * - **Antigravity**：监听 51121（Google 客户端注册的 redirect_uri 固定为此端口）；
-     * - **WorkBuddy**：没有本地回调，返回授权页 URL 并附上轮询用的 state。
-     *
-     * 用系统浏览器而不是内置 WebView，是为了绕开设备 WebView 的渲染异常；
-     * 登录期间会临时占用一个本地端口，收到回调或超时后自动释放。
-     */
-    fun beginBrowserLogin(providerId: String, region: String = ""): BrowserLoginTicket {
-        stopCallbackServer()
-        val provider = registry.get(providerId) ?: throw IllegalStateException("未知供应商：$providerId")
-        // 区域优先用调用方显式传入的：供应商设置是异步写入的，登录页与之后的轮询必须用同一区域，
-        // 否则会在 A 站点创建 state、却去 B 站点轮询
-        val loginRegion = region.ifEmpty { providerSettings(providerId).option("region", "") }
-        return when {
-            provider is WebLoginSupport && (providerId == TraeProvider.ID || providerId == RaccoonProvider.ID) -> {
-                val (port, path) = if (providerId == RaccoonProvider.ID) {
-                    RACCOON_CALLBACK_PORT to RACCOON_CALLBACK_PATH
-                } else {
-                    TRAE_CALLBACK_PORT to TRAE_CALLBACK_PATH
-                }
-                val callbackUrl = "http://127.0.0.1:$port$path"
-                val ticket = provider.beginWebLogin(callbackUrl, loginRegion)
-                startCallbackServer(port, path) { url ->
-                    val outcome = completeWebLogin(providerId, url)
-                    resultPage(outcome.ok, pool.displayNameOf(providerId, outcome.uid), outcome.error)
-                }
-                BrowserLoginTicket(ticket.loginUrl, "", loginRegion)
-            }
-
-            provider is LoopbackOAuthSupport -> {
-                // 回调端口/路径由 provider 自己声明：redirect_uri 是上游注册值，写死会让第二家
-                // loopback 供应商（如 ChatGPT 的 1455）永远收不到回调。
-                startCallbackServer(provider.callbackPort, provider.callbackPath) { url ->
-                    val outcome = completeOAuth(providerId, url)
-                    resultPage(outcome.ok, pool.displayNameOf(providerId, outcome.uid), outcome.error)
-                }
-                BrowserLoginTicket(provider.buildAuthUrl())
-            }
-
-            provider is DeviceCodeSupport -> {
-                // 区域感知的登录端点（WorkBuddy：cn=copilot.tencent.com / global=workbuddy.ai）
-                val ticket = provider.startDeviceAuth(loginRegion)
-                BrowserLoginTicket(ticket.loginUrl, ticket.state, loginRegion)
-            }
-
-            else -> throw IllegalStateException("该供应商不支持浏览器登录")
-        }
-    }
-
-    private fun startCallbackServer(port: Int, path: String, handler: (String) -> String) {
-        // 监听地址按 IPv4 → IPv6 依次尝试：只绑 IPv4 时，某些设备的浏览器把 localhost
-        // 先解析成 ::1，第一次连接就 refused，用户只看到「无法访问此网站」。
-        var lastError: Exception? = null
-        var started: LoopbackCallbackServer? = null
-        for (host in LoopbackCallbackServer.HOSTS) {
-            val candidate = try {
-                // handler 可能因为参数缺失/换 token 失败而返回失败页；那种情况**不能关端口**，
-                // 否则用户点「重试登录」或刷新页面就再也连不上了。只有真正登录成功才释放。
-                LoopbackCallbackServer(host, port, path) { url ->
-                    val outcome = handler(url)
-                    if (isSuccessPage(outcome)) stopCallbackServerSoon()
-                    outcome
-                }.also { it.startServer() }
-            } catch (e: Exception) {
-                lastError = e
-                continue
-            }
-            started = candidate
-            break
-        }
-        val server = started ?: throw IllegalStateException(
-            "无法监听本地回调端口 $port" +
-                if (LoopbackCallbackServer.isPortAvailable(port).not()) {
-                    "：端口已被其它程序占用（请关闭占用该端口的应用后重试）"
-                } else {
-                    "：${lastError?.message ?: "未知原因"}"
-                },
-        )
-        callbackServer = server
-        log("已监听本地回调 http://127.0.0.1:$port$path")
-        // 用户长时间不完成登录时释放端口，避免一直占着
-        Thread {
-            runCatching { Thread.sleep(CALLBACK_TIMEOUT_MS) }
-            if (callbackServer === server) {
-                callbackServer = null
-                runCatching { server.stop() }
-                log("浏览器登录超时，已释放回调端口 $port")
-            }
-        }.apply {
-            isDaemon = true
-            start()
-        }
-    }
-
-    /**
-     * 结果页是否代表「登录真的成功了」。
-     *
-     * 只有成功才允许关端口：失败页留在浏览器里，用户刷新/重试时端口仍在监听。
-     * 判据用结果页标题约定（[resultPage] 生成），避免 handler 额外改签名。
-     */
-    private fun isSuccessPage(html: String): Boolean = html.contains(SUCCESS_PAGE_MARKER)
-
-
-    private fun stopCallbackServerSoon() {
-        val server = callbackServer ?: return
-        callbackServer = null
-        Thread {
-            runCatching { Thread.sleep(1_500) }
-            runCatching { server.stop() }
-        }.start()
-    }
-
-    /** 释放登录回调端口（登录完成或用户取消时调用）。 */
-    fun stopCallbackServer() {
-        val server = callbackServer ?: return
-        callbackServer = null
-        runCatching { server.stop() }
-    }
-
-    fun beginWebLogin(providerId: String, callbackUrl: String, region: String = ""): WebLoginTicket {
-        val support = registry.get(providerId) as? WebLoginSupport
-            ?: throw IllegalStateException("该供应商不支持网页登录")
-        return support.beginWebLogin(callbackUrl, region)
-    }
-
-    fun completeWebLogin(providerId: String, callbackUrl: String): LoginOutcome {
-        val support = registry.get(providerId) as? WebLoginSupport
-            ?: return LoginOutcome(LoginState.FAILED, error = "该供应商不支持网页登录")
-        return try {
-            val account = support.completeWebLogin(callbackUrl)
-            adopt(providerId, account, "登录")
-        } catch (e: Exception) {
-            logWarn("登录失败（$providerId）：${e.message}")
-            LoginOutcome(LoginState.FAILED, error = e.message ?: "登录失败")
-        }
-    }
-
-    /** [ccode] 为国家码（不带 `+`）；非大陆号码必须传对，否则上游短信通道会拒发。 */
-    fun sendSmsCode(providerId: String, phone: String, ccode: String = SmsLoginSupport.DEFAULT_CCODE): String {
-        val support = registry.get(providerId) as? SmsLoginSupport
-            ?: throw IllegalStateException("该供应商不支持短信登录")
-        return support.sendSmsCode(phone, ccode)
-    }
-
-    /**
-     * 拉一张人机校验图（移动云盘的滑动拼图）。
-     *
-     * 只有实现了 [HumanCheckSupport] 的供应商才有；界面先用它判定要不要画滑块，
-     * 需要时再调这里取图。
-     */
-    fun fetchHumanCheck(providerId: String, phone: String): HumanCheckChallenge? {
-        val support = registry.get(providerId) as? HumanCheckSupport ?: return null
-        return support.fetchHumanCheck(phone)
-    }
-
-    /** 该供应商的短信登录是否需要先过人机校验。 */
-    fun requiresHumanCheck(providerId: String): Boolean =
-        (registry.get(providerId) as? HumanCheckSupport)?.requiresHumanCheckBeforeSms == true
-
-    /**
-     * 通知供应商「人机校验已通过」。
-     *
-     * WebView 模式下必须调：校验页自己会把短信码发出去，provider 得记下这件事，
-     * 后续 `sendSmsCode` 才不会重复发（上游有次数配额，多发一次少一次）。
-     */
-    fun notifyHumanCheckPassed(providerId: String) {
-        (registry.get(providerId) as? HumanCheckSupport)?.onHumanCheckPassed()
-    }
-
-    fun completeSmsLogin(
-        providerId: String,
-        phone: String,
-        code: String,
-        msgid: String,
-        ccode: String = SmsLoginSupport.DEFAULT_CCODE,
-    ): LoginOutcome {
-        val support = registry.get(providerId) as? SmsLoginSupport
-            ?: return LoginOutcome(LoginState.FAILED, error = "该供应商不支持短信登录")
-        return try {
-            adopt(providerId, support.loginBySmsCode(phone, code, msgid, ccode), "登录")
-        } catch (e: Exception) {
-            logWarn("登录失败（$providerId）：${e.message}")
-            LoginOutcome(LoginState.FAILED, error = e.message ?: "登录失败")
-        }
-    }
-
-    fun startDeviceAuth(providerId: String, region: String = ""): DeviceAuthTicket {
-        val support = registry.get(providerId) as? DeviceCodeSupport
-            ?: throw IllegalStateException("该供应商不支持设备授权登录")
-        return support.startDeviceAuth(region)
-    }
-
-    fun pollDeviceAuth(providerId: String, state: String, region: String = ""): DeviceAuthPoll {
-        val support = registry.get(providerId) as? DeviceCodeSupport
-            ?: return DeviceAuthPoll.Failed("该供应商不支持设备授权登录")
-        val poll = support.pollDeviceAuth(state, region)
-        if (poll is DeviceAuthPoll.Success) {
-            adopt(providerId, poll.account, "登录")
-        } else if (poll is DeviceAuthPoll.Failed) {
-            // 授权页那边成功了、这里却失败时，先看这条日志确认轮询打的是不是同一个区域
-            logWarn("设备授权轮询失败（$providerId，region=${region.ifEmpty { "默认" }}）：${poll.error}")
-        }
-        return poll
-    }
-
-    fun completeOAuth(providerId: String, callbackUrl: String): LoginOutcome {
-        val support = registry.get(providerId) as? LoopbackOAuthSupport
-            ?: return LoginOutcome(LoginState.FAILED, error = "该供应商不支持 OAuth 登录")
-        // Google 在用户拒绝授权/账号被限制时会回调 ?error=access_denied，而不是给 code。
-        // 不先看 error 的话，用户只会看到一句「回调里没有 code 参数」，完全不知道发生了什么。
-        val error = io.synapse.core.provider.queryParam(callbackUrl, "error")
-        if (!error.isNullOrEmpty()) {
-            val description = io.synapse.core.provider.queryParam(callbackUrl, "error_description")
-            val reason = description?.takeIf { it.isNotEmpty() } ?: when (error) {
-                "access_denied" -> "你取消了授权，或该账号不允许此应用访问"
-                "invalid_client" -> "客户端配置有问题"
-                "redirect_uri_mismatch" -> "回调地址与注册的不一致"
-                else -> ""
-            }
-            logWarn("OAuth 授权被拒（$providerId）：$error ${description.orEmpty()}")
-            return LoginOutcome(LoginState.FAILED, error = "授权未完成（$error）${if (reason.isEmpty()) "" else "：$reason"}")
-        }
-        val code = io.synapse.core.provider.queryParam(callbackUrl, "code")
-            ?: return LoginOutcome(LoginState.FAILED, error = "回调里没有 code 参数")
-        // state 校验：Google 一定会原样回传，对不上说明这个回调不是本次登录发出的
-        if (support is AntigravityProvider && !support.verifyState(callbackUrl)) {
-            logWarn("OAuth 回调 state 不匹配（$providerId），已拒绝")
-            return LoginOutcome(LoginState.FAILED, error = "回调校验失败（state 不匹配），请重新发起登录")
-        }
-        return try {
-            // 走 completeCallback 让供应商拿到**完整 URL**：需要校验 state / 一次性消费 code 的
-            // 供应商（如 ChatGPT）在那一层做防重放；默认实现等价于只取 code。
-            adopt(providerId, support.completeCallback(callbackUrl), "登录")
-        } catch (e: Exception) {
-            logWarn("OAuth 登录失败（$providerId）：${e.message}")
-            LoginOutcome(LoginState.FAILED, error = e.message ?: "登录失败")
-        }
-    }
-
-    /** 粘贴 JSON 凭证导入（各供应商自行解析）。 */
-    fun importAccountJson(providerId: String, raw: String): LoginOutcome {
-        val provider = registry.get(providerId)
-            ?: return LoginOutcome(LoginState.FAILED, error = "未知供应商")
-        return try {
-            val account = provider.importCredentials(raw)
-                ?: return LoginOutcome(LoginState.FAILED, error = "该供应商不支持粘贴导入")
-            adopt(providerId, account, "导入")
-        } catch (e: Exception) {
-            logWarn("导入失败（$providerId）：${e.message}")
-            LoginOutcome(LoginState.FAILED, error = e.message ?: "导入失败")
-        }
-    }
-
-    /** 直接把账号写入账号池（自定义供应商手动添加 key 时用）。 */
-    fun addAccount(providerId: String, uid: String, nickname: String, secret: String): LoginOutcome {
-        if (registry.get(providerId) == null) return LoginOutcome(LoginState.FAILED, error = "未知供应商")
-        return adopt(providerId, ProviderAccount(providerId, uid, nickname, secret), "添加")
-    }
-
-    /**
-     * 设置账号的自定义显示名（空串 = 恢复跟随上游昵称）。
-     *
-     * 与 [addAccount] 的区别：这里**不碰凭证**，只改账号状态里的 customName。
-     * 昵称属于上游账号资料，重新登录/刷新凭证时会被上游重新下发覆盖；
-     * 用户自己起的名字必须存在另一处，否则一次刷新就白改了。
-     */
-    fun setAccountCustomName(providerId: String, uid: String, name: String): Boolean {
-        if (registry.get(providerId) == null) return false
-        val ok = pool.setCustomName(providerId, uid, name)
-        if (ok) {
-            val display = pool.displayNameOf(providerId, uid)
-            log(if (name.isBlank()) "账号名已恢复为上游昵称：$display（$providerId）" else "账号名已改为：$display（$providerId）")
-            onAccountsChanged?.invoke()
-        }
-        return ok
-    }
-
-    private fun adopt(providerId: String, account: ProviderAccount, verb: String): LoginOutcome {
-        pool.upsert(account)
-        refreshCredits(providerId, account.uid)
-        log("$verb 成功：${pool.displayNameOf(account.providerId, account.uid)}（$providerId）")
-        onAccountsChanged?.invoke()
-        claimDesktopLoginRewardSoon(providerId, account.uid)
-        checkNewAccountDailyStateSoon(providerId, account.uid)
-        return LoginOutcome(LoginState.SUCCESS, account.uid, account.nickname)
-    }
-
-    /**
-     * 账号加入后自动领取小浣熊的「桌面端登录奖励」。
-     *
-     * 该积分不是「点一下加积分」的签到，而是服务端对官方桌面客户端登录发放的奖励；
-     * 因此领取请求必须带桌面客户端标识（见 RaccoonProvider 的 desktopHeaders），
-     * 不主动触发就只能等用户自己去任务中心点。异步执行：失败只记日志，不影响登录结果。
-     */
-    private fun claimDesktopLoginRewardSoon(providerId: String, uid: String) {
-        if (providerId != io.synapse.core.provider.raccoon.RaccoonProvider.ID) return
-        ioExecutor().execute {
-            val nickname = pool.displayNameOf(providerId, uid)
-            runCatching { performAction(providerId, uid, ACTION_CHECKIN) }
-                .onSuccess { result ->
-                    if (result.ok) {
-                        log("已自动领取桌面端登录奖励（$nickname）：${result.message}")
-                    } else {
-                        logWarn("桌面端登录奖励自动领取未成功（$nickname）：${result.message}")
-                    }
-                }
-                .onFailure { logWarn("桌面端登录奖励自动领取异常（$nickname）：${it.message}") }
-        }
-    }
-
     // ------------------------------------------------------------------ 自动签到
 
     /**
@@ -1995,7 +1536,7 @@ class GatewayEngine(
      * 第 2/3 步分开是刻意的：自动做任务要模拟真实对话埋点，风控等级比签到高一个量级
      * （见 docs/08「成长任务的风控」），所以默认只提示。
      */
-    private fun checkNewAccountDailyStateSoon(providerId: String, uid: String) {
+    internal fun checkNewAccountDailyStateSoon(providerId: String, uid: String) {
         ioPool.execute {
             val nickname = pool.displayNameOf(providerId, uid)
             val provider = registry.get(providerId) ?: return@execute
@@ -2872,7 +2413,7 @@ class GatewayEngine(
         if (text.isEmpty()) requestLog.info("[$tag] （空）")
     }
 
-    private companion object {
+    internal companion object {
         const val DAY_MILLIS = 24L * 3600 * 1000
 
         /** 额度换算的样本窗口（天）：与 CallLogStore.dailyStats 的保留窗对齐。 */
@@ -2922,15 +2463,10 @@ class GatewayEngine(
         private const val MAX_BATCH_PARALLELISM = 12
 
         /** Trae 登录回调用的本地端口（避开 Antigravity 的 51121）。 */
-        const val TRAE_CALLBACK_PORT = 51120
-        const val TRAE_CALLBACK_PATH = "/authorize"
 
         /** 小浣熊（商汤）登录回调用的本地端口。 */
-        const val RACCOON_CALLBACK_PORT = 51122
-        const val RACCOON_CALLBACK_PATH = "/callback"
 
         /** 登录回调监听的存活上限。 */
-        const val CALLBACK_TIMEOUT_MS = 5L * 60 * 1000
 
         /**
          * 内置标签表（中文正名）。
@@ -3017,7 +2553,7 @@ class GatewayEngine(
 internal const val SUCCESS_PAGE_MARKER = "data-login-result=\"ok\""
 
 /** 登录回调结果页（在系统浏览器里展示）。 */
-private fun resultPage(ok: Boolean, who: String, error: String): String {
+internal fun resultPage(ok: Boolean, who: String, error: String): String {
     val title = if (ok) "登录成功" else "登录失败"
     val message = if (ok) "账号 $who 已添加，可以关闭本页并返回应用。" else error.ifEmpty { "请回到应用重试" }
     // 成功页带约定标记，回调服务据此决定「可以关端口了」；失败页不带，端口继续留着让用户重试
