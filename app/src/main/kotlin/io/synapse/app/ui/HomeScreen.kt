@@ -254,34 +254,38 @@ private fun ConsoleCard(
     val gold = LocalAppColors.current.goldStart
     SectionCard(modifier = Modifier.staggeredAppear(0)) {
         SectionHeader("网关状态 · CORE CONSOLE")
+        // 状态收成一行：圆点 + 状态 + 端口 + 可达范围。
+        // 原本这里是「SERVICE ACTIVE 大字 + LISTEN PORT 两行」，和顶栏状态胶囊、
+        // 拓扑卡表头三处都在说「运行中」，信息重复且字号层次太重。
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             StatusDot(state.running)
-            Spacer(Modifier.width(10.dp))
             Text(
-                text = if (state.running) "SERVICE ACTIVE" else "SERVICE STOPPED",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Light,
-                letterSpacing = 0.5.sp,
+                text = if (state.running) "运行中" else "已停止",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+            )
+            Text(
+                text = ":${state.port}",
+                style = MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.weight(1f))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = "LISTEN PORT",
-                    style = MaterialTheme.typography.labelSmall,
-                    letterSpacing = 0.8.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = ":${state.port}",
-                    style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
+            Text(
+                text = when {
+                    !state.running -> "服务未启动"
+                    state.settings.exposeLan && lanUrl != null -> "本机 + 局域网可访问"
+                    !state.settings.exposeLan -> "仅本机可访问"
+                    else -> "本机可访问 · 未连 Wi-Fi"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
         }
 
         val localUrl = state.localUrl.ifEmpty { "http://127.0.0.1:${state.port}/v1" }
@@ -757,18 +761,19 @@ internal fun ContextCapacityAndModelBreakdown(state: AppUiState) {
     }
 }
 
-/** 状态圆点：运行中绿色带浅光环，停止灰色。 */
+/** 状态圆点：运行中主题金带浅光环（与顶栏 StatusChip 同一套语义色），停止灰色。 */
 @Composable
 private fun StatusDot(running: Boolean) {
+    val gold = LocalAppColors.current.goldStart
     Box(contentAlignment = Alignment.Center) {
         if (running) {
-            Box(Modifier.size(16.dp).clip(CircleShape).background(MaterialTheme.colorScheme.tertiary.copy(alpha = 0.18f)))
+            Box(Modifier.size(16.dp).clip(CircleShape).background(gold.copy(alpha = 0.18f)))
         }
         Box(
             Modifier
                 .size(9.dp)
                 .clip(CircleShape)
-                .background(if (running) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)),
+                .background(if (running) gold else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)),
         )
     }
 }
