@@ -1,5 +1,6 @@
 package io.synapse.app.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -12,11 +13,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -76,12 +78,12 @@ fun AppDialog(
                 .fillMaxWidth(0.92f)
                 .widthIn(max = MAX_WIDTH_DP)
                 .heightIn(max = MAX_HEIGHT_DP)
-                .clip(RoundedCornerShape(26.dp))
+                .clip(MaterialTheme.shapes.extraLarge)
                 .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f))
                 .border(
                     1.dp,
                     MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                    RoundedCornerShape(26.dp),
+                    MaterialTheme.shapes.extraLarge,
                 ),
         ) {
             Column(modifier = Modifier.padding(horizontal = 22.dp, vertical = 20.dp)) {
@@ -119,7 +121,7 @@ fun AppDialog(
     }
 }
 
-/** 弹窗按钮：文字按钮，[emphasis] 为 true 时用主色（主操作）。 */
+/** 弹窗按钮：统一的 20dp 大圆角按钮，[emphasis] 为主操作，[destructive] 为危险操作。 */
 @Composable
 fun AppDialogButton(
     text: String,
@@ -128,15 +130,30 @@ fun AppDialogButton(
     emphasis: Boolean = false,
     destructive: Boolean = false,
 ) {
-    TextButton(onClick = onClick, enabled = enabled) {
-        Text(
-            text = text,
-            color = when {
-                destructive -> MaterialTheme.colorScheme.error
-                emphasis -> MaterialTheme.colorScheme.primary
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
+    if (emphasis || destructive) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            shape = MaterialTheme.shapes.medium,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                contentColor = if (destructive) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimary,
+            ),
+        ) {
+            Text(text)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            shape = MaterialTheme.shapes.medium,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+        ) {
+            Text(text)
+        }
     }
 }
 

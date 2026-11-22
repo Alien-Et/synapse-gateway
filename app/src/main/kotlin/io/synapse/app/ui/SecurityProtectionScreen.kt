@@ -218,7 +218,9 @@ private fun EvidenceSheet(
                     )
                 }
                 if (evidences.isNotEmpty()) {
-                    TextButton(onClick = onClear) {
+                    TextButton(
+            shape = MaterialTheme.shapes.medium,
+            onClick = onClear) {
                         Text("清空")
                     }
                 }
@@ -340,6 +342,8 @@ private fun RateLimitEditDialog(
     ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = minText,
                     onValueChange = { minText = it.filter(Char::isDigit).take(5) },
                     label = { Text("最小间隔（毫秒）") },
@@ -348,6 +352,8 @@ private fun RateLimitEditDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = jitterText,
                     onValueChange = { jitterText = it.filter(Char::isDigit).take(5) },
                     label = { Text("抖动幅度（毫秒）") },

@@ -411,7 +411,7 @@ private fun RequestLogRow(line: LogLine, onClick: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.extraSmall)
             .clickable(onClick = onClick)
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -425,7 +425,7 @@ private fun RequestLogRow(line: LogLine, onClick: () -> Unit) {
         )
         Row(
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
+                .clip(MaterialTheme.shapes.extraSmall)
                 .background(levelColor(line.level).copy(alpha = 0.14f))
                 .padding(horizontal = 7.dp, vertical = 2.dp),
         ) {
@@ -478,7 +478,7 @@ private fun RequestLogDetailSheet(line: LogLine) {
             )
             Row(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(50))
+                    .clip(MaterialTheme.shapes.extraSmall)
                     .background(levelColor(line.level).copy(alpha = 0.14f))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
             ) {
@@ -490,7 +490,9 @@ private fun RequestLogDetailSheet(line: LogLine) {
                 )
             }
             Box(Modifier.weight(1f))
-            TextButton(onClick = { clipboard.setText(AnnotatedString(line.text)) }) {
+            TextButton(
+            shape = MaterialTheme.shapes.medium,
+            onClick = { clipboard.setText(AnnotatedString(line.text)) }) {
                 Text("复制")
             }
         }
@@ -641,7 +643,7 @@ private fun CallRow(
             modifier = Modifier
                 .width(3.dp)
                 .heightIn(min = 44.dp)
-                .clip(RoundedCornerShape(2.dp))
+                .clip(MaterialTheme.shapes.extraSmall)
                 .background(tone),
         )
 
@@ -1029,7 +1031,7 @@ private fun relativeAgo(atMillis: Long, nowMillis: Long = System.currentTimeMill
 private fun TagPill(text: String, tone: Color, dot: Boolean) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(50))
+            .clip(MaterialTheme.shapes.extraSmall)
             .background(tone.copy(alpha = 0.12f))
             .padding(horizontal = 9.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -1231,6 +1233,8 @@ fun RetentionField(current: Int, onCommit: (Int) -> Unit) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
         value = text,
         onValueChange = { input -> text = input.filter(Char::isDigit).take(4) },
         modifier = Modifier.fillMaxWidth(),
@@ -1315,6 +1319,8 @@ private fun LogCapacityField(current: Int, onCommit: (Int) -> Unit) {
         io.synapse.core.gateway.GatewaySettings.MAX_REQUEST_LOG_CAPACITY
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
             value = text,
             onValueChange = { input -> text = input.filter(Char::isDigit).take(4) },
             modifier = Modifier.fillMaxWidth(),

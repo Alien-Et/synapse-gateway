@@ -30,7 +30,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -42,6 +41,7 @@ import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -69,6 +69,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import io.synapse.app.ui.theme.LocalAppColors
 import io.synapse.core.provider.RoutedModel
 
 /** 模型页：汇总所有供应商的模型（id 带 `provider/` 前缀），按供应商分组展示与流式更新。 */
@@ -78,15 +79,18 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
     val clipboard = LocalClipboardManager.current
     // 按 routePrefix 分组：区域型供应商（如 WorkBuddy 国内与国外）各成一个分组
     val grouped = remember(state.models) { state.models.groupBy { it.routePrefix } }
-    // 折叠状态：记「被折叠」的分组（默认全展开）。
+    // 展开状态：记「用户主动展开」的分组；默认空集 ⇒ 所有供应商分组都是折叠的。
+    //
+    // 不记「被折叠」集合：模型是异步流式加载的，如果按已加载结果维护折叠集合，
+    // 新供应商随后到达时会反复改写状态；只记用户主动展开的分组，新供应商天然保持默认折叠。
     //
     // 用不可变 Set + rememberSaveable，而不是 SnapshotStateList：
     // 后者在保存时机（onPause / 进程回收）被 SaveableStateRegistry 读取时，
     // 若正好与 LazyColumn 的组合读快照交叠，会抛「Reading a state that was created
-    // after the snapshot was taken」——折叠的分组越多越容易撞上，表现为点折叠直接闪退。
+    // after the snapshot was taken」——展开的分组越多越容易撞上，表现为点展开直接闪退。
     // 换成纯值 Set 后 save/restore 不碰快照，问题消失；读取仍在组合作用域，
-    // 折叠变化会正常触发列表重建。
-    var collapsed by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    // 展开变化会正常触发列表重建。
+    var expanded by rememberSaveable { mutableStateOf(emptySet<String>()) }
     // 隐藏被屏蔽状态来自 AppUiState，并由 ViewModel 写入加密本地设置，跨进程重启持久保留。
     // 测试失败原文可能很长，行内只展示截断提示，全文点开弹窗查看
     var failureDetail by remember { mutableStateOf<String?>(null) }
@@ -126,7 +130,12 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
 
     // 本页自带骨架（不走 PageScaffold）：模型量大，LazyColumn 懒加载避免整页一次性组合；
     // PageScaffold 的 verticalScroll 与 LazyColumn 不兼容（无限高度约束会崩）。
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    // 但毛玻璃底纹仍然要有：GlassBackdrop 只提供采样源，不引入 verticalScroll。
+    GlassBackdrop(
+        baseColor = MaterialTheme.colorScheme.background,
+        accentColor = LocalAppColors.current.goldStart,
+    ) {
+        Column(Modifier.fillMaxSize()) {
         PageHeader(
             title = "模型",
             subtitle = subtitleText,
@@ -275,42 +284,46 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                     }
                 }
             } else {
-                // 已加载的模型按组展示
+                // 已加载的模型：一组 = 一张玻璃面板，分组头与模型行同面板，细线分隔
                 for ((routePrefix, models) in grouped) {
                     val title = models.firstOrNull()?.providerName ?: routePrefix
                     // 这一组本轮没拉到上游、用的是上次成功的清单：明确标注，不能让旧清单冒充实时结果
                     val cachedGroup = models.isNotEmpty() && models.all { it.cached }
-                    item(key = "header-$routePrefix") {
-                        // 标题与统计分两行；测速成功数、待测数、屏蔽数三个数相加正好等于总数。
-                        val groupBlocked = models.count { state.modelBlocklist.blocks(it.fullId) }
-                        val groupUsable = models.count {
-                            !state.modelBlocklist.blocks(it.fullId) &&
-                                state.modelTestLatencies[it.fullId] is ModelTestStatus.Success
-                        }
-                        val groupUntested = models.size - groupBlocked - groupUsable
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(MaterialTheme.shapes.large)
-                                .background(MaterialTheme.colorScheme.surface)
-                                .clickable {
-                                    collapsed = if (routePrefix in collapsed) {
-                                        collapsed - routePrefix
-                                    } else {
-                                        collapsed + routePrefix
-                                    }
-                                }
-                                .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                    val groupBlocked = models.count { state.modelBlocklist.blocks(it.fullId) }
+                    val groupUsable = models.count {
+                        !state.modelBlocklist.blocks(it.fullId) &&
+                            state.modelTestLatencies[it.fullId] is ModelTestStatus.Success
+                    }
+                    val groupUntested = models.size - groupBlocked - groupUsable
+                    val visibleModels = if (state.hideBlockedModels) {
+                        models.filterNot { state.modelBlocklist.blocks(it.fullId) }
+                    } else {
+                        models
+                    }
+                    item(key = "group-$routePrefix") {
+                        GlassPanel(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(0.dp),
                         ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(MaterialTheme.shapes.medium)
+                                    .clickable {
+                                        expanded = if (routePrefix in expanded) {
+                                            expanded - routePrefix
+                                        } else {
+                                            expanded + routePrefix
+                                        }
+                                    }
+                                    .padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(
-                                    imageVector = if (routePrefix in collapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                                    contentDescription = if (routePrefix in collapsed) "展开" else "折叠",
+                                    imageVector = if (routePrefix in expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                    contentDescription = if (routePrefix in expanded) "折叠" else "展开",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(18.dp),
                                 )
@@ -318,15 +331,13 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 if (cachedGroup) {
                                     Row(
                                         modifier = Modifier
-                                            .clip(CircleShape)
+                                            .clip(MaterialTheme.shapes.extraSmall)
                                             .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f))
                                             .padding(start = 6.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                                     ) {
-                                        Box(
-                                            Modifier.breathingDot(MaterialTheme.colorScheme.error, size = 6.dp),
-                                        )
+                                        Box(Modifier.breathingDot(MaterialTheme.colorScheme.error, size = 6.dp))
                                         Text(
                                             text = "缓存",
                                             style = MaterialTheme.typography.labelSmall,
@@ -338,47 +349,49 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
                                 }
                                 Box(Modifier.weight(1f))
                             }
-                            // 三个计数口径统一：测速成功 + 待测 + 屏蔽 = 该组模型总数，不存在分子分母错配。
                             GroupStats(
                                 tested = groupUsable,
                                 untested = groupUntested,
                                 total = models.size,
                                 blocked = groupBlocked,
                             )
-                        }
-                    }
-                    // 折叠的分组跳过其模型行：只渲染分组头，模型行即时收起
-                    if (routePrefix in collapsed) continue
-                    // 一键隐藏被屏蔽：只影响列表展示，屏蔽状态本身不动
-                    val visibleModels = if (state.hideBlockedModels) {
-                        models.filterNot { state.modelBlocklist.blocks(it.fullId) }
-                    } else {
-                        models
-                    }
-                    if (visibleModels.isEmpty()) {
-                        item(key = "hidden-all-$routePrefix") {
-                            Text(
-                                text = "该分组的模型全部被屏蔽，点右上角眼睛图标可恢复显示",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                                modifier = Modifier.padding(vertical = 6.dp),
                             )
+                            if (routePrefix in expanded) {
+                                if (visibleModels.isEmpty()) {
+                                    Text(
+                                        text = "该分组的模型全部被屏蔽，点右上角眼睛图标可恢复显示",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 6.dp),
+                                    )
+                                } else {
+                                    visibleModels.forEachIndexed { index, model ->
+                                        val testStatus = state.modelTestLatencies[model.fullId]
+                                        ModelRow(
+                                            model = model,
+                                            testStatus = testStatus,
+                                            blocked = state.modelBlocklist.blocks(model.fullId),
+                                            onToggleBlocked = { viewModel.toggleModelBlocked(model.fullId) },
+                                            onCopy = {
+                                                clipboard.setText(AnnotatedString(model.fullId))
+                                                SystemPrompt.toast("已复制模型名称：${model.fullId}")
+                                            },
+                                            onTest = { viewModel.testModel(model) },
+                                            onShowFailure = { failureDetail = it },
+                                        )
+                                        if (index != visibleModels.lastIndex) {
+                                            HorizontalDivider(
+                                                color = MaterialTheme.colorScheme.outlineVariant,
+                                                modifier = Modifier.padding(vertical = 4.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
-                    items(visibleModels, key = { it.fullId }) { model ->
-                        val testStatus = state.modelTestLatencies[model.fullId]
-                        ModelRow(
-                            model = model,
-                            testStatus = testStatus,
-                            blocked = state.modelBlocklist.blocks(model.fullId),
-                            onToggleBlocked = { viewModel.toggleModelBlocked(model.fullId) },
-                            onCopy = {
-                                clipboard.setText(AnnotatedString(model.fullId))
-                                SystemPrompt.toast("已复制模型名称：${model.fullId}")
-                            },
-                            onTest = { viewModel.testModel(model) },
-                            onShowFailure = { failureDetail = it },
-                        )
                     }
                 }
 
@@ -397,6 +410,7 @@ fun ModelsScreen(state: AppUiState, viewModel: AppViewModel) {
             LaunchedEffect(reason) {
                 SystemPrompt.alert("测试失败原因", reason) { failureDetail = null }
             }
+        }
         }
     }
 }
@@ -495,7 +509,7 @@ private fun ModelRow(
                     if (blocked) {
                         Box(
                             modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
+                                .clip(MaterialTheme.shapes.extraSmall)
                                 .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f))
                                 .padding(horizontal = 5.dp, vertical = 1.dp),
                         ) {
@@ -753,13 +767,13 @@ private fun ModelSkeletonCard(
                         modifier = Modifier
                             .fillMaxWidth(0.55f)
                             .height(16.dp)
-                            .shimmer(shimmerProgress, RoundedCornerShape(4.dp)),
+                            .shimmer(shimmerProgress, MaterialTheme.shapes.extraSmall),
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth(0.35f)
                             .height(12.dp)
-                            .shimmer(shimmerProgress, RoundedCornerShape(3.dp)),
+                            .shimmer(shimmerProgress, MaterialTheme.shapes.extraSmall),
                     )
                 }
                 Box(

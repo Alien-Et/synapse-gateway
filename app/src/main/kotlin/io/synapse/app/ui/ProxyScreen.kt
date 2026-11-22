@@ -78,6 +78,8 @@ fun ProxyScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 )
             }
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = host,
                 onValueChange = { host = it.trim() },
                 label = { Text("代理地址") },
@@ -85,6 +87,8 @@ fun ProxyScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = port,
                 onValueChange = { port = it.filter(Char::isDigit).take(5) },
                 label = { Text("端口") },
@@ -92,6 +96,8 @@ fun ProxyScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = username,
                 onValueChange = { username = it },
                 label = { Text("用户名（可选）") },
@@ -99,6 +105,8 @@ fun ProxyScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = password,
                 onValueChange = { password = it },
                 label = { Text("密码（可选）") },
@@ -106,6 +114,8 @@ fun ProxyScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> Unit) 
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = excludedText,
                 onValueChange = { excludedText = it },
                 label = { Text("不走代理的地址") },

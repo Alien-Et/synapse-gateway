@@ -199,6 +199,8 @@ fun SlidePuzzle(
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = {
                     offsetX = 0f
                     completed = false

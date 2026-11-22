@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -148,21 +150,23 @@ fun PageScaffold(
 }
 
 /**
- * 玻璃卡片：22dp 大圆角 + 真毛玻璃（Haze backdrop-filter）+ 半透明描边。
+ * 统一玻璃面板：大圆角 + 真毛玻璃（Haze backdrop-filter）+ 半透明描边。
  *
- * [enterIndex] 非空时卡片带错峰入场动效（第 n 张延迟 40ms·n），用于列表/表单页的首屏。
- * [pressable] 为 true 时整张卡带按压回弹（可点入口专用）：卡片可点却毫无按下反馈时，
- * 点上去像没反应，尤其在低帧率设备上。
+ * [shape]/[contentPadding]/[verticalArrangement] 都带默认值，但允许「我的页分组」和
+ * 「模型页一组一面板」这类需要更密排版的场景复用同一套玻璃外观，避免再包一层
+ * SectionCard 造成卡片套卡片。
  */
 @Composable
-fun SectionCard(
+fun GlassPanel(
     modifier: Modifier = Modifier,
     enterIndex: Int? = null,
     pressable: Boolean = false,
+    shape: Shape = MaterialTheme.shapes.large,
+    contentPadding: PaddingValues = PaddingValues(18.dp),
+    verticalArrangement: Arrangement.Vertical = Arrangement.spacedBy(12.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val hazeState = LocalHazeState.current
-    val shape = RoundedCornerShape(22.dp)
     val tint = LocalAppColors.current.goldStart
     val glass = remember(hazeState, tint) {
         if (hazeState != null) Modifier.hazeEffect(hazeState, style = glassStyle(tint)) else Modifier
@@ -179,11 +183,33 @@ fun SectionCard(
             .then(modifier),
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(contentPadding),
+            verticalArrangement = verticalArrangement,
             content = content,
         )
     }
+}
+
+/**
+ * 玻璃卡片：28dp 大圆角 + 真毛玻璃（Haze backdrop-filter）+ 半透明描边。
+ *
+ * [enterIndex] 非空时卡片带错峰入场动效（第 n 张延迟 40ms·n），用于列表/表单页的首屏。
+ * [pressable] 为 true 时整张卡带按压回弹（可点入口专用）：卡片可点却毫无按下反馈时，
+ * 点上去像没反应，尤其在低帧率设备上。
+ */
+@Composable
+fun SectionCard(
+    modifier: Modifier = Modifier,
+    enterIndex: Int? = null,
+    pressable: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    GlassPanel(
+        modifier = modifier,
+        enterIndex = enterIndex,
+        pressable = pressable,
+        content = content,
+    )
 }
 
 /**
@@ -269,8 +295,8 @@ private fun PagerChip(text: String, enabled: Boolean, onClick: () -> Unit) {
         style = MaterialTheme.typography.labelLarge,
         color = content,
         modifier = Modifier
-            .clip(CircleShape)
-            .border(1.dp, content, CircleShape)
+            .clip(MaterialTheme.shapes.extraSmall)
+            .border(1.dp, content, MaterialTheme.shapes.extraSmall)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
     )
@@ -282,9 +308,13 @@ fun StatusChip(running: Boolean) {
     val gold = LocalAppColors.current.goldStart
     Row(
         modifier = Modifier
-            .clip(CircleShape)
+            .clip(MaterialTheme.shapes.extraSmall)
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f), CircleShape)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                MaterialTheme.shapes.extraSmall,
+            )
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -356,9 +386,9 @@ fun ChoiceChip(
     Box(
         modifier = Modifier
             .pressScale()
-            .clip(CircleShape)
+            .clip(MaterialTheme.shapes.extraSmall)
             .background(container)
-            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+            .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.extraSmall)
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
@@ -375,9 +405,9 @@ fun AddressTile(value: String, onCopy: () -> Unit) {
         color = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(8.dp))
+            .border(1.dp, MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.shapes.small)
             .clickable(onClick = onCopy)
             .padding(horizontal = 14.dp, vertical = 12.dp),
     )

@@ -84,12 +84,34 @@ private fun darkScheme(app: AppColors): ColorScheme = darkColorScheme(
     onError = Color(0xFF690005),
 )
 
+/**
+ * 全局圆角参数。
+ *
+ * 所有卡片、表单、按钮、胶囊、弹窗都从这里取值；业务 UI 只使用
+ * `MaterialTheme.shapes.*`，不再散落 `RoundedCornerShape(xx.dp)` 魔法数字。
+ * 拓扑圆点、滑块拼图这类自定义几何图形仍可用 CircleShape 或专用形状。
+ */
+object AppRadius {
+    val Chip = 12.dp
+    val Control = 16.dp
+    val Field = 20.dp
+    val Card = 28.dp
+    val Dialog = 32.dp
+}
+
+/**
+ * 全局圆角规范（毛玻璃大圆角视觉系统）。
+ *
+ * 全部比旧的 Material 默认大 2～3 档：小到 Tag 胶囊、大到卡片/弹窗，统一走这套，
+ * 任何用 MaterialTheme.shapes.* 的地方自动获得一致的圆润感。
+ * 卡片 28dp / 弹窗 32dp 是主视觉，20dp 用于表单与内部容器，12dp 仅用于极小的色块。
+ */
 private val AppShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(10.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(20.dp),
+    extraSmall = RoundedCornerShape(AppRadius.Chip),
+    small = RoundedCornerShape(AppRadius.Control),
+    medium = RoundedCornerShape(AppRadius.Field),
+    large = RoundedCornerShape(AppRadius.Card),
+    extraLarge = RoundedCornerShape(AppRadius.Dialog),
 )
 
 /**

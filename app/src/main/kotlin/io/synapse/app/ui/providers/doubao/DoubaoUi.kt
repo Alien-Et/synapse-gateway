@@ -123,6 +123,8 @@ object DoubaoUi : ProviderUi {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = ccode,
                         onValueChange = { value -> ccode = value.filter(Char::isDigit).take(4) },
                         modifier = Modifier.fillMaxWidth(0.24f),
@@ -131,6 +133,8 @@ object DoubaoUi : ProviderUi {
                         label = { Text("国家码") },
                     )
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = phone,
                         onValueChange = { phone = it.filter(Char::isDigit).take(15) },
                         modifier = Modifier.weight(1f),
@@ -140,6 +144,8 @@ object DoubaoUi : ProviderUi {
                     )
                 }
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = code,
                     onValueChange = { code = it.filter(Char::isDigit).take(6) },
                     modifier = Modifier.fillMaxWidth(),
@@ -149,6 +155,8 @@ object DoubaoUi : ProviderUi {
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                         onClick = {
                             countdown = 60
                             busy = true
@@ -167,6 +175,8 @@ object DoubaoUi : ProviderUi {
                         Text(if (countdown > 0) "${countdown} 秒后重发" else "发送验证码")
                     }
                     Button(
+            shape = MaterialTheme.shapes.medium,
+
                         onClick = {
                             busy = true
                             lastError = ""
@@ -194,6 +204,8 @@ object DoubaoUi : ProviderUi {
             SectionCard(enterIndex = 1) {
                 SectionLabel("Cookie 导入（备用）")
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = cookie,
                     onValueChange = { cookie = it },
                     modifier = Modifier.fillMaxWidth(),
@@ -245,6 +257,8 @@ object DoubaoUi : ProviderUi {
                         )
                         multiCandidates.forEach { (secUid, name) ->
                             OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                                 onClick = {
                                     showMultiDialog = false
                                     val selMsgid = DoubaoAuthClient.SEL_PREFIX + secUid

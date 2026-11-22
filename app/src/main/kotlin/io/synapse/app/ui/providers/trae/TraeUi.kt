@@ -103,6 +103,8 @@ object TraeUi : ProviderUi {
                 }
                 SectionLabel(if (global) "登录 · 国外 trae.ai" else "登录 · 国内版 trae.cn")
                 Button(
+            shape = MaterialTheme.shapes.medium,
+
                     onClick = { actions.onWebLogin(id, region) },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -113,6 +115,8 @@ object TraeUi : ProviderUi {
                 ) { expanded = !expanded }
                 if (expanded) {
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = raw,
                         onValueChange = { raw = it },
                         modifier = Modifier.fillMaxWidth(),
@@ -121,6 +125,8 @@ object TraeUi : ProviderUi {
                         label = { Text("回调链接 / 凭证 JSON") },
                     )
                     Button(
+            shape = MaterialTheme.shapes.medium,
+
                         onClick = {
                             actions.onImport(id, raw.trim())
                             raw = ""
@@ -224,6 +230,8 @@ object TraeUi : ProviderUi {
                 ChoiceChip("重新生成", false) { actions.onRegenerateDeviceId(id, status.uid) }
             }
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = manual,
                 onValueChange = { manual = it },
                 modifier = Modifier.fillMaxWidth(),
@@ -231,6 +239,8 @@ object TraeUi : ProviderUi {
                 label = { Text("手动填写设备指纹") },
             )
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = {
                     actions.onSetDeviceId(id, status.uid, manual.trim())
                     manual = ""

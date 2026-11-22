@@ -221,7 +221,7 @@ fun CrossProviderDialog(
                             color = MaterialTheme.colorScheme.onErrorContainer,
                             modifier = Modifier
                                 .padding(end = 4.dp)
-                                .clip(RoundedCornerShape(4.dp))
+                                .clip(MaterialTheme.shapes.extraSmall)
                                 .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.8f))
                                 .padding(horizontal = 5.dp, vertical = 1.dp),
                         )

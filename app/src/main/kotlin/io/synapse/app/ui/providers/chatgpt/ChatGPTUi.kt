@@ -50,6 +50,8 @@ object ChatGPTUi : ProviderUi {
         SectionCard(enterIndex = 0) {
             SectionLabel("登录")
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = { actions.onWebLogin(id, "") },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("在浏览器中登录 ChatGPT 账号") }

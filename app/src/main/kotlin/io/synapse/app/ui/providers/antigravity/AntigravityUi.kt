@@ -48,6 +48,8 @@ object AntigravityUi : ProviderUi {
         SectionCard(enterIndex = 0) {
             SectionLabel("登录")
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = { actions.onWebLogin(id, "") },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("在浏览器中登录 Google 账号") }
@@ -84,6 +86,8 @@ object AntigravityUi : ProviderUi {
                         if (status.actionUrl.isNotEmpty()) {
                             Spacer(Modifier.height(10.dp))
                             Button(
+            shape = MaterialTheme.shapes.medium,
+
                                 onClick = { actions.onOpenVerification(id, status.uid, status.actionUrl) },
                                 modifier = Modifier.fillMaxWidth(),
                             ) { Text("去验证（在应用内打开）") }

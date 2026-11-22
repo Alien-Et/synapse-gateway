@@ -298,7 +298,7 @@ private fun GlassAction(
     val goldText = LocalAppColors.current.goldText
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(9.dp))
+            .clip(MaterialTheme.shapes.extraSmall)
             .background(
                 if (primary) gold.copy(alpha = 0.16f)
                 else MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
@@ -307,7 +307,7 @@ private fun GlassAction(
                 1.dp,
                 if (primary) gold.copy(alpha = 0.35f)
                 else MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
-                RoundedCornerShape(9.dp),
+                MaterialTheme.shapes.extraSmall,
             )
             .clickable(onClick = onClick)
             .padding(vertical = 9.dp),
@@ -960,7 +960,7 @@ private fun TelemetryGrid(state: AppUiState, modifier: Modifier = Modifier) {
 private fun Tile(modifier: Modifier, label: String, content: @Composable ColumnScope.() -> Unit) {
     val hazeState = LocalHazeState.current
     val tint = LocalAppColors.current.goldStart
-    val shape = RoundedCornerShape(22.dp)
+    val shape = MaterialTheme.shapes.large
     val glass = remember(hazeState, tint) {
         if (hazeState != null) Modifier.hazeEffect(hazeState, style = glassStyle(tint)) else Modifier
     }

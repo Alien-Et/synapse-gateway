@@ -50,6 +50,8 @@ fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> 
         SectionCard(enterIndex = 1) {
             SectionLabel("端口")
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = port,
                 onValueChange = { port = it.filter(Char::isDigit).take(5) },
                 label = { Text("监听端口") },
@@ -91,6 +93,8 @@ fun ApiSettingsScreen(state: AppUiState, viewModel: AppViewModel, onBack: () -> 
             // 不如直接藏起来；关掉开关再显示。
             if (!settings.allowNoKey) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = apiKey,
                     onValueChange = { apiKey = it },
                     label = { Text("网关鉴权 Key") },

@@ -263,6 +263,8 @@ private fun HexField(
     var text by remember(value) { mutableStateOf(value.removePrefix("#").uppercase()) }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
             value = text,
             onValueChange = { input ->
                 val cleaned = input.filter { it.isLetterOrDigit() }.take(6).uppercase()

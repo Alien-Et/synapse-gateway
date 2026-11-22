@@ -204,7 +204,7 @@ fun rememberShimmerProgress(): State<Float> =
 @Composable
 fun Modifier.shimmer(
     progress: State<Float>,
-    shape: Shape = RoundedCornerShape(4.dp),
+    shape: Shape = MaterialTheme.shapes.extraSmall,
     baseColor: Color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
     highlightColor: Color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
 ): Modifier {

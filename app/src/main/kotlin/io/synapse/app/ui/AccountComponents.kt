@@ -63,7 +63,7 @@ fun AccountTitleColumn(
                     Modifier
                 } else {
                     Modifier
-                        .clip(RoundedCornerShape(6.dp))
+                        .clip(MaterialTheme.shapes.extraSmall)
                         .clickable(onClick = onRename)
                         .padding(horizontal = 2.dp, vertical = 1.dp)
                 },
@@ -125,6 +125,8 @@ fun AccountRenameDialog(
         },
     ) {
         OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
             value = name,
             onValueChange = { name = it.take(24) },
             modifier = Modifier.fillMaxWidth(),
@@ -151,9 +153,9 @@ fun MemberLevelBadge(level: String, modifier: Modifier = Modifier) {
     val (bg, fg) = memberBadgeColors(level)
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(50))
+            .clip(MaterialTheme.shapes.extraSmall)
             .background(bg)
-            .border(1.dp, fg.copy(alpha = 0.35f), RoundedCornerShape(50))
+            .border(1.dp, fg.copy(alpha = 0.35f), MaterialTheme.shapes.extraSmall)
             .padding(horizontal = 8.dp, vertical = 2.dp),
     ) {
         Text(

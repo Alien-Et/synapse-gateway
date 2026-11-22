@@ -60,6 +60,8 @@ object RaccoonUi : ProviderUi {
             SectionCard(enterIndex = 0) {
                 SectionLabel("登录")
                 Button(
+            shape = MaterialTheme.shapes.medium,
+
                     onClick = { actions.onWebLogin(id, "") },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -70,6 +72,8 @@ object RaccoonUi : ProviderUi {
                 ) { expanded = !expanded }
                 if (expanded) {
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = raw,
                         onValueChange = { raw = it },
                         modifier = Modifier.fillMaxWidth(),
@@ -78,6 +82,8 @@ object RaccoonUi : ProviderUi {
                         label = { Text("回调链接（含 authorization_code）") },
                     )
                     Button(
+            shape = MaterialTheme.shapes.medium,
+
                         onClick = {
                             actions.onImport(id, raw.trim())
                             raw = ""

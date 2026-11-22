@@ -93,7 +93,9 @@ fun AutoCheckinScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextButton(onClick = { editingSchedule = true }) { Text("修改") }
+                TextButton(
+            shape = MaterialTheme.shapes.medium,
+            onClick = { editingSchedule = true }) { Text("修改") }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Text(
@@ -207,6 +209,8 @@ private fun ScheduleEditDialog(
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = hourText,
                     onValueChange = { hourText = it.filter(Char::isDigit).take(2) },
                     label = { Text("时") },
@@ -215,6 +219,8 @@ private fun ScheduleEditDialog(
                     modifier = Modifier.weight(1f),
                 )
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = minuteText,
                     onValueChange = { minuteText = it.filter(Char::isDigit).take(2) },
                     label = { Text("分") },
@@ -224,6 +230,8 @@ private fun ScheduleEditDialog(
                 )
             }
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = jitterText,
                 onValueChange = { jitterText = it.filter(Char::isDigit).take(3) },
                 label = { Text("抖动（分钟，0 表示整点）") },

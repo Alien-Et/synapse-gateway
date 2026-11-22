@@ -91,6 +91,8 @@ object LoomyUi : ProviderUi {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = ccode,
                         onValueChange = { value ->
                             // 国家码只留数字，最多 4 位（最长的是 +1 区外的三位码）
@@ -102,6 +104,8 @@ object LoomyUi : ProviderUi {
                         label = { Text("国家码") },
                     )
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = phone,
                         onValueChange = { phone = it.filter(Char::isDigit).take(15) },
                         modifier = Modifier.weight(1f),
@@ -111,6 +115,8 @@ object LoomyUi : ProviderUi {
                     )
                 }
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = code,
                     onValueChange = { code = it },
                     modifier = Modifier.fillMaxWidth(),
@@ -120,6 +126,8 @@ object LoomyUi : ProviderUi {
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                         onClick = {
                             // 先开倒计时，按钮立刻有反馈；发送失败再恢复可点
                             countdown = RESEND_SECONDS
@@ -133,6 +141,8 @@ object LoomyUi : ProviderUi {
                         Text(if (countdown > 0) "${countdown} 秒后重发" else "发送验证码")
                     }
                     Button(
+            shape = MaterialTheme.shapes.medium,
+
                         onClick = { actions.onSmsLogin(id, phone.trim(), code.trim(), ccode.trim()) { } },
                         enabled = phone.isNotBlank() && code.isNotBlank(),
                         modifier = Modifier.weight(1f),
@@ -207,6 +217,8 @@ object LoomyUi : ProviderUi {
                     onExpandedChange = { expanded = it },
                 ) {
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = target.displayName,
                         onValueChange = {},
                         readOnly = true,
@@ -232,6 +244,8 @@ object LoomyUi : ProviderUi {
             }
 
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = invite,
                 onValueChange = { invite = it },
                 modifier = Modifier.fillMaxWidth(),
@@ -239,6 +253,8 @@ object LoomyUi : ProviderUi {
                 label = { Text("兑换邀请码") },
             )
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = {
                     val value = invite.trim()
                     actions.onAction(
@@ -256,6 +272,8 @@ object LoomyUi : ProviderUi {
             }
 
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = code,
                 onValueChange = { code = it },
                 modifier = Modifier.fillMaxWidth(),
@@ -263,6 +281,8 @@ object LoomyUi : ProviderUi {
                 label = { Text("兑换码") },
             )
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = {
                     val value = code.trim()
                     actions.onAction(

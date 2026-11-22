@@ -143,7 +143,7 @@ private fun NavItemCell(
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(pill)
             .clickable(
                 onClick = onClick,
@@ -283,7 +283,7 @@ fun AppNavRail(
         Box(
             modifier = Modifier
                 .size(40.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(MaterialTheme.shapes.extraSmall)
                 .clickable {
                     onModeChange(if (expanded) NavRailMode.COLLAPSED else NavRailMode.EXPANDED)
                 },
@@ -315,7 +315,7 @@ fun AppNavRail(
         Box(
             modifier = Modifier
                 .size(40.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(MaterialTheme.shapes.extraSmall)
                 .clickable { onModeChange(NavRailMode.HIDDEN) },
             contentAlignment = Alignment.Center,
         ) {

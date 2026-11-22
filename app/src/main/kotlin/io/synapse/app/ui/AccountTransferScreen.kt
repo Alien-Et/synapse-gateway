@@ -298,6 +298,8 @@ fun AccountTransferScreen(
                     Switch(checked = overwrite, onCheckedChange = { overwrite = it })
                 }
                 Button(
+            shape = MaterialTheme.shapes.medium,
+
                     onClick = {
                         if (importSelection.isEmpty()) {
                             importError = "没有选中任何账号"
@@ -465,6 +467,8 @@ private fun PasswordDialog(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(description, style = MaterialTheme.typography.bodySmall)
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = password,
                 onValueChange = onPasswordChange,
                 label = { Text("口令") },

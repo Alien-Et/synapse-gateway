@@ -142,6 +142,8 @@ object MCloudUi : ProviderUi {
                 )
 
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = phone,
                     onValueChange = { value ->
                         phone = value.filter(Char::isDigit).take(11)
@@ -170,6 +172,8 @@ object MCloudUi : ProviderUi {
                     // （之前是常驻 + 点击提示位数不够，等于让用户先点错一次才知道不能点。）
                     !puzzleSolved && current == null && phone.length == 11 -> {
                         Button(
+            shape = MaterialTheme.shapes.medium,
+
                             onClick = {
                                 loading = true
                                 sendError = ""
@@ -213,6 +217,8 @@ object MCloudUi : ProviderUi {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                             onClick = { captchaDialogVisible = true },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
@@ -253,6 +259,8 @@ object MCloudUi : ProviderUi {
                         )
                     }
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = code,
                         onValueChange = { code = it.filter(Char::isDigit).take(8) },
                         modifier = Modifier.fillMaxWidth(),
@@ -269,6 +277,8 @@ object MCloudUi : ProviderUi {
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                             onClick = {
                                 if (usedWebView) {
                                     // WebView 模式：token 只能由用户现拖出来，退回校验阶段
@@ -298,6 +308,8 @@ object MCloudUi : ProviderUi {
                             )
                         }
                         Button(
+            shape = MaterialTheme.shapes.medium,
+
                             onClick = {
                                 loading = true
                                 sendError = ""

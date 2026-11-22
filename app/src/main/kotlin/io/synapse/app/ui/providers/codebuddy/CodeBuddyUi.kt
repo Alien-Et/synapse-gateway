@@ -110,6 +110,8 @@ object CodeBuddyUi : ProviderUi {
             }
             SectionLabel(if (global) "登录 · 国外 workbuddy.ai" else "登录 · 国内版 copilot.tencent.com")
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = { actions.onDeviceLogin(id, region) },
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -120,6 +122,8 @@ object CodeBuddyUi : ProviderUi {
             ) { expanded = !expanded }
             if (expanded) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = raw,
                     onValueChange = { raw = it },
                     modifier = Modifier.fillMaxWidth(),
@@ -128,6 +132,8 @@ object CodeBuddyUi : ProviderUi {
                     label = { Text("凭证 JSON") },
                 )
                 Button(
+            shape = MaterialTheme.shapes.medium,
+
                     onClick = {
                         actions.onImport(id, raw.trim())
                         raw = ""

@@ -795,6 +795,8 @@ private fun NumberField(
     onChange: (String) -> Unit,
 ) {
     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
         value = value,
         onValueChange = { input ->
             // 整数字段不放行小数点：避免「1.5」这类输入被 toIntOrNull 静默丢弃后落回默认值

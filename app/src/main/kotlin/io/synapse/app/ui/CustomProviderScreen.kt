@@ -128,6 +128,8 @@ fun CustomProviderScreen(
         SectionCard {
             SectionLabel("基本信息")
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = key,
                 onValueChange = { key = it.trim() },
                 label = { Text("模型标签🏷️") },
@@ -139,6 +141,8 @@ fun CustomProviderScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = name,
                 onValueChange = { name = it },
                 label = { Text("显示名称") },
@@ -147,6 +151,8 @@ fun CustomProviderScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = baseUrl,
                 onValueChange = { baseUrl = it.trim() },
                 label = { Text("接口地址") },
@@ -167,6 +173,8 @@ fun CustomProviderScreen(
                 onExpandedChange = { expanded = it },
             ) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = current.label,
                     onValueChange = {},
                     readOnly = true,
@@ -266,6 +274,8 @@ fun CustomProviderScreen(
                 onExpandedChange = { presetExpanded = it },
             ) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = presetLabel,
                     onValueChange = {},
                     readOnly = true,
@@ -295,6 +305,8 @@ fun CustomProviderScreen(
             // 选「自定义」或选了预设后想微调，都能直接改这些字段
             if (balancePreset.isNotEmpty()) {
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = balancePath,
                     onValueChange = { balancePath = it },
                     label = { Text("相对路径（可改）") },
@@ -302,6 +314,8 @@ fun CustomProviderScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = balanceField,
                     onValueChange = { balanceField = it },
                     label = { Text("取值字段（可用逗号列多个）") },
@@ -310,6 +324,8 @@ fun CustomProviderScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = balanceUnit,
                     onValueChange = { balanceUnit = it },
                     label = { Text("单位（可留空）") },
@@ -333,6 +349,8 @@ fun CustomProviderScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = keyInput,
                 // 不 trim 每一击：用户粘贴多行时中间的空行/缩进要能看见，保存时再清
                 onValueChange = { keyInput = it },
@@ -410,6 +428,8 @@ fun CustomProviderScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                 value = headersText,
                 onValueChange = { headersText = it },
                 label = { Text("请求头（一行一条）") },
@@ -436,6 +456,8 @@ fun CustomProviderScreen(
             SectionCard {
                 SectionLabel("余额高级设置")
                 OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                     value = balanceUrl,
                     onValueChange = { balanceUrl = it },
                     label = { Text("完整地址（可选）") },
@@ -448,6 +470,8 @@ fun CustomProviderScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = balanceScale,
                         onValueChange = { balanceScale = it },
                         label = { Text("倍数") },
@@ -456,6 +480,8 @@ fun CustomProviderScreen(
                         modifier = Modifier.weight(1f),
                     )
                     OutlinedTextField(
+            shape = MaterialTheme.shapes.medium,
+
                         value = balanceMethod,
                         onValueChange = { balanceMethod = it.uppercase() },
                         label = { Text("方法") },

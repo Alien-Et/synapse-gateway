@@ -77,6 +77,8 @@ fun TaskCenterScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                     onClick = { viewModel.checkinAll() },
                     enabled = checkinTargets.isNotEmpty(),
                     modifier = Modifier.weight(1f),
@@ -84,6 +86,8 @@ fun TaskCenterScreen(
                     Text("一键签到")
                 }
                 OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                     onClick = { viewModel.runAllTasks() },
                     enabled = taskTargets.isNotEmpty(),
                     modifier = Modifier.weight(1f),
@@ -97,13 +101,17 @@ fun TaskCenterScreen(
             // 留一个「我只想领奖、别替我动」的低风险选项是有意为之。
             // 只有声明了 TASK_AUTO_COMPLETE 的供应商会进这条流程（目前是 WorkBuddy 成长中心）。
             OutlinedButton(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = { viewModel.runAllTaskAutoComplete() },
                 enabled = autoTargets.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("自动推进并领奖")
             }
-            Button(onClick = { viewModel.refreshAllCredits() }, modifier = Modifier.fillMaxWidth()) {
+            Button(
+            shape = MaterialTheme.shapes.medium,
+            onClick = { viewModel.refreshAllCredits() }, modifier = Modifier.fillMaxWidth()) {
                 Text("刷新全部额度")
             }
 

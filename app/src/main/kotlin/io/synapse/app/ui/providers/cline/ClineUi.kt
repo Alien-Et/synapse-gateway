@@ -64,6 +64,8 @@ object ClineUi : ProviderUi {
         SectionCard(enterIndex = 0) {
             SectionLabel("登录")
             Button(
+            shape = MaterialTheme.shapes.medium,
+
                 onClick = { actions.onDeviceLogin(id, "") },
                 modifier = Modifier.fillMaxWidth(),
             ) {
