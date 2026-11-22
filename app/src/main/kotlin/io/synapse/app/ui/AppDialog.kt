@@ -1,6 +1,9 @@
 package io.synapse.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -9,14 +12,15 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -67,14 +71,18 @@ fun AppDialog(
             usePlatformDefaultWidth = false,
         ),
     ) {
-        Surface(
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 6.dp,
+        Box(
             modifier = modifier
                 .fillMaxWidth(0.92f)
                 .widthIn(max = MAX_WIDTH_DP)
-                .heightIn(max = MAX_HEIGHT_DP),
+                .heightIn(max = MAX_HEIGHT_DP)
+                .clip(RoundedCornerShape(26.dp))
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.94f))
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                    RoundedCornerShape(26.dp),
+                ),
         ) {
             Column(modifier = Modifier.padding(horizontal = 22.dp, vertical = 20.dp)) {
                 Text(

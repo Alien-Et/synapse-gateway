@@ -96,6 +96,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.chrisbanes.haze.hazeEffect
 import io.synapse.app.ui.theme.DeepInk
 import io.synapse.app.ui.theme.LocalAppColors
 import io.synapse.app.ui.theme.WarningAmber
@@ -181,6 +182,8 @@ fun HomeScreen(
                 SystemPrompt.toast(message)
             },
             onOpenApiSettings = onOpenApiSettings,
+            onCheckInAll = { viewModel.checkinAll() },
+            onOpenTaskCenter = openTaskCenter,
         )
 
         LiveRoutingTopologyCard(state, Modifier.staggeredAppear(1))
@@ -189,52 +192,7 @@ fun HomeScreen(
 
         TrendCard(state)
 
-        SectionCard(modifier = Modifier.staggeredAppear(4)) {
-            SectionHeader("快捷操作 · ACTIONS")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(MaterialTheme.shapes.medium)
-                        .background(MaterialTheme.colorScheme.onSurface)
-                        .clickable { viewModel.checkinAll() }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Box(Modifier.size(6.dp).clip(CircleShape).background(gold))
-                        Text(
-                            "批量签到",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.surface,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(MaterialTheme.shapes.medium)
-                        .border(1.dp, gold, MaterialTheme.shapes.medium)
-                        .clickable { openTaskCenter() }
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "任务中心",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = goldText,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-        }
+        // 「批量签到 / 任务中心」已并入顶部状态卡的四个小按钮区，不再单占一张卡。
 
         AntigravityQuotaSection(state, viewModel, baseIndex = 5)
     }
@@ -250,6 +208,8 @@ private fun ConsoleCard(
     onRefreshCredits: () -> Unit,
     onCopy: (String, String) -> Unit,
     onOpenApiSettings: () -> Unit,
+    onCheckInAll: () -> Unit,
+    onOpenTaskCenter: () -> Unit,
 ) {
     val gold = LocalAppColors.current.goldStart
     SectionCard(modifier = Modifier.staggeredAppear(0)) {
@@ -306,50 +266,60 @@ private fun ConsoleCard(
             valueTint = if (!lanExposed) MaterialTheme.colorScheme.primary else null,
         )
 
+        // 四个小按钮一行：服务启停 / 刷新额度 / 批量签到 / 任务中心。
+        // 原本「快捷操作」是首页底部一张独立卡，合并进来后少一个区块；
+        // 按钮采用统一的玻璃小胶囊，与整站 UI 语言一致。
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(MaterialTheme.shapes.medium)
-                    .background(MaterialTheme.colorScheme.onSurface)
-                    .clickable { if (state.running) onStop() else onStart() }
-                    .padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Box(Modifier.size(6.dp).clip(CircleShape).background(gold))
-                    Text(
-                        text = if (state.running) "停止网关服务" else "启动网关服务",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.surface,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(MaterialTheme.shapes.medium)
-                    .background(MaterialTheme.colorScheme.surface)
-                    .border(1.dp, MaterialTheme.colorScheme.onSurface, MaterialTheme.shapes.medium)
-                    .clickable(onClick = onRefreshCredits)
-                    .padding(vertical = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    "刷新全部额度",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
+            GlassAction(
+                label = if (state.running) "停止" else "启动",
+                primary = true,
+                modifier = Modifier.weight(1f),
+                onClick = { if (state.running) onStop() else onStart() },
+            )
+            GlassAction("刷额度", modifier = Modifier.weight(1f), onClick = onRefreshCredits)
+            GlassAction("签到", modifier = Modifier.weight(1f), onClick = onCheckInAll)
+            GlassAction("任务", modifier = Modifier.weight(1f), onClick = onOpenTaskCenter)
         }
+    }
+}
+
+/** 玻璃小按钮：统一大圆角胶囊，主按钮淡金底、次按钮灰白描边。 */
+@Composable
+private fun GlassAction(
+    label: String,
+    primary: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val gold = LocalAppColors.current.goldStart
+    val goldText = LocalAppColors.current.goldText
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(9.dp))
+            .background(
+                if (primary) gold.copy(alpha = 0.16f)
+                else MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
+            )
+            .border(
+                1.dp,
+                if (primary) gold.copy(alpha = 0.35f)
+                else MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                RoundedCornerShape(9.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (primary) goldText else MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+        )
     }
 }
 
@@ -988,12 +958,19 @@ private fun TelemetryGrid(state: AppUiState, modifier: Modifier = Modifier) {
 
 @Composable
 private fun Tile(modifier: Modifier, label: String, content: @Composable ColumnScope.() -> Unit) {
+    val hazeState = LocalHazeState.current
+    val tint = LocalAppColors.current.goldStart
+    val shape = RoundedCornerShape(22.dp)
+    val glass = remember(hazeState, tint) {
+        if (hazeState != null) Modifier.hazeEffect(hazeState, style = glassStyle(tint)) else Modifier
+    }
     Column(
         modifier = modifier
             .height(112.dp)
-            .clip(MaterialTheme.shapes.large)
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.large)
+            .then(glass)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f), shape)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {

@@ -47,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.chrisbanes.haze.hazeEffect
 import io.synapse.app.ui.theme.LocalAppColors
 import io.synapse.core.pool.AccountStatus
 
@@ -125,24 +126,29 @@ fun PageScaffold(
     onTitleClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        PageHeader(title, subtitle, leading, actions, onTitleClick)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                // 滚动到顶部/底部时内容与页头、屏幕边缘直接相接，看着像被切了一刀；
-                // 用背景色渐隐过渡（Motion.scrollFade），让长页面有「还能滚」的提示
-                .scrollFade()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-            content = content,
-        )
+    GlassBackdrop(
+        baseColor = MaterialTheme.colorScheme.background,
+        accentColor = LocalAppColors.current.goldStart,
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            PageHeader(title, subtitle, leading, actions, onTitleClick)
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // 滚动到顶部/底部时内容与页头、屏幕边缘直接相接，看着像被切了一刀；
+                    // 用背景色渐隐过渡（Motion.scrollFade），让长页面有「还能滚」的提示
+                    .scrollFade()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                content = content,
+            )
+        }
     }
 }
 
 /**
- * 白底描边卡片：1px 细线 + 圆角，无阴影。
+ * 玻璃卡片：22dp 大圆角 + 真毛玻璃（Haze backdrop-filter）+ 半透明描边。
  *
  * [enterIndex] 非空时卡片带错峰入场动效（第 n 张延迟 40ms·n），用于列表/表单页的首屏。
  * [pressable] 为 true 时整张卡带按压回弹（可点入口专用）：卡片可点却毫无按下反馈时，
@@ -155,14 +161,21 @@ fun SectionCard(
     pressable: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    val hazeState = LocalHazeState.current
+    val shape = RoundedCornerShape(22.dp)
+    val tint = LocalAppColors.current.goldStart
+    val glass = remember(hazeState, tint) {
+        if (hazeState != null) Modifier.hazeEffect(hazeState, style = glassStyle(tint)) else Modifier
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (enterIndex != null) Modifier.staggeredAppear(enterIndex) else Modifier)
             .then(if (pressable) Modifier.pressScale() else Modifier)
-            .clip(MaterialTheme.shapes.large)
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, MaterialTheme.shapes.large)
+            .then(glass)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f), shape)
             .then(modifier),
     ) {
         Column(
@@ -263,15 +276,15 @@ private fun PagerChip(text: String, enabled: Boolean, onClick: () -> Unit) {
     )
 }
 
-/** 「运行中 / 已停止」状态胶囊：白底描边 + 圆点（运行中金色带浅光环）。 */
+/** 「运行中 / 已停止」状态胶囊：玻璃小胶囊 + 圆点（运行中金色带浅光环）。 */
 @Composable
 fun StatusChip(running: Boolean) {
     val gold = LocalAppColors.current.goldStart
     Row(
         modifier = Modifier
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f), CircleShape)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),

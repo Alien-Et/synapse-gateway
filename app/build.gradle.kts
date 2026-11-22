@@ -122,6 +122,10 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+
+    // 真毛玻璃（backdrop-filter）：Haze 1.4.0 是最后一个使用 AndroidX Compose 的版本
+    // （1.5+ 迁到 JetBrains Compose KMP），与本项目 Compose BOM 1.7.x 兼容。
+    implementation("dev.chrisbanes.haze:haze-android:1.4.0")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
